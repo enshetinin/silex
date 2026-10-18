@@ -1,5 +1,6 @@
 //! All SQL lives here. Callers never construct SQL from user input.
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -9,7 +10,7 @@ use directories::ProjectDirs;
 use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::model::{Block, Page};
+use crate::model::{Block, Page, TrashItem};
 
 pub mod backup;
 
@@ -317,13 +318,132 @@ impl Database {
         Ok(())
     }
 
-    pub fn trash_page(&self, id: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE pages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1 AND deleted_at IS NULL",
-            [id],
+    /// Sends a page and all its live subpages to the trash as one branch.
+    /// The branch shares a `deleted_at` that is unique to this operation, so
+    /// restoring brings back exactly what was trashed together. Returns the
+    /// number of pages trashed (0 if the page was not live).
+    pub fn trash_page(&self, id: &str) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        // Strictly later than any existing deleted_at (millisecond resolution),
+        // so two trash operations never merge into one branch.
+        let stamp: String = tx.query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', MAX(
+                 julianday('now'),
+                 COALESCE((SELECT julianday(MAX(deleted_at)) FROM pages), 0) + 1.5 / 86400000.0
+             ))",
+            [],
+            |r| r.get(0),
         )?;
+        let trashed = tx.execute(
+            "WITH RECURSIVE branch(id) AS (
+                 SELECT id FROM pages WHERE id = ?1 AND deleted_at IS NULL
+                 UNION
+                 SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
+                 WHERE p.deleted_at IS NULL
+             )
+             UPDATE pages SET deleted_at = ?2 WHERE id IN (SELECT id FROM branch)",
+            params![id, stamp],
+        )?;
+        tx.commit()?;
+        Ok(trashed)
+    }
+
+    /// Trash entries, newest first: each page the user trashed, with the
+    /// number of subpages that went with it. Pages trashed as part of a
+    /// branch are not listed separately.
+    pub fn list_trash(&self) -> Result<Vec<TrashItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_id, title, deleted_at FROM pages
+             WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, title",
+        )?;
+        let trashed: Vec<(Page, String)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    Page {
+                        id: r.get(0)?,
+                        parent_id: r.get(1)?,
+                        title: r.get(2)?,
+                    },
+                    r.get(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let stamp_of: HashMap<&str, &str> = trashed
+            .iter()
+            .map(|(p, at)| (p.id.as_str(), at.as_str()))
+            .collect();
+        // A page heads its branch unless its parent was trashed in the same operation.
+        let heads_branch = |page: &Page, at: &str| {
+            page.parent_id
+                .as_deref()
+                .and_then(|parent| stamp_of.get(parent))
+                .is_none_or(|parent_at| *parent_at != at)
+        };
+        let mut items: Vec<TrashItem> = trashed
+            .iter()
+            .filter(|(page, at)| heads_branch(page, at))
+            .map(|(page, at)| TrashItem {
+                page: page.clone(),
+                deleted_at: at.clone(),
+                subpages: 0,
+            })
+            .collect();
+        for item in &mut items {
+            let branch: Vec<Page> = trashed
+                .iter()
+                .filter(|(_, at)| *at == item.deleted_at)
+                .map(|(p, _)| p.clone())
+                .collect();
+            item.subpages = crate::model::descendants(&branch, &item.page.id).len();
+        }
+        Ok(items)
+    }
+
+    /// Restores a trashed page together with the subpages trashed with it.
+    /// If its parent is no longer live, the page comes back at the root.
+    pub fn restore_page(&mut self, id: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let (parent, stamp): (Option<String>, String) = tx
+            .query_row(
+                "SELECT parent_id, deleted_at FROM pages WHERE id = ?1 AND deleted_at IS NOT NULL",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .context("La página no está en la papelera")?;
+        tx.execute(
+            "WITH RECURSIVE branch(id) AS (
+                 SELECT ?1
+                 UNION
+                 SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
+                 WHERE p.deleted_at = ?2
+             )
+             UPDATE pages SET deleted_at = NULL WHERE id IN (SELECT id FROM branch)",
+            params![id, stamp],
+        )?;
+        let parent_is_live = match &parent {
+            Some(parent) => tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND deleted_at IS NULL)",
+                [parent],
+                |r| r.get(0),
+            )?,
+            None => true,
+        };
+        if !parent_is_live {
+            tx.execute(
+                "UPDATE pages SET parent_id = NULL,
+                     sort_order = (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages
+                                   WHERE parent_id IS NULL AND id <> ?1)
+                 WHERE id = ?1",
+                [id],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
+    }
+
+    pub fn trash_count(&self) -> Result<usize> {
+        Ok(self.list_trash()?.len())
     }
 
     /// Escape arbitrary input into quoted alphanumeric tokens for safe FTS queries.

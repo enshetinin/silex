@@ -7,7 +7,7 @@ use silex_desktop::{
         Database, Shift,
         backup::{self, BackupJob},
     },
-    model::{Block, Page, TreeRow, ancestors, build_tree, descendants},
+    model::{Block, Page, TrashItem, TreeRow, ancestors, build_tree, descendants},
     save_state::{SaveState, SaveStatus},
 };
 
@@ -18,6 +18,8 @@ pub struct SilexApp {
     tree: Vec<TreeRow>,
     /// Pages whose children are shown; kept for the session only.
     expanded: HashSet<String>,
+    trash_count: usize,
+    trash_dialog: Option<TrashDialog>,
     selected: Option<String>,
     title: String,
     blocks: Vec<Block>,
@@ -39,6 +41,11 @@ pub struct SilexApp {
     doc_generation: u64,
 }
 
+struct TrashDialog {
+    items: Vec<TrashItem>,
+    error: Option<String>,
+}
+
 /// Backup picker; restoring needs an explicit second click on a selected copy.
 struct RestoreDialog {
     backups: Vec<PathBuf>,
@@ -58,6 +65,8 @@ impl SilexApp {
             pages,
             tree: Vec::new(),
             expanded: HashSet::new(),
+            trash_count: 0,
+            trash_dialog: None,
             selected: None,
             title: String::new(),
             blocks: Vec::new(),
@@ -74,6 +83,7 @@ impl SilexApp {
             doc_generation: 0,
         };
         app.backup_label = app.describe_last_backup();
+        app.trash_count = app.db.trash_count()?;
         app.rebuild_tree();
         if let Some(row) = app.tree.first() {
             app.open_page(row.page.id.clone())?;
@@ -97,8 +107,100 @@ impl SilexApp {
 
     fn reload_pages(&mut self) -> Result<()> {
         self.pages = self.db.list_pages()?;
+        self.trash_count = self.db.trash_count()?;
         self.rebuild_tree();
         Ok(())
+    }
+
+    /// Opens the first page in the tree, or shows the empty state.
+    fn open_first_page(&mut self) -> Result<()> {
+        match self.tree.first().map(|r| r.page.id.clone()) {
+            Some(id) => self.open_page(id),
+            None => {
+                self.selected = None;
+                self.title.clear();
+                self.blocks.clear();
+                Ok(())
+            }
+        }
+    }
+
+    fn trash_page(&mut self, id: &str) -> Result<()> {
+        self.save_now()?;
+        let title = display_title(&self.title).to_owned();
+        let trashed = self.db.trash_page(id)?;
+        self.reload_pages()?;
+        self.open_first_page()?;
+        self.notice = Some(match trashed.saturating_sub(1) {
+            0 => format!("«{title}» se movió a la papelera."),
+            n => format!("«{title}» y {n} subpágina(s) se movieron a la papelera."),
+        });
+        Ok(())
+    }
+
+    fn open_trash_dialog(&mut self) {
+        match self.db.list_trash() {
+            Ok(items) => self.trash_dialog = Some(TrashDialog { items, error: None }),
+            Err(err) => self.notice = Some(format!("No se puede abrir la papelera: {err:#}")),
+        }
+    }
+
+    fn restore_from_trash(&mut self, id: &str) -> Result<()> {
+        self.save_now()?;
+        self.db.restore_page(id)?;
+        self.reload_pages()?;
+        self.open_page(id.to_owned())
+    }
+
+    fn trash_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.trash_dialog.as_ref() else {
+            return;
+        };
+        let mut restore = None;
+        let mut close = false;
+        let response = egui::Modal::new(egui::Id::unique("silex_trash")).show(ctx, |ui| {
+            ui.heading("Papelera");
+            if dialog.items.is_empty() {
+                ui.label("La papelera está vacía.");
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("silex_trash_list")
+                .max_height(300.0)
+                .show(ui, |ui| {
+                    for item in &dialog.items {
+                        ui.horizontal(|ui| {
+                            ui.label(display_title(&item.page.title));
+                            if item.subpages > 0 {
+                                ui.weak(format!("+{} subpágina(s)", item.subpages));
+                            }
+                            ui.weak(describe_timestamp(&item.deleted_at));
+                            if ui.button("Restaurar").clicked() {
+                                restore = Some(item.page.id.clone());
+                            }
+                        });
+                    }
+                });
+            if let Some(error) = &dialog.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            ui.add_space(8.0);
+            close = ui.button("Cerrar").clicked();
+        });
+        if close || (restore.is_none() && response.should_close()) {
+            self.trash_dialog = None;
+            return;
+        }
+        let Some(id) = restore else {
+            return;
+        };
+        match self.restore_from_trash(&id) {
+            Ok(()) => self.open_trash_dialog(),
+            Err(err) => {
+                if let Some(dialog) = self.trash_dialog.as_mut() {
+                    dialog.error = Some(format!("{err:#}"));
+                }
+            }
+        }
     }
 
     fn rebuild_tree(&mut self) {
@@ -200,6 +302,7 @@ impl SilexApp {
         let can_up = index.is_some_and(|i| i > 0);
         let can_down = index.is_some_and(|i| i + 1 < siblings.len());
         let mut shift = None;
+        let mut trash = false;
         ui.horizontal(|ui| {
             subpage = ui.button("+ Subpágina").clicked();
             if ui
@@ -237,9 +340,20 @@ impl SilexApp {
                     }
                 });
         });
+        ui.horizontal(|ui| {
+            trash = ui
+                .button("Enviar a la papelera")
+                .on_hover_text("Se mueve con sus subpáginas; se puede restaurar")
+                .clicked();
+        });
         if subpage {
             let result = self.create_subpage(page_id);
             self.report(result);
+        }
+        if trash {
+            let result = self.trash_page(page_id);
+            self.report(result);
+            return;
         }
         if let Some(shift) = shift {
             let result = self.reorder_page(page_id, shift);
@@ -488,6 +602,12 @@ impl SilexApp {
             })();
             self.report(result);
         }
+        if ui
+            .button(format!("Papelera ({})", self.trash_count))
+            .clicked()
+        {
+            self.open_trash_dialog();
+        }
         ui.separator();
         ui.small(&self.backup_label);
         let can_backup = self.backup_job.is_none() && self.db.path().is_some();
@@ -546,6 +666,10 @@ impl SilexApp {
         });
         self.notice_bar(ui);
         self.page_actions(ui, &page_id);
+        if self.selected.as_deref() != Some(page_id.as_str()) {
+            // The page was trashed (or another opened) this frame.
+            return;
+        }
         ui.separator();
         let changed = ui
             .add(
@@ -724,6 +848,7 @@ impl eframe::App for SilexApp {
         self.handle_close_request(&ctx);
         self.close_dialog(&ctx);
         self.restore_dialog(&ctx);
+        self.trash_dialog(&ctx);
         // The UI may be idle between edits; wake up for the next autosave or retry.
         if let Some(at) = self.save.next_attempt() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
@@ -771,6 +896,14 @@ fn block_field(ui: &mut egui::Ui, generation: u64, block: &mut Block) -> bool {
         changed
     })
     .inner
+}
+
+/// `2026-10-18T09:30:05.123Z` → `2026-10-18 09:30 UTC`.
+fn describe_timestamp(at: &str) -> String {
+    match (at.get(0..10), at.get(11..16)) {
+        (Some(day), Some(time)) => format!("{day} {time} UTC"),
+        _ => at.to_owned(),
+    }
 }
 
 fn display_title(title: &str) -> &str {
@@ -884,6 +1017,47 @@ mod tests {
                 .collect();
         }
         assert!(warnings.is_empty(), "egui ID clashes: {warnings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn trash_and_restore_from_the_app() -> anyhow::Result<()> {
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let first = app.selected.clone().expect("first page is open");
+        app.create_subpage(&first)?;
+        let child = app.selected.clone().expect("subpage is open");
+        app.db.create_page("Otra", None)?;
+        app.reload_pages()?;
+        app.open_page(first.clone())?;
+
+        // Unsaved edits are saved before trashing.
+        app.title = "Primera editada".into();
+        app.mark_dirty();
+        app.trash_page(&first)?;
+        assert_eq!(app.trash_count, 1);
+        assert!(app.pages.iter().all(|p| p.id != first && p.id != child));
+        assert_ne!(app.selected.as_deref(), Some(first.as_str()));
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("1 subpágina"))
+        );
+
+        app.restore_from_trash(&first)?;
+        assert_eq!(app.trash_count, 0);
+        assert_eq!(app.selected.as_deref(), Some(first.as_str()));
+        assert_eq!(app.title, "Primera editada");
+        assert!(app.pages.iter().any(|p| p.id == child));
+        Ok(())
+    }
+
+    #[test]
+    fn trashing_the_last_page_shows_the_empty_state() -> anyhow::Result<()> {
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let only = app.selected.clone().expect("first page is open");
+        app.trash_page(&only)?;
+        assert_eq!(app.selected, None);
+        assert!(app.tree.is_empty());
         Ok(())
     }
 

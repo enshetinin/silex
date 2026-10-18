@@ -122,3 +122,13 @@ pub fn ancestors(pages: &[Page], id: &str) -> Vec<String> {
     }
     chain
 }
+
+/// A page shown in the trash: the page the user trashed, with the subpages
+/// that went to the trash together with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrashItem {
+    pub page: Page,
+    /// UTC ISO-8601 timestamp shared by the whole trashed branch.
+    pub deleted_at: String,
+    pub subpages: usize,
+}
