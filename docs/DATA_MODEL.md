@@ -22,12 +22,18 @@
 - `pages.favorite_at TEXT NULL`: `NULL` significa que no es favorita; la fecha ordena la lista de favoritos (de más antigua a más reciente). Índice parcial `pages_favorite_idx`.
 - Las favoritas en la papelera se ocultan y vuelven al restaurar la página.
 
+## Versión 3 — tipos de bloque y sangría (`0003_block_kinds.sql`, ADR 0003)
+- `blocks.kind` ∈ `paragraph`, `heading_1`, `heading_2`, `heading_3`, `todo`, `bulleted`, `numbered`, `quote`, `code`. Los `heading` de v1/v2 pasan a `heading_1`. En Rust es `BlockKind`; un nombre desconocido al leer es un error, no un pánico.
+- `blocks.indent INTEGER NOT NULL DEFAULT 0 CHECK (indent BETWEEN 0 AND 6)`: lista plana con sangría, sin árbol de bloques.
+- La tabla se reconstruye (SQLite no permite cambiar un `CHECK`): copia los `rowid` explícitamente, recrea índice y triggers FTS y hace `rebuild` de `block_search`. Hay tests con un hueco de `rowid` y un fallo a mitad que deshace todo.
+- La numeración de listas se calcula al pintar (`list_numbers`), no se guarda.
+- `save_document` sincroniza la lista completa de la página (inserta, actualiza, borra, `position` = índice) en una transacción y solo toca filas cambiadas, para no reindexar FTS de más.
+
 ## Evolución
 - Las migraciones publicadas (`0001`, `0002`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).
 - Antes de actualizar una base existente en disco se crea una copia verificada con el esquema antiguo. Si esa copia falla, no se migra.
 - Las copias de esquemas anteriores son válidas: la verificación acepta `1..=LATEST` y la restauración actualiza la base después de restaurar.
-- Desacoplar el `BlockKind` de los nombres SQL con enum tipado cuando crezca el editor.
 - Evolucionar a `document_operations` para undo/redo e historial si existen requisitos concretos; no convertir el editor en CRDT prematuramente.
 
 ## Riesgos conocidos del starter

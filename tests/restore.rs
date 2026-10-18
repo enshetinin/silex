@@ -2,6 +2,7 @@ use std::{fs, path::PathBuf};
 
 use rusqlite::Connection;
 use silex_desktop::db::{Database, backup};
+use silex_desktop::model::BlockKind;
 
 struct TempDir(PathBuf);
 
@@ -40,7 +41,7 @@ fn scenario() -> anyhow::Result<Scenario> {
     let tmp = TempDir::new()?;
     let mut db = Database::open(tmp.db())?;
     let page_id = db.create_page("Presupuesto", None)?;
-    db.add_block(&page_id, "paragraph")?;
+    db.add_block(&page_id, BlockKind::Paragraph)?;
     let mut blocks = db.list_blocks(&page_id)?;
     blocks[0].content = "versión uno aprobada".into();
     db.save_document(&page_id, "Presupuesto", &blocks)?;
@@ -135,7 +136,10 @@ fn missing_backup_is_rejected() -> anyhow::Result<()> {
 fn restored_database_keeps_pragmas_and_survives_reopen() -> anyhow::Result<()> {
     let mut s = scenario()?;
     s.db.restore_from_backup(&s.v1_backup)?;
-    assert!(s.db.add_block("pagina-inexistente", "paragraph").is_err());
+    assert!(
+        s.db.add_block("pagina-inexistente", BlockKind::Paragraph)
+            .is_err()
+    );
 
     // Writing after restore works and persists.
     let mut blocks = s.db.list_blocks(&s.page_id)?;

@@ -7,7 +7,10 @@ use silex_desktop::{
         Database, Shift,
         backup::{self, BackupJob},
     },
-    model::{Block, Page, TrashItem, TreeRow, ancestors, build_tree, descendants, filter_tree},
+    model::{
+        Block, BlockKind, Page, TrashItem, TreeRow, ancestors, build_tree, descendants,
+        filter_tree, list_numbers,
+    },
     save_state::{SaveState, SaveStatus},
 };
 
@@ -1073,9 +1076,10 @@ impl SilexApp {
         egui::ScrollArea::vertical()
             .id_salt("silex_editor_blocks")
             .show(ui, |ui| {
-                for block in &mut self.blocks {
-                    modified |= block_field(ui, self.doc_generation, block);
-                    ui.add_space(8.0);
+                let numbers = list_numbers(&self.blocks);
+                for (block, number) in self.blocks.iter_mut().zip(numbers) {
+                    modified |= block_field(ui, self.doc_generation, block, number);
+                    ui.add_space(6.0);
                 }
             });
         if modified {
@@ -1084,9 +1088,9 @@ impl SilexApp {
         ui.separator();
         ui.horizontal(|ui| {
             for (label, kind) in [
-                ("+ Texto", "paragraph"),
-                ("+ Título", "heading"),
-                ("+ Tarea", "todo"),
+                ("+ Texto", BlockKind::Paragraph),
+                ("+ Título", BlockKind::Heading1),
+                ("+ Tarea", BlockKind::Todo),
             ] {
                 if ui.button(label).clicked() {
                     let result = (|| -> Result<()> {
@@ -1273,23 +1277,79 @@ fn field_id(generation: u64, kind: &str, id: &str) -> egui::Id {
     egui::Id::unique(("silex-field", generation, kind, id))
 }
 
-/// Renders one block; returns true when its content or checkbox changed.
-fn block_field(ui: &mut egui::Ui, generation: u64, block: &mut Block) -> bool {
+/// Horizontal space per indent level.
+const INDENT_WIDTH: f32 = 24.0;
+
+/// Renders one block: type selector, indent, marker (checkbox, bullet,
+/// number or quote bar) and its text field. `number` is the list number for
+/// numbered blocks. Returns true when anything in the block changed.
+fn block_field(
+    ui: &mut egui::Ui,
+    generation: u64,
+    block: &mut Block,
+    number: Option<usize>,
+) -> bool {
     let id = field_id(generation, "block", &block.id);
     ui.horizontal(|ui| {
-        let mut changed = false;
-        if block.is_todo() {
-            changed |= ui.checkbox(&mut block.checked, "").changed();
+        let mut changed = kind_selector(ui, block);
+        ui.add_space(f32::from(block.indent) * INDENT_WIDTH);
+        match block.kind {
+            BlockKind::Todo => changed |= ui.checkbox(&mut block.checked, "").changed(),
+            BlockKind::Bulleted => {
+                ui.label("•");
+            }
+            BlockKind::Numbered => {
+                ui.label(format!("{}.", number.unwrap_or(1)));
+            }
+            BlockKind::Quote => {
+                let (bar, _) = ui.allocate_exact_size(egui::vec2(3.0, 20.0), egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(bar, 1.0, ui.visuals().weak_text_color());
+            }
+            _ => {}
         }
-        let edit = if block.kind == "heading" {
-            TextEdit::singleline(&mut block.content).font(egui::TextStyle::Heading)
-        } else {
-            TextEdit::multiline(&mut block.content).desired_rows(2)
+        let edit = match block.kind {
+            BlockKind::Heading1 | BlockKind::Heading2 | BlockKind::Heading3 => {
+                TextEdit::singleline(&mut block.content)
+                    .font(egui::FontId::proportional(heading_size(block.kind)))
+            }
+            BlockKind::Code => TextEdit::multiline(&mut block.content)
+                .code_editor()
+                .desired_rows(1),
+            _ => TextEdit::multiline(&mut block.content).desired_rows(1),
         };
         changed |= ui.add(edit.id(id).desired_width(f32::INFINITY)).changed();
         changed
     })
     .inner
+}
+
+fn heading_size(kind: BlockKind) -> f32 {
+    match kind {
+        BlockKind::Heading1 => 24.0,
+        BlockKind::Heading2 => 20.0,
+        _ => 16.0,
+    }
+}
+
+/// Small type menu in front of each block; returns true if the type changed.
+fn kind_selector(ui: &mut egui::Ui, block: &mut Block) -> bool {
+    let before = block.kind;
+    egui::ComboBox::from_id_salt(("silex-kind", &block.id))
+        .width(110.0)
+        .selected_text(block.kind.label())
+        .show_ui(ui, |ui| {
+            for kind in BlockKind::ALL {
+                ui.selectable_value(&mut block.kind, kind, kind.label());
+            }
+        });
+    if block.kind == before {
+        return false;
+    }
+    if block.kind != BlockKind::Todo {
+        block.checked = false;
+    }
+    true
 }
 
 fn search_id() -> egui::Id {
@@ -1329,10 +1389,11 @@ mod tests {
         Block {
             id: id.into(),
             page_id: "p".into(),
-            kind: "paragraph".into(),
+            kind: BlockKind::Paragraph,
             content: String::new(),
             checked: false,
             position: 0,
+            indent: 0,
         }
     }
 
@@ -1355,7 +1416,7 @@ mod tests {
                 ui.memory_mut(|m| m.request_focus(id));
             }
             for block in blocks.iter_mut() {
-                changed |= block_field(ui, 0, block);
+                changed |= block_field(ui, 0, block, None);
             }
         });
         // Headless: nothing renders the font texture, so drop it explicitly.
@@ -1395,7 +1456,7 @@ mod tests {
     fn main_layout_has_no_id_clashes() -> anyhow::Result<()> {
         let mut app = SilexApp::new(Database::open_in_memory()?)?;
         let page = app.selected.clone().expect("first page is open");
-        for kind in ["heading", "paragraph", "todo"] {
+        for kind in BlockKind::ALL {
             app.db.add_block(&page, kind)?;
         }
         app.blocks = app.db.list_blocks(&page)?;
@@ -1624,7 +1685,7 @@ mod tests {
         let recetas = app.db.create_page("Recetas", None)?;
         app.db.create_page("Pan de centeno", Some(&recetas))?;
         let notas = app.db.create_page("Notas", None)?;
-        let block = app.db.add_block(&notas, "paragraph")?;
+        let block = app.db.add_block(&notas, BlockKind::Paragraph)?;
         let mut blocks = app.db.list_blocks(&notas)?;
         blocks[0].content = "comprar pan".into();
         assert_eq!(blocks[0].id, block);

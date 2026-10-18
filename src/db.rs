@@ -1,6 +1,6 @@
 //! All SQL lives here. Callers never construct SQL from user input.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -10,7 +10,7 @@ use directories::ProjectDirs;
 use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::model::{Block, Page, TrashItem};
+use crate::model::{Block, BlockKind, MAX_INDENT, Page, TrashItem};
 
 pub mod backup;
 
@@ -18,6 +18,7 @@ pub mod backup;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("db/migrations/0001_init.sql")),
     (2, include_str!("db/migrations/0002_favorites.sql")),
+    (3, include_str!("db/migrations/0003_block_kinds.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -343,34 +344,47 @@ impl Database {
 
     pub fn list_blocks(&self, page_id: &str) -> Result<Vec<Block>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, page_id, kind, content, checked, position
+            "SELECT id, page_id, kind, content, checked, position, indent
              FROM blocks WHERE page_id = ?1 ORDER BY position, rowid",
         )?;
-        let rows = stmt.query_map([page_id], |r| {
-            Ok(Block {
-                id: r.get(0)?,
-                page_id: r.get(1)?,
-                kind: r.get(2)?,
-                content: r.get(3)?,
-                checked: r.get(4)?,
-                position: r.get(5)?,
-            })
-        })?;
+        let rows = stmt.query_map([page_id], read_block)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn add_block(&self, page_id: &str, kind: &str) -> Result<String> {
+    pub fn add_block(&self, page_id: &str, kind: BlockKind) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO blocks (id, page_id, kind, position)
              VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(position), -1) + 1 FROM blocks WHERE page_id = ?2))",
-            params![id, page_id, kind],
+            params![id, page_id, kind.as_str()],
         )?;
         Ok(id)
     }
 
-    /// Persist title and current blocks together; IDs always come from the loaded document.
+    /// Persists the title and the page's whole block list in one transaction:
+    /// new blocks are inserted, changed ones updated, missing ones deleted and
+    /// `position` set to the list order. Duplicate ids, blocks of another
+    /// page or invalid data abort the save and leave the page untouched.
     pub fn save_document(&mut self, page_id: &str, title: &str, blocks: &[Block]) -> Result<()> {
+        let mut seen = HashSet::new();
+        for block in blocks {
+            ensure!(
+                seen.insert(block.id.as_str()),
+                "Bloque repetido: {}",
+                block.id
+            );
+            ensure!(
+                block.page_id == page_id,
+                "El bloque {} pertenece a otra página",
+                block.id
+            );
+            ensure!(
+                block.indent <= MAX_INDENT,
+                "Sangría no válida en el bloque {}",
+                block.id
+            );
+        }
+
         let tx = self.conn.transaction()?;
         let affected = tx.execute(
             "UPDATE pages SET title = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -380,15 +394,60 @@ impl Database {
         if affected != 1 {
             bail!("La página ya no existe o está en la papelera");
         }
-        for block in blocks {
-            let affected = tx.execute(
-                "UPDATE blocks SET content = ?3, checked = ?4,
-                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                 WHERE id = ?1 AND page_id = ?2",
-                params![block.id, page_id, block.content, block.checked],
+        let stored: HashMap<String, Block> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, page_id, kind, content, checked, position, indent
+                 FROM blocks WHERE page_id = ?1",
             )?;
-            if affected != 1 {
-                bail!("Bloque ausente: {}", block.id);
+            let rows = stmt.query_map([page_id], read_block)?;
+            rows.map(|b| b.map(|b| (b.id.clone(), b)))
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for id in stored.keys().filter(|id| !seen.contains(id.as_str())) {
+            tx.execute("DELETE FROM blocks WHERE id = ?1", [id])?;
+        }
+        for (index, block) in blocks.iter().enumerate() {
+            let position = index as i64;
+            match stored.get(&block.id) {
+                // Unchanged rows are skipped so FTS is only touched when needed.
+                Some(old)
+                    if old.kind == block.kind
+                        && old.content == block.content
+                        && old.checked == block.checked
+                        && old.indent == block.indent
+                        && old.position == position => {}
+                Some(_) => {
+                    tx.execute(
+                        "UPDATE blocks SET kind = ?2, content = ?3, checked = ?4, position = ?5,
+                             indent = ?6, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                         WHERE id = ?1",
+                        params![
+                            block.id,
+                            block.kind.as_str(),
+                            block.content,
+                            block.checked,
+                            position,
+                            block.indent
+                        ],
+                    )?;
+                }
+                // An id that exists in another page fails on the primary key.
+                None => {
+                    tx.execute(
+                        "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            block.id,
+                            page_id,
+                            block.kind.as_str(),
+                            block.content,
+                            block.checked,
+                            position,
+                            block.indent
+                        ],
+                    )
+                    .with_context(|| format!("No se pudo guardar el bloque {}", block.id))?;
+                }
             }
         }
         tx.commit()?;
@@ -559,4 +618,26 @@ impl Database {
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+/// Maps a `blocks` row (id, page_id, kind, content, checked, position, indent).
+/// An unknown kind is a conversion error, not a panic.
+fn read_block(r: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
+    let kind: String = r.get(2)?;
+    let kind = BlockKind::parse(&kind).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Text,
+            format!("tipo de bloque desconocido: {kind}").into(),
+        )
+    })?;
+    Ok(Block {
+        id: r.get(0)?,
+        page_id: r.get(1)?,
+        kind,
+        content: r.get(3)?,
+        checked: r.get(4)?,
+        position: r.get(5)?,
+        indent: r.get(6)?,
+    })
 }

@@ -1,5 +1,6 @@
 use rusqlite::Connection;
 use silex_desktop::db::Database;
+use silex_desktop::model::BlockKind;
 
 /// Notas ─ Viaje ─ Islandia ; Trabajo
 fn tree(db: &Database) -> anyhow::Result<[String; 4]> {
@@ -26,7 +27,7 @@ fn trash_summary(db: &Database) -> anyhow::Result<Vec<(String, usize)>> {
 fn trashing_a_page_takes_its_whole_branch() -> anyhow::Result<()> {
     let db = Database::open_in_memory()?;
     let [notas, viaje, _, _] = tree(&db)?;
-    db.add_block(&viaje, "paragraph")?;
+    db.add_block(&viaje, BlockKind::Paragraph)?;
 
     assert_eq!(db.trash_page(&notas)?, 3);
     assert_eq!(live_titles(&db)?, ["Trabajo"]);

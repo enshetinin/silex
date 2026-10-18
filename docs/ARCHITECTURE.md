@@ -53,3 +53,4 @@ Diseño editorial, navegación lateral, área central legible, estados de carga/
 Cada decisión irreversible (formato de documento, sincronización, cifrado, editor, arquitectura de concurrencia) tiene su propia `docs/decisions/NNNN-*.md`: problema, alternativas, decisión, consecuencias, migración.
 - `0001-native-rust.md`: egui/eframe + SQLite.
 - `0002-undo-strategy.md`: deshacer de texto por campo con ids estables (Hito 1); deshacer semántico en el Hito 3.
+- `0003-block-model.md`: tipos de bloque ampliados y lista plana con sangría.

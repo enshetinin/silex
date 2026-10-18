@@ -27,7 +27,7 @@
 
 ## Hito 3 — editor tipo Notion (primer valor diferencial)
 - [ ] Comandos de edición por bloque: Enter/Backspace/Tab/Shift-Tab.
-- [ ] Más tipos de bloque: H1/2/3, listas, cita y código.
+- [ ] Más tipos de bloque: H1/2/3, listas, cita y código. *(H3.1 implementada: migración 0003, `BlockKind`, sangría guardada, guardado por sincronización completa y selector de tipo por bloque; tests verdes y actualización real v1/v2→v3 en macOS; verificación manual pendiente.)*
 - [ ] Menú `/`, teclado y selección de bloques.
 - [ ] Reordenación y borrado de bloques; undo/redo semánticos.
 - [ ] Pruebas de cursor/foco, copy-paste y Unicode/IME.

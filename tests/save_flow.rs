@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use silex_desktop::db::Database;
+use silex_desktop::model::BlockKind;
 use silex_desktop::save_state::{SaveState, SaveStatus};
 
 struct TempDb(PathBuf);
@@ -26,7 +27,7 @@ fn save_to_page_trashed_elsewhere_fails_and_keeps_disk_and_memory() -> anyhow::R
     let tmp = TempDb::new();
     let mut db = Database::open(&tmp.0)?;
     let page_id = db.create_page("Informe", None)?;
-    db.add_block(&page_id, "paragraph")?;
+    db.add_block(&page_id, BlockKind::Paragraph)?;
     let mut blocks = db.list_blocks(&page_id)?;
     blocks[0].content = "versión guardada".into();
     db.save_document(&page_id, "Informe", &blocks)?;
@@ -63,7 +64,7 @@ fn retry_after_failed_save_persists_changes() -> anyhow::Result<()> {
     let page_id = {
         let mut db = Database::open(&tmp.0)?;
         let page_id = db.create_page("Notas", None)?;
-        db.add_block(&page_id, "todo")?;
+        db.add_block(&page_id, BlockKind::Todo)?;
         let mut blocks = db.list_blocks(&page_id)?;
         let mut state = SaveState::default();
 
@@ -71,14 +72,12 @@ fn retry_after_failed_save_persists_changes() -> anyhow::Result<()> {
         blocks[0].checked = true;
         state.mark_dirty(Instant::now());
 
-        // First attempt fails (a stale block makes the transaction roll back).
+        // First attempt fails (a repeated block makes the transaction roll back).
         let mut stale = blocks.clone();
-        let mut ghost = stale[0].clone();
-        ghost.id = "bloque-borrado".into();
-        stale.push(ghost);
+        stale.push(stale[0].clone());
         let err = db
             .save_document(&page_id, "Notas", &stale)
-            .expect_err("stale block must fail");
+            .expect_err("repeated block must fail");
         state.record_failure(Instant::now(), format!("{err:#}"));
         assert!(!state.can_close());
 

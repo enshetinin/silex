@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use rusqlite::Connection;
 use silex_desktop::db::Database;
+use silex_desktop::model::BlockKind;
 
 /// Temporary on-disk database; removes the file and its WAL/SHM even if the test fails.
 struct TempDb(PathBuf);
@@ -29,7 +30,7 @@ impl Drop for TempDb {
 fn pages_and_blocks_persist_and_are_searchable() -> anyhow::Result<()> {
     let mut db = Database::open_in_memory()?;
     let page_id = db.create_page("Proyecto Ártico", None)?;
-    let block_id = db.add_block(&page_id, "paragraph")?;
+    let block_id = db.add_block(&page_id, BlockKind::Paragraph)?;
     let mut blocks = db.list_blocks(&page_id)?;
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].id, block_id);
@@ -61,7 +62,10 @@ fn trash_hides_page_from_navigation_and_search() -> anyhow::Result<()> {
 #[test]
 fn foreign_keys_reject_orphan_blocks() -> anyhow::Result<()> {
     let db = Database::open_in_memory()?;
-    assert!(db.add_block("pagina-inexistente", "paragraph").is_err());
+    assert!(
+        db.add_block("pagina-inexistente", BlockKind::Paragraph)
+            .is_err()
+    );
     Ok(())
 }
 
@@ -83,12 +87,13 @@ fn document_roundtrip_survives_reopen() -> anyhow::Result<()> {
     let page_id = {
         let mut db = Database::open(tmp.path())?;
         let page_id = db.create_page("Borrador", None)?;
-        for kind in ["heading", "paragraph", "todo"] {
+        for kind in [BlockKind::Heading1, BlockKind::Paragraph, BlockKind::Todo] {
             db.add_block(&page_id, kind)?;
         }
         let mut blocks = db.list_blocks(&page_id)?;
         blocks[0].content = "Título 🚀".into();
         blocks[1].content = "Línea uno\nLínea dos — ñandú 日本語".into();
+        blocks[1].indent = 2;
         blocks[2].content = "Comprar café".into();
         blocks[2].checked = true;
         db.save_document(&page_id, "Notas de octubre ✨", &blocks)?;
@@ -101,36 +106,104 @@ fn document_roundtrip_survives_reopen() -> anyhow::Result<()> {
     let blocks = db.list_blocks(&page_id)?;
     let summary: Vec<_> = blocks
         .iter()
-        .map(|b| (b.kind.as_str(), b.content.as_str(), b.checked, b.position))
+        .map(|b| {
+            (
+                b.kind.as_str(),
+                b.content.as_str(),
+                b.checked,
+                b.position,
+                b.indent,
+            )
+        })
         .collect();
     assert_eq!(
         summary,
         vec![
-            ("heading", "Título 🚀", false, 0),
-            ("paragraph", "Línea uno\nLínea dos — ñandú 日本語", false, 1),
-            ("todo", "Comprar café", true, 2),
+            ("heading_1", "Título 🚀", false, 0, 0),
+            (
+                "paragraph",
+                "Línea uno\nLínea dos — ñandú 日本語",
+                false,
+                1,
+                2
+            ),
+            ("todo", "Comprar café", true, 2, 0),
         ]
     );
     Ok(())
 }
 
 #[test]
-fn failed_save_rolls_back_title() -> anyhow::Result<()> {
+fn failed_save_rolls_back_everything() -> anyhow::Result<()> {
     let mut db = Database::open_in_memory()?;
     let page_id = db.create_page("Original", None)?;
-    db.add_block(&page_id, "paragraph")?;
-    let mut blocks = db.list_blocks(&page_id)?;
-    blocks[0].content = "no debe guardarse".into();
-    let mut ghost = blocks[0].clone();
-    ghost.id = "bloque-inexistente".into();
-    blocks.push(ghost);
+    let other_page = db.create_page("Otra", None)?;
+    let foreign_id = db.add_block(&other_page, BlockKind::Paragraph)?;
+    db.add_block(&page_id, BlockKind::Paragraph)?;
+    db.add_block(&page_id, BlockKind::Todo)?;
+    let stored = db.list_blocks(&page_id)?;
 
-    assert!(db.save_document(&page_id, "Cambiado", &blocks).is_err());
+    // A valid-looking edit: change text, drop the second block, add a new one…
+    let mut edited = vec![stored[0].clone()];
+    edited[0].content = "no debe guardarse".into();
+    let mut new_block = stored[0].clone();
+    new_block.id = "nuevo".into();
+    edited.push(new_block);
+
+    // …that fails in four different ways.
+    let mut repeated = edited.clone();
+    repeated.push(edited[0].clone());
+    let mut wrong_page = edited.clone();
+    wrong_page[1].page_id = other_page.clone();
+    let mut steals_block = edited.clone();
+    steals_block[1].id = foreign_id.clone(); // exists in another page
+    let mut too_deep = edited.clone();
+    too_deep[0].indent = 7;
+
+    for bad in [repeated, wrong_page, steals_block, too_deep] {
+        assert!(db.save_document(&page_id, "Cambiado", &bad).is_err());
+        assert_eq!(db.get_page(&page_id)?.expect("page").title, "Original");
+        assert_eq!(db.list_blocks(&page_id)?, stored, "blocks untouched");
+    }
+    assert_eq!(db.list_blocks(&other_page)?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn save_syncs_inserts_updates_deletes_and_order() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let page_id = db.create_page("Lista", None)?;
+    for kind in [BlockKind::Paragraph, BlockKind::Todo, BlockKind::Quote] {
+        db.add_block(&page_id, kind)?;
+    }
+    let stored = db.list_blocks(&page_id)?;
+
+    // New order: quote, brand-new numbered block, paragraph (todo deleted).
+    let mut quote = stored[2].clone();
+    quote.content = "Cita célebre".into();
+    let mut numbered = stored[0].clone();
+    numbered.id = "nuevo-numerado".into();
+    numbered.kind = BlockKind::Numbered;
+    numbered.content = "Primer paso".into();
+    numbered.indent = 1;
+    let paragraph = stored[0].clone();
+    db.save_document(&page_id, "Lista", &[quote, numbered, paragraph])?;
+
+    let saved: Vec<(String, BlockKind, i64, u8)> = db
+        .list_blocks(&page_id)?
+        .into_iter()
+        .map(|b| (b.id, b.kind, b.position, b.indent))
+        .collect();
     assert_eq!(
-        db.get_page(&page_id)?.expect("page exists").title,
-        "Original"
+        saved,
+        vec![
+            (stored[2].id.clone(), BlockKind::Quote, 0, 0),
+            ("nuevo-numerado".to_owned(), BlockKind::Numbered, 1, 1),
+            (stored[0].id.clone(), BlockKind::Paragraph, 2, 0),
+        ]
     );
-    assert_eq!(db.list_blocks(&page_id)?[0].content, "");
+    assert_eq!(db.search_pages("célebre")?.len(), 1);
+    assert_eq!(db.search_pages("Primer")?.len(), 1);
     Ok(())
 }
 
@@ -181,7 +254,7 @@ fn search_handles_fts_syntax_safely() -> anyhow::Result<()> {
 fn search_tracks_block_updates() -> anyhow::Result<()> {
     let mut db = Database::open_in_memory()?;
     let page_id = db.create_page("Página", None)?;
-    db.add_block(&page_id, "paragraph")?;
+    db.add_block(&page_id, BlockKind::Paragraph)?;
     let mut blocks = db.list_blocks(&page_id)?;
 
     blocks[0].content = "manzana".into();
@@ -210,16 +283,49 @@ fn pragmas_are_applied() -> anyhow::Result<()> {
 fn foreign_keys_are_enforced_on_disk() -> anyhow::Result<()> {
     let tmp = TempDb::new();
     let db = Database::open(tmp.path())?;
-    assert!(db.add_block("pagina-inexistente", "paragraph").is_err());
+    assert!(
+        db.add_block("pagina-inexistente", BlockKind::Paragraph)
+            .is_err()
+    );
     Ok(())
 }
 
 #[test]
 fn invalid_block_kind_is_rejected() -> anyhow::Result<()> {
-    let db = Database::open_in_memory()?;
-    let page_id = db.create_page("Tipos", None)?;
-    assert!(db.add_block(&page_id, "x").is_err());
-    assert!(db.list_blocks(&page_id)?.is_empty());
+    assert_eq!(BlockKind::parse("x"), None);
+    assert_eq!(
+        BlockKind::parse("heading"),
+        None,
+        "v2 name, migrated in 0003"
+    );
+    for kind in BlockKind::ALL {
+        assert_eq!(BlockKind::parse(kind.as_str()), Some(kind));
+    }
+
+    let tmp = TempDb::new();
+    let page_id = Database::open(tmp.path())?.create_page("Tipos", None)?;
+    let conn = Connection::open(tmp.path())?;
+    // The schema CHECK rejects unknown kinds…
+    assert!(
+        conn.execute(
+            "INSERT INTO blocks (id, page_id, kind) VALUES ('b', ?1, 'x')",
+            [&page_id]
+        )
+        .is_err()
+    );
+    // …and if one slipped in anyway, reading it is an error, not a panic.
+    conn.execute_batch("PRAGMA ignore_check_constraints = ON;")?;
+    conn.execute(
+        "INSERT INTO blocks (id, page_id, kind) VALUES ('b', ?1, 'x')",
+        [&page_id],
+    )?;
+    drop(conn);
+    let db = Database::open(tmp.path())?;
+    let err = db.list_blocks(&page_id).expect_err("unknown kind");
+    assert!(
+        format!("{err:#}").contains("tipo de bloque desconocido"),
+        "{err:#}"
+    );
     Ok(())
 }
 
@@ -234,7 +340,7 @@ fn scale_smoke() -> anyhow::Result<()> {
     for p in 0..100 {
         let id = db.create_page(&format!("Página {p}"), None)?;
         for _ in 0..10 {
-            db.add_block(&id, "paragraph")?;
+            db.add_block(&id, BlockKind::Paragraph)?;
         }
         page_ids.push(id);
     }

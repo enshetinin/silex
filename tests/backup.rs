@@ -10,6 +10,7 @@ use silex_desktop::db::{
     Database,
     backup::{self, BackupJob},
 };
+use silex_desktop::model::BlockKind;
 
 /// Temporary directory holding a database and its `backups/` folder.
 struct TempDir(PathBuf);
@@ -46,8 +47,8 @@ fn names(dir: &Path) -> anyhow::Result<Vec<String>> {
 
 fn seed(db: &mut Database) -> anyhow::Result<String> {
     let page_id = db.create_page("Diario de viaje", None)?;
-    db.add_block(&page_id, "paragraph")?;
-    db.add_block(&page_id, "todo")?;
+    db.add_block(&page_id, BlockKind::Paragraph)?;
+    db.add_block(&page_id, BlockKind::Todo)?;
     let mut blocks = db.list_blocks(&page_id)?;
     blocks[0].content = "Llegada a Reikiavik 🌋".into();
     blocks[1].content = "Reservar excursión".into();

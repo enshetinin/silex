@@ -2,10 +2,11 @@
 //! Usage: cargo run --example seed -- /tmp/silex-dev.sqlite3
 use anyhow::{Context, Result, bail};
 use silex_desktop::db::Database;
+use silex_desktop::model::BlockKind;
 
 const PAGES: usize = 100;
 const BLOCKS_PER_PAGE: usize = 10;
-const KINDS: [&str; 3] = ["heading", "paragraph", "todo"];
+const KINDS: [BlockKind; 9] = BlockKind::ALL;
 
 fn main() -> Result<()> {
     let path = std::env::args_os()
