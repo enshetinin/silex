@@ -26,16 +26,22 @@
 - [x] Atajos de navegación y lista filtrable. *(H2.5: Cmd/Ctrl+N, Cmd/Ctrl+Mayús+N, Cmd/Ctrl+K, Alt+↑/↓, F2; la búsqueda filtra el árbol por título y lista aparte las coincidencias en el contenido. Tests verdes y verificación manual en macOS.)*
 
 ## Hito 3 — editor tipo Notion (primer valor diferencial)
-- [ ] Comandos de edición por bloque: Enter/Backspace/Tab/Shift-Tab. *(H3.2 implementada: Intro divide (Mayús+Intro y bloques de código: salto de línea), Retroceso al inicio convierte, quita sangría o fusiona, Supr al final une, Tab/Mayús+Tab con límite de un nivel, ↑/↓ entre bloques; operaciones puras en `src/editor.rs`; sin interceptar durante IME. Tests verdes en macOS; verificación manual pendiente, incluida con un IME real.)*
-- [ ] Más tipos de bloque: H1/2/3, listas, cita y código. *(H3.1 implementada: migración 0003, `BlockKind`, sangría guardada, guardado por sincronización completa y selector de tipo por bloque; tests verdes y actualización real v1/v2→v3 en macOS; verificación manual pendiente.)*
-- [ ] Menú `/`, teclado y selección de bloques. *(H3.3 implementada: «/palabra» al inicio de un bloque abre el menú de tipos (filtra sin acentos y con alias, ↑ ↓ Intro, Esc cierra); Esc selecciona el bloque, Mayús+↑/↓ amplía, Retroceso/Supr borra con «Deshacer», Cmd+C/Cmd+X copia o corta como texto. Tests verdes en macOS; verificación manual pendiente.)*
-- [ ] Reordenación y borrado de bloques; undo/redo semánticos. *(H3.4 implementada: Alt+Mayús+↑/↓ mueve el bloque o la selección, Cmd+D duplica, menú «…» por bloque (mover, duplicar, eliminar); un único deshacer/rehacer de documento con instantáneas, agrupando el tecleo (ADR 0004, sustituye a 0002). Tests verdes en macOS; verificación manual pendiente.)*
-- [ ] Pruebas de cursor/foco, copy-paste y Unicode/IME.
+
+**Cerrado (2026-10-18):** tests verdes y verificación manual en macOS, incluidas las pruebas de `docs/MANUAL_QA.md`. Windows y Linux: cubiertos por la CI de cada PR; las pruebas manuales en esos sistemas siguen pendientes.
+
+- [x] Comandos de edición por bloque: Enter/Backspace/Tab/Shift-Tab. *(H3.2: Intro divide (Mayús+Intro y bloques de código: salto de línea), Retroceso al inicio convierte, quita sangría o fusiona, Supr al final une, Tab/Mayús+Tab con límite de un nivel, ↑/↓ entre bloques; operaciones puras en `src/editor.rs`; sin interceptar durante IME.)*
+- [x] Más tipos de bloque: H1/2/3, listas, cita y código. *(H3.1: migración 0003 (reconstrucción de `blocks` conservando `rowid` y FTS), `BlockKind`, sangría guardada, guardado por sincronización completa y selector de tipo; ADR 0003.)*
+- [x] Menú `/`, teclado y selección de bloques. *(H3.3: «/palabra» abre el menú de tipos (alias, sin acentos, ↑ ↓ Intro, Esc); Esc selecciona bloques, Mayús+↑/↓ amplía, Retroceso/Supr borra, Cmd+C/Cmd+X copia o corta.)*
+- [x] Reordenación y borrado de bloques; undo/redo semánticos. *(H3.4: Alt+Mayús+↑/↓ mueve, Cmd+D duplica, menú «…» por bloque; deshacer/rehacer de documento con instantáneas, agrupando el tecleo; ADR 0004 sustituye a 0002.)*
+- [x] Pruebas de cursor/foco, copy-paste y Unicode/IME. *(H3.5: pegar varias líneas crea bloques y reconstruye el formato de copia de Silex; integridad Unicode en todas las posiciones; Intro de confirmación del IME descartado durante la composición; pruebas manuales en `docs/MANUAL_QA.md`.)*
 
 ## Hito 4 — importación y exportación
-- [ ] Markdown → bloques con pruebas golden.
-- [ ] Bloques → Markdown estable.
-- [ ] Exportación de espacio de trabajo; adjuntos con rutas seguras.
+
+**Cerrado (2026-10-18):** tests verdes y verificación manual en macOS. Windows y Linux: cubiertos por la CI de cada PR; las pruebas manuales en esos sistemas siguen pendientes. Los adjuntos pasan al Hito 7, porque Silex aún no tiene adjuntos.
+
+- [x] Markdown → bloques con pruebas golden. *(H4.2: `markdown::markdown_to_page` con `pulldown-cmark` (CommonMark + tareas GFM); el formato en línea que Silex no tiene se conserva como texto; golden de Markdown estilo Obsidian, GitHub y casos límite; ida y vuelta exacta y exportación estable; importar arrastrando `.md` a la ventana, en un hilo aparte, una transacción por página, máximo 10 MB y solo UTF-8. Tests verdes y verificación manual en macOS.)*
+- [x] Bloques → Markdown estable. *(H4.1: `markdown::page_to_markdown` (CommonMark + tareas GFM, todo el texto escapado para volver idéntico), archivo golden y comprobación con `pulldown-cmark`; «Exportar a Markdown» a `Documentos/Silex/Exportaciones` con nombres seguros y escritura atómica. Tests verdes y verificación manual en macOS.)*
+- [x] Exportación de espacio de trabajo; adjuntos con rutas seguras. *(H4.3: «Exportar todo a Markdown» crea `Silex <fecha>/` con un `.md` por página y una carpeta por página con subpáginas, sin la papelera, en un hilo aparte, a través de una carpeta temporal que se renombra al final; nombres seguros y sin choques entre archivo y carpeta (`safe_path::unique_stem`). Medido: 100 páginas en ~0,4 s, y al reimportarlas salen idénticas. Adjuntos: Silex no tiene adjuntos todavía; las rutas seguras (`safe_path`) quedan listas y los adjuntos pasan al Hito 7. Tests verdes y verificación manual en macOS.)*
 
 ## Hito 5 — UX de producto
 - [ ] Diseño coherente oscuro/claro, accesibilidad y navegación completa teclado.
@@ -48,4 +54,5 @@
 
 ## Hito 7 — funcionalidades opcionales
 - [ ] Historial/versionado, enlaces bidireccionales, plantillas.
+- [ ] Adjuntos locales (P1 del PRD), con un ADR propio: almacenamiento, límites de tamaño, copias de seguridad y exportación, reutilizando `safe_path` (viene del Hito 4).
 - [ ] Evaluar cifrado y sincronización únicamente con ADR, threat model y pruebas.

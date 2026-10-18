@@ -10,7 +10,7 @@ use directories::ProjectDirs;
 use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::model::{Block, BlockKind, MAX_INDENT, Page, TrashItem};
+use crate::model::{Block, BlockKind, MAX_INDENT, NewBlock, Page, TrashItem};
 
 pub mod backup;
 
@@ -60,6 +60,13 @@ impl Database {
         db.configure()?;
         db.migrate(PreMigrationBackup::Yes)?;
         Ok(db)
+    }
+
+    /// Current UTC time as `YYYYMMDD-HHMMSS` (from SQLite, like backup names).
+    pub fn utc_stamp(&self) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row("SELECT strftime('%Y%m%d-%H%M%S', 'now')", [], |r| r.get(0))?)
     }
 
     /// File backing this database; `None` for in-memory databases.
@@ -323,6 +330,42 @@ impl Database {
         )?;
         ensure!(affected == 1, "La página no existe o está en la papelera");
         Ok(())
+    }
+
+    /// Creates a page with its blocks in one transaction (import): either the
+    /// whole page exists afterwards or nothing was created.
+    pub fn create_page_with_blocks(
+        &mut self,
+        title: &str,
+        parent_id: Option<&str>,
+        blocks: &[NewBlock],
+    ) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        let page_id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO pages (id, title, parent_id, sort_order)
+             VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages WHERE parent_id IS ?3))",
+            params![page_id, title, parent_id],
+        )?;
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for (position, block) in blocks.iter().enumerate() {
+                insert.execute(params![
+                    Uuid::new_v4().to_string(),
+                    page_id,
+                    block.kind.as_str(),
+                    block.content,
+                    block.checked && block.kind == BlockKind::Todo,
+                    position as i64,
+                    block.indent.min(MAX_INDENT),
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(page_id)
     }
 
     pub fn get_page(&self, id: &str) -> Result<Option<Page>> {

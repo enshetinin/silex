@@ -58,6 +58,16 @@ pub struct SilexApp {
     pending_key: Option<(EditorKey, String)>,
     /// Block to focus (and cursor position) on the next frame.
     pending_focus: Option<(String, usize)>,
+    /// Multi-line paste taken this frame (block id, text), run after layout.
+    pending_paste: Option<(String, String)>,
+    /// Last exported file, offered with "Abrir carpeta".
+    last_export: Option<PathBuf>,
+    /// Markdown files being read on a worker thread.
+    import_job: Option<silex_desktop::import::ImportJob>,
+    /// Non-Markdown files dropped with the current import (reported at the end).
+    import_ignored: usize,
+    /// Whole-workspace export running on a worker thread.
+    export_job: Option<silex_desktop::export::WorkspaceExportJob>,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -185,6 +195,11 @@ impl SilexApp {
             ime_composing: false,
             pending_key: None,
             pending_focus: None,
+            pending_paste: None,
+            last_export: None,
+            import_job: None,
+            import_ignored: 0,
+            export_job: None,
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -675,13 +690,19 @@ impl SilexApp {
     /// field. Nothing is intercepted during an IME composition, with a text
     /// selection, or when the cursor is not where the command applies.
     fn take_editor_key(&mut self, ctx: &egui::Context) {
-        self.ime_composing = ime_composing_after(ctx, self.ime_composing);
-        if self.ime_composing {
-            return;
-        }
         let Some(caret) = self.caret.clone() else {
+            // No block is being edited: a composition elsewhere (e.g. the
+            // search field) is not ours, and a stale flag must not linger.
+            self.ime_composing = false;
             return;
         };
+        self.ime_composing = ime_composing_after(ctx, self.ime_composing);
+        if self.ime_composing {
+            // Enter confirms the composition; the IME sends the text as a
+            // commit, so the key itself must not also insert a newline.
+            take_exact_key(ctx, egui::Key::Enter, egui::Modifiers::NONE);
+            return;
+        }
         let Some(block) = self.blocks.iter().find(|b| b.id == caret.block_id) else {
             return;
         };
@@ -698,6 +719,23 @@ impl SilexApp {
             return;
         }
         let code = block.kind == BlockKind::Code;
+        // Several lines pasted into a (non-code) block become several blocks.
+        // A single line is left to the text field.
+        if !code {
+            let mut pasted = None;
+            take_event(ctx, |event| match event {
+                egui::Event::Paste(text) if text.contains(['\n', '\r']) => {
+                    pasted = Some(text.clone());
+                    true
+                }
+                _ => false,
+            });
+            if let Some(text) = pasted {
+                self.pending_paste = Some((block.id.clone(), text));
+                self.slash = None;
+                return;
+            }
+        }
         let at_start = caret.char == 0;
         let at_end = caret.char >= editor::block_char_len(block);
         use egui::{Key, Modifiers as M};
@@ -753,6 +791,29 @@ impl SilexApp {
 
     /// Runs the key taken this frame, after the text field processed any text
     /// typed earlier in the same frame (so the cursor position is current).
+    /// Runs a multi-line paste taken this frame, at the current cursor.
+    fn run_paste(&mut self, ctx: &egui::Context) {
+        let Some((block_id, text)) = self.pending_paste.take() else {
+            return;
+        };
+        let Some(index) = self.blocks.iter().position(|b| b.id == block_id) else {
+            return;
+        };
+        let cursor = egui::text_edit::TextEditState::load(ctx, self.block_field_id(&block_id))
+            .and_then(|s| s.cursor.char_range())
+            .map_or(0, |r| r.primary.index.0);
+        let caret = editor::paste_lines(&mut self.blocks, index, cursor, &text, || {
+            uuid::Uuid::new_v4().to_string()
+        });
+        self.mark_dirty();
+        if let Some(caret) = caret
+            && let Some(target) = self.blocks.get(caret.block)
+        {
+            self.pending_focus = Some((target.id.clone(), caret.char));
+            ctx.request_repaint();
+        }
+    }
+
     fn run_editor_key(&mut self, ctx: &egui::Context) {
         let Some((command, block_id)) = self.pending_key.take() else {
             return;
@@ -997,6 +1058,45 @@ impl SilexApp {
         });
     }
 
+    /// Exports the open page as it is on screen (saved first when possible).
+    fn export_current_page(&mut self) -> Result<()> {
+        let dir = silex_desktop::export::export_root()?;
+        self.export_current_page_to(&dir)
+    }
+
+    fn export_current_page_to(&mut self, dir: &std::path::Path) -> Result<()> {
+        // A save error is shown by the status bar; export what the user sees anyway.
+        let _ = self.save_now();
+        let path = silex_desktop::export::export_page(dir, &self.title, &self.blocks)?;
+        self.last_export = Some(path);
+        Ok(())
+    }
+
+    /// "Exportada a …" with a button to open the folder.
+    fn export_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(path) = self.last_export.clone() else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.label(format!("Exportada a {}", path.display()));
+            // A workspace export is a folder: open it; for a page, its folder.
+            let folder = if path.is_dir() {
+                Some(path.as_path())
+            } else {
+                path.parent()
+            };
+            if ui.small_button("Abrir carpeta").clicked()
+                && let Some(dir) = folder
+            {
+                let result = silex_desktop::export::open_in_file_manager(dir);
+                self.report(result);
+            }
+            if ui.small_button("Cerrar").clicked() {
+                self.last_export = None;
+            }
+        });
+    }
+
     /// Runs an action from a block's "…" menu.
     fn block_action(&mut self, action: BlockAction, id: &str) {
         let Some(index) = self.blocks.iter().position(|b| b.id == id) else {
@@ -1157,6 +1257,7 @@ impl SilexApp {
         });
         let is_favorite = self.favorites.iter().any(|p| p.id == page_id);
         let mut toggle_favorite = false;
+        let mut export = false;
         ui.horizontal(|ui| {
             let label = if is_favorite {
                 "Quitar de favoritos"
@@ -1168,7 +1269,15 @@ impl SilexApp {
                 .button("Enviar a la papelera")
                 .on_hover_text("Se mueve con sus subpáginas; se puede restaurar")
                 .clicked();
+            export = ui
+                .button("Exportar a Markdown")
+                .on_hover_text("Guarda la página como archivo .md en la carpeta de exportaciones")
+                .clicked();
         });
+        if export {
+            let result = self.export_current_page();
+            self.report(result);
+        }
         if subpage {
             let result = self.create_subpage(page_id);
             self.report(result);
@@ -1507,6 +1616,21 @@ impl SilexApp {
         {
             self.open_trash_dialog();
         }
+        let can_export = self.export_job.is_none() && self.db.path().is_some();
+        let label = if self.export_job.is_some() {
+            "Exportando…"
+        } else {
+            "Exportar todo a Markdown"
+        };
+        if ui
+            .add_enabled(can_export, egui::Button::new(label))
+            .on_hover_text("Todas las páginas (sin la papelera) en una carpeta nueva")
+            .clicked()
+        {
+            let result = silex_desktop::export::export_root()
+                .and_then(|root| self.start_workspace_export(ui.ctx(), root));
+            self.report(result);
+        }
         Self::shortcuts_help(ui);
         ui.separator();
         ui.small(&self.backup_label);
@@ -1606,6 +1730,7 @@ impl SilexApp {
             self.status_bar(ui);
         });
         self.notice_bar(ui);
+        self.export_bar(ui);
         self.page_actions(ui, &page_id);
         if self.selected.as_deref() != Some(page_id.as_str()) {
             // The page was trashed (or another opened) this frame.
@@ -1716,6 +1841,133 @@ impl SilexApp {
         });
     }
 
+    /// Starts exporting every page to a new folder under `root`, in the background.
+    fn start_workspace_export(&mut self, ctx: &egui::Context, root: PathBuf) -> Result<()> {
+        // A save error is shown by the status bar; the export reads the database.
+        let _ = self.save_now();
+        let db_path = self
+            .db
+            .path()
+            .context("No se puede exportar una base en memoria")?;
+        let repaint = ctx.clone();
+        self.export_job = Some(silex_desktop::export::WorkspaceExportJob::spawn(
+            db_path,
+            root,
+            move || repaint.request_repaint(),
+        )?);
+        Ok(())
+    }
+
+    fn tick_workspace_export(&mut self) {
+        let Some(result) = self.export_job.as_ref().and_then(|j| j.poll()) else {
+            return;
+        };
+        self.export_job = None;
+        match result {
+            Ok(export) => {
+                self.notice = Some(format!(
+                    "Espacio de trabajo exportado ({} página(s)).",
+                    export.pages
+                ));
+                self.last_export = Some(export.dir);
+            }
+            Err(err) => self.notice = Some(format!("No se pudo exportar: {err:#}")),
+        }
+    }
+
+    /// Files dropped on the window: `.md` files are imported in the background.
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        let (markdown, other): (Vec<PathBuf>, Vec<PathBuf>) = dropped
+            .into_iter()
+            .partition(|p| silex_desktop::import::is_markdown_path(p));
+        if markdown.is_empty() {
+            self.notice = Some(format!(
+                "Solo se importan archivos .md ({} ignorado(s)).",
+                other.len()
+            ));
+            return;
+        }
+        if self.import_job.is_some() {
+            self.notice = Some("Ya hay una importación en curso.".into());
+            return;
+        }
+        // Reported together with the result, so one message does not hide the other.
+        self.import_ignored = other.len();
+        let repaint = ctx.clone();
+        match silex_desktop::import::ImportJob::spawn(markdown, move || repaint.request_repaint()) {
+            Ok(job) => self.import_job = Some(job),
+            Err(err) => self.notice = Some(format!("Importación: {err:#}")),
+        }
+    }
+
+    /// Creates the pages read by the import job (one transaction each) and
+    /// opens the last one.
+    fn tick_import(&mut self) {
+        let Some(results) = self.import_job.as_ref().and_then(|j| j.poll()) else {
+            return;
+        };
+        self.import_job = None;
+        let mut created = Vec::new();
+        let mut errors = Vec::new();
+        for (path, result) in results {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match result.and_then(|page| {
+                self.db
+                    .create_page_with_blocks(&page.title, None, &page.blocks)
+            }) {
+                Ok(id) => created.push(id),
+                Err(err) => errors.push(format!("{name}: {err:#}")),
+            }
+        }
+        let outcome = (|| -> Result<()> {
+            self.reload_pages()?;
+            if let Some(last) = created.last() {
+                self.open_page(last.clone())?;
+            }
+            Ok(())
+        })();
+        self.report(outcome);
+        let mut message = format!("Importada(s) {} página(s).", created.len());
+        let ignored = std::mem::take(&mut self.import_ignored);
+        if ignored > 0 {
+            message.push_str(&format!(
+                " Solo se importan archivos .md ({ignored} ignorado(s))."
+            ));
+        }
+        if !errors.is_empty() {
+            message.push_str(&format!(" No se importaron: {}", errors.join("; ")));
+        }
+        self.notice = Some(message);
+    }
+
+    /// Centered hint while files are dragged over the window.
+    fn drop_hint(ctx: &egui::Context) {
+        if ctx.input(|i| i.raw.hovered_files.is_empty()) {
+            return;
+        }
+        egui::Area::new(egui::Id::unique("silex_drop_hint"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.heading("Suelta archivos .md para importarlos");
+                });
+            });
+    }
+
     /// Always-visible save state; an error offers an immediate retry.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let failed = match self.save.status() {
@@ -1823,10 +2075,12 @@ impl SilexApp {
     fn update_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
+        self.handle_dropped_files(&ctx);
         self.take_editor_key(&ctx);
         self.apply_pending_focus(&ctx);
         self.handle_selection_keys(&ctx);
         self.layout(ui);
+        self.run_paste(&ctx);
         self.run_editor_key(&ctx);
         self.refresh_slash_and_selection();
         // Save errors are shown by the status bar, so results are not reported twice.
@@ -1834,6 +2088,9 @@ impl SilexApp {
             let _ = self.save_now();
         }
         self.tick_backups(&ctx);
+        self.tick_import();
+        self.tick_workspace_export();
+        Self::drop_hint(&ctx);
         let now = Instant::now();
         if self.save.is_due(now) {
             let _ = self.save_now();
@@ -2001,7 +2258,7 @@ fn slash_menu_ui(ui: &mut egui::Ui, menu: &SlashMenu) -> Option<BlockKind> {
 }
 
 /// Removes the first input event matching `wanted`; returns whether found.
-fn take_event(ctx: &egui::Context, wanted: impl Fn(&egui::Event) -> bool) -> bool {
+fn take_event(ctx: &egui::Context, mut wanted: impl FnMut(&egui::Event) -> bool) -> bool {
     ctx.input_mut(|input| {
         let mut taken = false;
         input.events.retain(|event| {
@@ -2943,6 +3200,286 @@ mod tests {
             app.undo();
         }
         assert_eq!(texts(&app), ["a", "b"]);
+        Ok(())
+    }
+
+    fn paste(text: &str) -> egui::Event {
+        egui::Event::Paste(text.into())
+    }
+
+    #[test]
+    fn multi_line_paste_becomes_blocks_and_undoes_in_one_step() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "Hola mundo")], 0, 5)?;
+        app_frame(&mut app, &ctx, vec![paste("uno\r\ndos\ntres ")]);
+        assert_eq!(texts(&app), ["Hola uno", "dos", "tres mundo"]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(focused_block(&app, &ctx), Some(2));
+        assert_eq!(
+            caret_char(&app),
+            Some(5),
+            "cursor at the end of the pasted text"
+        );
+        app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+        assert_eq!(texts(&app), ["Hola mundo"]);
+        Ok(())
+    }
+
+    #[test]
+    fn single_line_paste_and_code_blocks_are_left_to_the_text_field() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "ab")], 0, 1)?;
+        app_frame(&mut app, &ctx, vec![paste("XY")]);
+        assert_eq!(texts(&app), ["aXYb"]);
+
+        let (mut app, ctx) = editor_app(&[(Cod, 0, "")], 0, 0)?;
+        app_frame(&mut app, &ctx, vec![paste("fn a() {\n}\n")]);
+        assert_eq!(app.blocks.len(), 1);
+        assert_eq!(app.blocks[0].content, "fn a() {\n}\n");
+        Ok(())
+    }
+
+    #[test]
+    fn copied_blocks_paste_back_with_their_structure() -> anyhow::Result<()> {
+        let (mut app, ctx) =
+            editor_app(&[(Bul, 0, "Pan"), (Bul, 1, "Integral"), (Par, 0, "")], 0, 0)?;
+        app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::SHIFT)]);
+        let commands = app_frame_commands(&mut app, &ctx, vec![egui::Event::Copy]);
+        let Some(egui::OutputCommand::CopyText(copied)) = commands.into_iter().next() else {
+            anyhow::bail!("nothing copied");
+        };
+        // Back to editing the empty last block, then paste.
+        app.selection = None;
+        app.pending_focus = Some((app.blocks[2].id.clone(), 0));
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![paste(&copied)]);
+        assert_eq!(
+            contents(&app)[2..],
+            [(Bul, 0, "Pan".into()), (Bul, 1, "Integral".into())]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ime_composition_commits_text_without_splitting() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "Texto: ")], 0, 7)?;
+        let preedit = |t: &str| {
+            egui::Event::Ime(egui::ImeEvent::Preedit {
+                text: t.into(),
+                active_range_chars: None,
+            })
+        };
+        for step in ["n", "に", "にほ", "にほn"] {
+            app_frame(&mut app, &ctx, vec![preedit(step)]);
+        }
+        // The user confirms with Enter: the IME turns it into a commit.
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        app_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Ime(egui::ImeEvent::Commit("日本".into()))],
+        );
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.blocks.len(), 1, "no split during the composition");
+        assert_eq!(
+            app.blocks[0].content, "Texto: 日本",
+            "no stray newline, no preedit left"
+        );
+        assert!(!app.ime_composing);
+        // After the commit, Enter splits again as usual.
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        assert_eq!(app.blocks.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn a_stale_ime_flag_is_cleared_when_leaving_the_block() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "ab")], 0, 2)?;
+        app.ime_composing = true; // e.g. the IME never sent its end event
+        app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert!(!app.ime_composing, "no block focused: flag reset");
+        app.selection = None;
+        app.pending_focus = Some((app.blocks[0].id.clone(), 2));
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        assert_eq!(app.blocks.len(), 2, "Enter works again");
+        Ok(())
+    }
+
+    #[test]
+    fn arrow_up_moves_inside_a_multi_line_block_first() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "arriba"), (Par, 0, "uno\ndos")], 1, 6)?;
+        assert!(
+            app.caret.as_ref().is_some_and(|c| !c.first_row),
+            "on the second line"
+        );
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(
+            focused_block(&app, &ctx),
+            Some(1),
+            "still in the same block"
+        );
+        assert!(app.caret.as_ref().is_some_and(|c| c.first_row));
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(focused_block(&app, &ctx), Some(0), "now it jumps");
+        Ok(())
+    }
+
+    #[test]
+    fn tricky_unicode_typed_in_the_app_is_saved_exactly() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+        let text = "e\u{301} 👨‍👩‍👧 🇪🇸 مرحبا שלום 日本語";
+        app_frame(&mut app, &ctx, vec![egui::Event::Text(text.into())]);
+        app.save_now()?;
+        let page = app.selected.clone().expect("page");
+        assert_eq!(app.db.list_blocks(&page)?[0].content, text);
+        assert_eq!(app.db.search_pages("日本語")?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn exporting_writes_what_is_on_screen_and_offers_the_folder() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Bul, 0, "uno"), (Bul, 1, "dos")], 0, 3)?;
+        type_into(&mut app, &ctx, "!"); // unsaved edit
+        // Removed on drop; the in-memory app keeps no files open inside it.
+        let tmp = TempFolder::new("silex-app-export")?;
+        let dir = tmp.0.clone();
+        app.export_current_page_to(&dir)?;
+        let path = app.last_export.clone().expect("export offered");
+        let text = std::fs::read_to_string(&path)?;
+        assert!(text.contains("- uno\\!\n  - dos\n"), "{text}"); // "!" is escaped
+        assert!(app.save.can_close(), "saved before exporting");
+        Ok(())
+    }
+
+    /// Temporary folder removed on drop (best effort). Declare it before
+    /// anything that keeps files inside it open, so it is dropped last.
+    struct TempFolder(std::path::PathBuf);
+
+    impl TempFolder {
+        fn new(prefix: &str) -> anyhow::Result<Self> {
+            let dir = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir)?;
+            Ok(Self(dir))
+        }
+    }
+
+    impl Drop for TempFolder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A file dropped on the window (test double for egui's handle).
+    #[derive(Debug)]
+    struct TestDrop(std::path::PathBuf);
+
+    impl egui::DroppedFile for TestDrop {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+
+    fn drop_frame(app: &mut SilexApp, ctx: &egui::Context, files: &[std::path::PathBuf]) {
+        let input = egui::RawInput {
+            dropped_files: files
+                .iter()
+                .map(|f| std::sync::Arc::new(TestDrop(f.clone())) as egui::DroppedFileHandle)
+                .collect(),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn dropping_markdown_files_imports_them_as_pages() -> anyhow::Result<()> {
+        // Declared before the app: dropped after it, once its files are closed
+        // (Windows cannot delete open files).
+        let tmp = TempFolder::new("silex-drop")?;
+        let dir = tmp.0.clone();
+        let good = dir.join("receta.md");
+        std::fs::write(
+            &good,
+            "# Pan casero\n\n- harina\n  - integral\n- [x] amasar\n",
+        )?;
+        let latin1 = dir.join("vieja.md");
+        std::fs::write(&latin1, b"caf\xe9")?;
+        let other = dir.join("foto.png");
+        std::fs::write(&other, b"png")?;
+
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let ctx = egui::Context::default();
+        drop_frame(&mut app, &ctx, &[good, latin1, other.clone()]);
+        let start = std::time::Instant::now();
+        while app.import_job.is_some() && start.elapsed() < std::time::Duration::from_secs(30) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app_frame(&mut app, &ctx, vec![]);
+        }
+        assert!(app.import_job.is_none(), "import finished");
+        assert_eq!(app.title, "Pan casero", "the imported page is open");
+        assert_eq!(
+            contents(&app),
+            [
+                (Bul, 0, "harina".into()),
+                (Bul, 1, "integral".into()),
+                (BlockKind::Todo, 0, "amasar".into())
+            ]
+        );
+        let notice = app.notice.clone().unwrap_or_default();
+        assert!(notice.contains("Importada(s) 1"), "{notice}");
+        assert!(
+            notice.contains("vieja.md") && notice.contains("UTF-8"),
+            "{notice}"
+        );
+        assert!(notice.contains("1 ignorado"), "{notice}");
+
+        // Only non-Markdown files: nothing to import, just the message.
+        drop_frame(&mut app, &ctx, &[other]);
+        assert!(app.import_job.is_none());
+        let notice = app.notice.clone().unwrap_or_default();
+        assert!(notice.contains("1 ignorado"), "{notice}");
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_export_runs_in_the_background_and_saves_first() -> anyhow::Result<()> {
+        // Declared before the app: dropped after it, once its files are closed
+        // (Windows cannot delete open files).
+        let tmp = TempFolder::new("silex-app-ws")?;
+        let dir = tmp.0.clone();
+        let mut app = SilexApp::new(Database::open(dir.join("silex.sqlite3"))?)?;
+        // A file database would start the automatic backup on the first frame,
+        // still writing into `dir` while the test cleans up: not under test here.
+        app.startup_backup_pending = false;
+        app.title = "Título sin guardar".into();
+        app.mark_dirty();
+        let ctx = egui::Context::default();
+        app.start_workspace_export(&ctx, dir.join("exportaciones"))?;
+        assert!(app.save.can_close(), "saved before exporting");
+        let start = std::time::Instant::now();
+        while app.export_job.is_some() && start.elapsed() < std::time::Duration::from_secs(30) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app_frame(&mut app, &ctx, vec![]);
+        }
+        let folder = app.last_export.clone().expect("export finished");
+        assert!(folder.join("Título sin guardar.md").exists());
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("1 página"))
+        );
+
+        // In-memory databases cannot be exported from another thread.
+        let mut memory = SilexApp::new(Database::open_in_memory()?)?;
+        assert!(memory.start_workspace_export(&ctx, dir.join("x")).is_err());
         Ok(())
     }
 

@@ -14,6 +14,9 @@ directories = "6"
 eframe = "0.37"
 rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 uuid = { version = "1", features = ["v4"] }
+# Markdown import (H4.2): CommonMark parser, MIT, pure Rust.
+pulldown-cmark = { version = "0.13", default-features = false }
+
 
 [profile.release]
 lto = "thin"

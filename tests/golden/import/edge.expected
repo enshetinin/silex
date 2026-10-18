@@ -1,0 +1,10 @@
+título: edge
+paragraph 0| Sin título de nivel 1 al principio
+bulleted 0| Elemento suelto
+paragraph 1| Segundo párrafo del mismo elemento
+bulleted 0| 
+bulleted 0| Viñeta con más⏎continuación perezosa
+todo 0 [ ]| 
+numbered 0| Paréntesis como delimitador
+numbered 0| Otro
+paragraph 0| Texto con *asterisco escapado* y & entidad.
