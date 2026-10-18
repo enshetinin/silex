@@ -1,0 +1,107 @@
+name: Paquetes
+# Builds the installers with cargo-packager (ADR 0005), checks them and keeps
+# them as artifacts of the run (Actions → this run → Artifacts). Nothing is
+# published: a release is a separate, manual decision.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - src/main.rs
+      - assets/app-icon/**
+      - .github/workflows/package.yml
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+          - name: Windows
+            os: windows-latest
+          # The oldest supported Ubuntu image: the .deb and the AppImage need
+          # at least the glibc they were built with.
+          - name: Linux
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_PACKAGER_VERSION: "0.11.8"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Linux system dependencies for eframe
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config desktop-file-utils
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked --version ${{ env.CARGO_PACKAGER_VERSION }}
+      - name: Package
+        run: cargo packager --release
+
+      - name: Check the macOS packages
+        if: runner.os == 'macOS'
+        run: |
+          codesign --verify --deep --strict --verbose=2 dist/Silex.app
+          plutil -p dist/Silex.app/Contents/Info.plist | grep '"CFBundleIdentifier" => "dev.silex.Silex"'
+          test -f dist/Silex.app/Contents/Resources/Silex.icns
+          hdiutil verify dist/*.dmg
+
+      - name: Check the Windows installer (install, then uninstall)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'No se generó el instalador' }
+          # User data lives in %LOCALAPPDATA%\silex\Silex\data, which on a
+          # case-insensitive file system is inside the install folder
+          # (%LOCALAPPDATA%\Silex). It must survive install and uninstall.
+          $data = Join-Path $env:LOCALAPPDATA 'silex\Silex\data'
+          New-Item -ItemType Directory -Force $data | Out-Null
+          $marker = Join-Path $data 'silex.sqlite3'
+          Set-Content -NoNewline $marker 'datos del usuario'
+          Start-Process $installer.FullName -ArgumentList '/S' -Wait
+          $dir = Join-Path $env:LOCALAPPDATA 'Silex'
+          $exe = Join-Path $dir 'silex-desktop.exe'
+          if (-not (Test-Path $exe)) { throw "No se instaló $exe" }
+          $info = (Get-Item $exe).VersionInfo
+          if ($info.ProductName -ne 'Silex') { throw "Sin recursos en el .exe: '$($info.ProductName)'" }
+          Start-Process (Join-Path $dir 'uninstall.exe') -ArgumentList '/S' -Wait
+          # The uninstaller copies itself and finishes in the background.
+          for ($i = 0; $i -lt 30 -and (Test-Path $exe); $i++) { Start-Sleep -Seconds 1 }
+          if (Test-Path $exe) { throw 'La desinstalación dejó el .exe' }
+          if (-not (Test-Path $marker)) { throw 'La desinstalación borró los datos del usuario' }
+          if ((Get-Content -Raw $marker) -ne 'datos del usuario') { throw 'Los datos del usuario cambiaron' }
+
+      - name: Check the Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb | tee contents.txt
+          grep -q './usr/bin/silex-desktop$' contents.txt
+          grep -q './usr/share/applications/silex-desktop.desktop$' contents.txt
+          grep -q './usr/share/icons/hicolor/256x256/apps/silex-desktop.png$' contents.txt
+          sudo apt-get install -y ./dist/*.deb
+          test -x /usr/bin/silex-desktop
+          cat /usr/share/applications/silex-desktop.desktop
+          desktop-file-validate /usr/share/applications/silex-desktop.desktop
+          ls -l dist/*.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: silex-${{ runner.os }}
+          path: |
+            dist/*.dmg
+            dist/*-setup.exe
+            dist/*.deb
+            dist/*.AppImage
+          if-no-files-found: error
