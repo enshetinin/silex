@@ -7,7 +7,7 @@ use silex_desktop::{
         Database, Shift,
         backup::{self, BackupJob},
     },
-    model::{Block, Page, TrashItem, TreeRow, ancestors, build_tree, descendants},
+    model::{Block, Page, TrashItem, TreeRow, ancestors, build_tree, descendants, filter_tree},
     save_state::{SaveState, SaveStatus},
 };
 
@@ -21,6 +21,11 @@ pub struct SilexApp {
     trash_count: usize,
     trash_dialog: Option<TrashDialog>,
     favorites: Vec<Page>,
+    /// Search results, recomputed only when the query or the pages change.
+    filtered: Vec<TreeRow>,
+    content_matches: Vec<Page>,
+    searched_query: Option<String>,
+    rename: Option<Rename>,
     selected: Option<String>,
     title: String,
     blocks: Vec<Block>,
@@ -40,6 +45,28 @@ pub struct SilexApp {
     /// Bumped when the whole document set is replaced (restore), so text
     /// fields start with a fresh undo history instead of pre-restore text.
     doc_generation: u64,
+}
+
+/// Inline rename in the sidebar.
+struct Rename {
+    id: String,
+    text: String,
+    /// Focus the text field on the next frame it is drawn.
+    focus: bool,
+}
+
+/// Something the user asked for on a page row (click, menu, keyboard).
+enum RowAction {
+    Open(String),
+    Toggle(String),
+    StartRename(String),
+    CommitRename,
+    CancelRename,
+    Subpage(String),
+    Favorite(String, bool),
+    Reorder(String, Shift),
+    Move(String, Option<String>),
+    Trash(String),
 }
 
 struct TrashDialog {
@@ -69,6 +96,10 @@ impl SilexApp {
             trash_count: 0,
             trash_dialog: None,
             favorites: Vec::new(),
+            filtered: Vec::new(),
+            content_matches: Vec::new(),
+            searched_query: None,
+            rename: None,
             selected: None,
             title: String::new(),
             blocks: Vec::new(),
@@ -113,6 +144,7 @@ impl SilexApp {
         self.trash_count = self.db.trash_count()?;
         self.favorites = self.db.list_favorites()?;
         self.rebuild_tree();
+        self.searched_query = None;
         Ok(())
     }
 
@@ -128,20 +160,16 @@ impl SilexApp {
             return;
         }
         ui.label("Favoritos");
-        let mut open = None;
-        for page in &self.favorites {
-            let selected = self.selected.as_deref() == Some(page.id.as_str());
-            if ui
-                .selectable_label(selected, display_title(&page.title))
-                .clicked()
-            {
-                open = Some(page.id.clone());
-            }
-        }
-        if let Some(id) = open {
-            let result = self.open_page(id);
-            self.report(result);
-        }
+        let rows: Vec<TreeRow> = self
+            .favorites
+            .iter()
+            .map(|page| TreeRow {
+                page: page.clone(),
+                depth: 0,
+                has_children: false,
+            })
+            .collect();
+        self.page_rows(ui, &rows, false, "fav");
         ui.separator();
     }
 
@@ -160,10 +188,22 @@ impl SilexApp {
 
     fn trash_page(&mut self, id: &str) -> Result<()> {
         self.save_now()?;
-        let title = display_title(&self.title).to_owned();
+        let title = self
+            .pages
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| display_title(&p.title).to_owned())
+            .unwrap_or_default();
         let trashed = self.db.trash_page(id)?;
         self.reload_pages()?;
-        self.open_first_page()?;
+        // Only leave the open page if it went to the trash with this branch.
+        let open_still_live = self
+            .selected
+            .as_ref()
+            .is_some_and(|sel| self.pages.iter().any(|p| &p.id == sel));
+        if !open_still_live {
+            self.open_first_page()?;
+        }
         self.notice = Some(match trashed.saturating_sub(1) {
             0 => format!("«{title}» se movió a la papelera."),
             n => format!("«{title}» y {n} subpágina(s) se movieron a la papelera."),
@@ -273,45 +313,315 @@ impl SilexApp {
         Ok(())
     }
 
-    /// Sidebar tree: indentation, expand/collapse arrow and page title.
-    fn tree_rows(&mut self, ui: &mut egui::Ui) {
-        let mut open = None;
-        let mut toggle = None;
-        for row in &self.tree {
-            ui.horizontal(|ui| {
-                ui.add_space(row.depth as f32 * 14.0);
-                let (_, response) =
-                    ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
-                if row.has_children {
-                    let openness = if self.expanded.contains(&row.page.id) {
-                        1.0
-                    } else {
-                        0.0
-                    };
-                    let response = response
-                        .on_hover_text("Mostrar u ocultar subpáginas")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    egui::collapsing_header::paint_default_icon(ui, openness, &response);
-                    if response.clicked() {
-                        toggle = Some(row.page.id.clone());
+    /// Page rows (tree, favorites or search): indentation, optional
+    /// expand arrow, title or inline rename field, and a context menu.
+    /// `section` keeps widget ids distinct when a page appears twice.
+    fn page_rows(&mut self, ui: &mut egui::Ui, rows: &[TreeRow], arrows: bool, section: &str) {
+        let mut actions = Vec::new();
+        for row in rows {
+            ui.push_id((section, &row.page.id), |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(row.depth as f32 * 14.0);
+                    if arrows {
+                        let (_, response) =
+                            ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+                        if row.has_children {
+                            let openness = if self.expanded.contains(&row.page.id) {
+                                1.0
+                            } else {
+                                0.0
+                            };
+                            let response = response
+                                .on_hover_text("Mostrar u ocultar subpáginas")
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            egui::collapsing_header::paint_default_icon(ui, openness, &response);
+                            if response.clicked() {
+                                actions.push(RowAction::Toggle(row.page.id.clone()));
+                            }
+                        }
                     }
-                }
-                let selected = self.selected.as_deref() == Some(row.page.id.as_str());
-                if ui
-                    .selectable_label(selected, display_title(&row.page.title))
-                    .clicked()
-                {
-                    open = Some(row.page.id.clone());
-                }
+                    if let Some(action) = self.row_label(ui, &row.page, section) {
+                        actions.push(action);
+                    }
+                });
             });
         }
-        if let Some(id) = toggle {
-            self.toggle_expanded(&id);
-        }
-        if let Some(id) = open {
-            let result = self.open_page(id);
+        for action in actions {
+            let result = self.apply(action);
             self.report(result);
         }
+    }
+
+    /// Title (with context menu) or, while renaming, the inline text field.
+    fn row_label(&mut self, ui: &mut egui::Ui, page: &Page, section: &str) -> Option<RowAction> {
+        if let Some(rename) = self.rename.as_mut().filter(|r| r.id == page.id) {
+            let response = ui.add(
+                TextEdit::singleline(&mut rename.text)
+                    .id(egui::Id::unique(("silex-rename", section, &page.id)))
+                    .desired_width(f32::INFINITY),
+            );
+            if rename.focus {
+                response.request_focus();
+                rename.focus = false;
+            }
+            if response.lost_focus() {
+                return Some(if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    RowAction::CancelRename
+                } else {
+                    RowAction::CommitRename
+                });
+            }
+            return None;
+        }
+        let selected = self.selected.as_deref() == Some(page.id.as_str());
+        let response = ui.selectable_label(selected, display_title(&page.title));
+        let mut action = response.clicked().then(|| RowAction::Open(page.id.clone()));
+        response.context_menu(|ui| {
+            if let Some(chosen) = self.page_menu(ui, &page.id) {
+                action = Some(chosen);
+                ui.close();
+            }
+        });
+        action
+    }
+
+    /// Context menu for a page.
+    fn page_menu(&self, ui: &mut egui::Ui, id: &str) -> Option<RowAction> {
+        let page = self.pages.iter().find(|p| p.id == id)?;
+        let siblings: Vec<&str> = self
+            .pages
+            .iter()
+            .filter(|p| p.parent_id == page.parent_id)
+            .map(|p| p.id.as_str())
+            .collect();
+        let index = siblings.iter().position(|s| *s == id);
+        let is_favorite = self.favorites.iter().any(|p| p.id == id);
+        let owned = || id.to_owned();
+        let mut action = None;
+        if ui.button("Abrir").clicked() {
+            action = Some(RowAction::Open(owned()));
+        }
+        if ui.button("Renombrar").clicked() {
+            action = Some(RowAction::StartRename(owned()));
+        }
+        if ui.button("Nueva subpágina").clicked() {
+            action = Some(RowAction::Subpage(owned()));
+        }
+        let favorite_label = if is_favorite {
+            "Quitar de favoritos"
+        } else {
+            "Añadir a favoritos"
+        };
+        if ui.button(favorite_label).clicked() {
+            action = Some(RowAction::Favorite(owned(), !is_favorite));
+        }
+        ui.separator();
+        if ui
+            .add_enabled(index.is_some_and(|i| i > 0), egui::Button::new("Subir"))
+            .clicked()
+        {
+            action = Some(RowAction::Reorder(owned(), Shift::Up));
+        }
+        if ui
+            .add_enabled(
+                index.is_some_and(|i| i + 1 < siblings.len()),
+                egui::Button::new("Bajar"),
+            )
+            .clicked()
+        {
+            action = Some(RowAction::Reorder(owned(), Shift::Down));
+        }
+        ui.menu_button("Mover a…", |ui| {
+            let blocked = descendants(&self.pages, id);
+            egui::ScrollArea::vertical()
+                .id_salt("silex_menu_move")
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    if page.parent_id.is_some() && ui.button("Raíz").clicked() {
+                        action = Some(RowAction::Move(owned(), None));
+                    }
+                    for target in &self.pages {
+                        let valid = target.id != id
+                            && !blocked.contains(&target.id)
+                            && page.parent_id.as_deref() != Some(target.id.as_str());
+                        if valid && ui.button(display_title(&target.title)).clicked() {
+                            action = Some(RowAction::Move(owned(), Some(target.id.clone())));
+                        }
+                    }
+                });
+        });
+        ui.separator();
+        if ui.button("Enviar a la papelera").clicked() {
+            action = Some(RowAction::Trash(owned()));
+        }
+        action
+    }
+
+    fn apply(&mut self, action: RowAction) -> Result<()> {
+        match action {
+            RowAction::Open(id) => self.open_page(id),
+            RowAction::Toggle(id) => {
+                self.toggle_expanded(&id);
+                Ok(())
+            }
+            RowAction::StartRename(id) => {
+                self.start_rename(&id);
+                Ok(())
+            }
+            RowAction::CommitRename => self.commit_rename(),
+            RowAction::CancelRename => {
+                self.rename = None;
+                Ok(())
+            }
+            RowAction::Subpage(id) => self.create_subpage(&id),
+            RowAction::Favorite(id, favorite) => self.set_favorite(&id, favorite),
+            RowAction::Reorder(id, shift) => self.reorder_page(&id, shift),
+            RowAction::Move(id, parent) => self.move_page(&id, parent.as_deref()),
+            RowAction::Trash(id) => self.trash_page(&id),
+        }
+    }
+
+    fn start_rename(&mut self, id: &str) {
+        let current = if self.selected.as_deref() == Some(id) {
+            // The open page may have an unsaved title in the editor.
+            Some(self.title.clone())
+        } else {
+            self.pages
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.title.clone())
+        };
+        if let Some(text) = current {
+            self.rename = Some(Rename {
+                id: id.to_owned(),
+                text,
+                focus: true,
+            });
+        }
+    }
+
+    fn commit_rename(&mut self) -> Result<()> {
+        let Some(rename) = self.rename.take() else {
+            return Ok(());
+        };
+        let title = match rename.text.trim() {
+            "" => "Sin título".to_owned(),
+            t => t.to_owned(),
+        };
+        if self.selected.as_deref() == Some(rename.id.as_str()) {
+            // Keep the editor and the database in agreement: save through the document.
+            if title != self.title {
+                self.title = title;
+                self.mark_dirty();
+                self.save_now()?;
+            }
+            Ok(())
+        } else {
+            self.db.rename_page(&rename.id, &title)?;
+            self.reload_pages()
+        }
+    }
+
+    /// Recomputes search results when the query or the pages changed.
+    fn refresh_search(&mut self) {
+        if self.searched_query.as_deref() == Some(self.query.as_str()) {
+            return;
+        }
+        self.searched_query = Some(self.query.clone());
+        self.filtered = filter_tree(&self.pages, &self.query);
+        let shown: HashSet<&str> = self.filtered.iter().map(|r| r.page.id.as_str()).collect();
+        self.content_matches = match self.db.search_pages(&self.query) {
+            Ok(found) => found
+                .into_iter()
+                .filter(|p| !shown.contains(p.id.as_str()))
+                .collect(),
+            Err(err) => {
+                self.notice = Some(format!("Error de búsqueda: {err:#}"));
+                Vec::new()
+            }
+        };
+    }
+
+    /// Ids of the page rows currently visible, top to bottom (for keyboard navigation).
+    fn visible_page_ids(&self) -> Vec<String> {
+        if self.query.trim().is_empty() {
+            self.tree.iter().map(|r| r.page.id.clone()).collect()
+        } else {
+            self.filtered
+                .iter()
+                .map(|r| &r.page)
+                .chain(&self.content_matches)
+                .map(|p| p.id.clone())
+                .collect()
+        }
+    }
+
+    fn open_adjacent(&mut self, step: isize) -> Result<()> {
+        let ids = self.visible_page_ids();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let current = self
+            .selected
+            .as_ref()
+            .and_then(|sel| ids.iter().position(|id| id == sel));
+        let next = match current {
+            Some(i) => i.saturating_add_signed(step).min(ids.len() - 1),
+            None => 0,
+        };
+        if Some(next) == current {
+            return Ok(());
+        }
+        self.open_page(ids[next].clone())
+    }
+
+    fn create_root_page(&mut self, title: &str) -> Result<()> {
+        self.save_now()?;
+        let id = self.db.create_page(title, None)?;
+        self.reload_pages()?;
+        self.open_page(id)
+    }
+
+    /// Keyboard shortcuts, read before any widget so text fields do not see them.
+    /// More specific shortcuts first: consume_shortcut ignores extra Shift/Alt.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        use egui::{Key, KeyboardShortcut as Sc, Modifiers as M};
+        let pressed = |sc: Sc| ctx.input_mut(|i| i.consume_shortcut(&sc));
+        let new_subpage = pressed(Sc::new(M::COMMAND | M::SHIFT, Key::N));
+        let new_page = !new_subpage && pressed(Sc::new(M::COMMAND, Key::N));
+        let search = pressed(Sc::new(M::COMMAND, Key::K));
+        let previous = pressed(Sc::new(M::ALT, Key::ArrowUp));
+        let next = pressed(Sc::new(M::ALT, Key::ArrowDown));
+        let rename = pressed(Sc::new(M::NONE, Key::F2));
+        let search_focused = ctx.memory(|m| m.has_focus(search_id()));
+        let clear_search =
+            search_focused && !self.query.is_empty() && pressed(Sc::new(M::NONE, Key::Escape));
+
+        let result = (|| -> Result<()> {
+            if new_subpage && let Some(id) = self.selected.clone() {
+                self.create_subpage(&id)?;
+            }
+            if new_page {
+                self.create_root_page("Sin título")?;
+            }
+            if search {
+                ctx.memory_mut(|m| m.request_focus(search_id()));
+            }
+            if previous {
+                self.open_adjacent(-1)?;
+            }
+            if next {
+                self.open_adjacent(1)?;
+            }
+            if rename && let Some(id) = self.selected.clone() {
+                self.start_rename(&id);
+            }
+            if clear_search {
+                self.query.clear();
+            }
+            Ok(())
+        })();
+        self.report(result);
     }
 
     /// Subpage and move controls for the open page.
@@ -618,36 +928,34 @@ impl SilexApp {
         ui.label("Tu espacio local");
         ui.separator();
         ui.label("Buscar (título y contenido)");
-        ui.add(TextEdit::singleline(&mut self.query).hint_text("Buscar…"));
+        ui.add(
+            TextEdit::singleline(&mut self.query)
+                .id(search_id())
+                .hint_text(format!("Buscar… ({}+K)", cmd_label(ui.ctx()))),
+        );
         ui.separator();
-        if self.query.is_empty() {
+        if self.query.trim().is_empty() {
             self.favorite_rows(ui);
-        }
-        ui.label("Páginas");
-        if self.query.is_empty() {
+            ui.label("Páginas");
+            let rows = self.tree.clone();
             egui::ScrollArea::vertical()
                 .id_salt("silex_sidebar_tree")
                 .max_height(400.0)
-                .show(ui, |ui| self.tree_rows(ui));
+                .show(ui, |ui| self.page_rows(ui, &rows, true, "tree"));
         } else {
             self.search_results(ui);
         }
         ui.separator();
         ui.add(TextEdit::singleline(&mut self.new_page_title).hint_text("Nombre de página"));
         if ui.button("+ Crear página").clicked() {
-            let result = (|| -> Result<()> {
-                self.save_now()?;
-                let title = self.new_page_title.trim();
-                let title = if title.is_empty() {
-                    "Sin título"
-                } else {
-                    title
-                };
-                let id = self.db.create_page(title, None)?;
+            let title = match self.new_page_title.trim() {
+                "" => "Sin título".to_owned(),
+                t => t.to_owned(),
+            };
+            let result = self.create_root_page(&title);
+            if result.is_ok() {
                 self.new_page_title.clear();
-                self.reload_pages()?;
-                self.open_page(id)
-            })();
+            }
             self.report(result);
         }
         if ui
@@ -656,6 +964,7 @@ impl SilexApp {
         {
             self.open_trash_dialog();
         }
+        Self::shortcuts_help(ui);
         ui.separator();
         ui.small(&self.backup_label);
         let can_backup = self.backup_job.is_none() && self.db.path().is_some();
@@ -673,30 +982,59 @@ impl SilexApp {
         }
     }
 
-    /// Flat list of search matches (title and content).
+    /// Search: title matches as a filtered tree, then pages that only match
+    /// in their content (FTS, which also ignores accents).
     fn search_results(&mut self, ui: &mut egui::Ui) {
-        let found = self.db.search_pages(&self.query);
-        match found {
-            Ok(pages) => {
-                let mut open = None;
-                egui::ScrollArea::vertical()
-                    .id_salt("silex_sidebar_pages")
-                    .max_height(400.0)
-                    .show(ui, |ui| {
-                        for page in &pages {
-                            let selected = self.selected.as_deref() == Some(&page.id);
-                            if ui.selectable_label(selected, &page.title).clicked() {
-                                open = Some(page.id.clone());
-                            }
-                        }
-                    });
-                if let Some(id) = open {
-                    let result = self.open_page(id);
-                    self.report(result);
+        self.refresh_search();
+        let filtered = self.filtered.clone();
+        let content: Vec<TreeRow> = self
+            .content_matches
+            .iter()
+            .map(|page| TreeRow {
+                page: page.clone(),
+                depth: 0,
+                has_children: false,
+            })
+            .collect();
+        egui::ScrollArea::vertical()
+            .id_salt("silex_sidebar_search")
+            .max_height(400.0)
+            .show(ui, |ui| {
+                ui.label("Páginas");
+                if filtered.is_empty() {
+                    ui.weak("Ningún título coincide.");
                 }
+                self.page_rows(ui, &filtered, false, "filter");
+                if !content.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label("En el contenido");
+                    self.page_rows(ui, &content, false, "content");
+                }
+            });
+    }
+
+    fn shortcuts_help(ui: &mut egui::Ui) {
+        let cmd = cmd_label(ui.ctx());
+        ui.collapsing("Atajos de teclado", |ui| {
+            for (keys, what) in [
+                (format!("{cmd}+N"), "Nueva página"),
+                (format!("{cmd}+Mayús+N"), "Nueva subpágina"),
+                (format!("{cmd}+K"), "Buscar"),
+                ("Alt+↑ / Alt+↓".to_owned(), "Página anterior / siguiente"),
+                ("F2".to_owned(), "Renombrar la página abierta"),
+                (format!("{cmd}+S"), "Guardar ahora"),
+                (
+                    format!("{cmd}+Z / {cmd}+Mayús+Z"),
+                    "Deshacer / rehacer texto",
+                ),
+                ("Clic derecho".to_owned(), "Acciones de una página"),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.monospace(keys);
+                    ui.label(what);
+                });
             }
-            Err(err) => self.notice = Some(format!("Error de búsqueda: {err:#}")),
-        }
+        });
     }
 
     fn editor(&mut self, ui: &mut egui::Ui) {
@@ -880,10 +1218,12 @@ enum CloseAction {
     Cancel,
 }
 
-impl eframe::App for SilexApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.layout(ui);
+impl SilexApp {
+    /// One frame: shortcuts, layout, dialogs, background work and autosave.
+    fn update_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        self.handle_shortcuts(&ctx);
+        self.layout(ui);
         // Save errors are shown by the status bar, so results are not reported twice.
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             let _ = self.save_now();
@@ -901,6 +1241,12 @@ impl eframe::App for SilexApp {
         if let Some(at) = self.save.next_attempt() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
         }
+    }
+}
+
+impl eframe::App for SilexApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.update_ui(ui);
     }
 
     /// Last-chance save when the app shuts down without a close request.
@@ -944,6 +1290,19 @@ fn block_field(ui: &mut egui::Ui, generation: u64, block: &mut Block) -> bool {
         changed
     })
     .inner
+}
+
+fn search_id() -> egui::Id {
+    egui::Id::unique("silex-search")
+}
+
+/// "Cmd" on macOS, "Ctrl" elsewhere (egui's COMMAND modifier).
+fn cmd_label(ctx: &egui::Context) -> &'static str {
+    if ctx.os() == egui::os::OperatingSystem::Mac {
+        "Cmd"
+    } else {
+        "Ctrl"
+    }
 }
 
 /// `2026-10-18T09:30:05.123Z` → `2026-10-18 09:30 UTC`.
@@ -1108,6 +1467,213 @@ mod tests {
         app.trash_page(&only)?;
         assert_eq!(app.selected, None);
         assert!(app.tree.is_empty());
+        Ok(())
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// Runs one full app frame (shortcuts, layout, dialogs) with `events`.
+    fn app_frame(app: &mut SilexApp, ctx: &egui::Context, events: Vec<egui::Event>) -> Vec<String> {
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+        output.textures_delta.clear();
+        painted_text(&output.shapes)
+    }
+
+    fn page_titles(app: &SilexApp) -> Vec<String> {
+        app.pages.iter().map(|p| p.title.clone()).collect()
+    }
+
+    #[test]
+    fn keyboard_shortcuts_create_and_navigate() -> anyhow::Result<()> {
+        use egui::{Key, Modifiers as M};
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let ctx = egui::Context::default();
+        let first = app.selected.clone().expect("first page");
+
+        app_frame(&mut app, &ctx, vec![key(Key::N, M::COMMAND)]);
+        let second = app.selected.clone().expect("new page is open");
+        assert_ne!(second, first);
+        assert_eq!(app.pages.len(), 2);
+
+        // Cmd+Shift+N makes a subpage only (not also a root page).
+        app_frame(&mut app, &ctx, vec![key(Key::N, M::COMMAND | M::SHIFT)]);
+        let child = app.selected.clone().expect("subpage is open");
+        assert_eq!(app.pages.len(), 3);
+        let parent = app
+            .pages
+            .iter()
+            .find(|p| p.id == child)
+            .and_then(|p| p.parent_id.clone());
+        assert_eq!(parent, Some(second.clone()));
+
+        // Visible tree: first, second, child. Alt+Up walks back up.
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::ALT)]);
+        assert_eq!(app.selected.as_deref(), Some(second.as_str()));
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::ALT)]);
+        assert_eq!(app.selected.as_deref(), Some(first.as_str()));
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::ALT)]);
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(first.as_str()),
+            "stays at the top"
+        );
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::ALT)]);
+        assert_eq!(app.selected.as_deref(), Some(second.as_str()));
+
+        // Cmd+K focuses the search field; F2 starts renaming the open page.
+        app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert!(ctx.memory(|m| m.has_focus(search_id())));
+        app_frame(&mut app, &ctx, vec![key(Key::F2, M::NONE)]);
+        assert_eq!(
+            app.rename.as_ref().map(|r| r.id.as_str()),
+            Some(second.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rename_from_sidebar_keeps_editor_and_database_in_sync() -> anyhow::Result<()> {
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let open = app.selected.clone().expect("first page");
+        let other = app.db.create_page("Otra", None)?;
+        app.reload_pages()?;
+
+        // Renaming another page goes straight to the database.
+        app.start_rename(&other);
+        if let Some(r) = app.rename.as_mut() {
+            r.text = "  Renombrada  ".into();
+        }
+        app.commit_rename()?;
+        assert_eq!(
+            app.db.get_page(&other)?.map(|p| p.title).as_deref(),
+            Some("Renombrada")
+        );
+        assert_eq!(app.selected.as_deref(), Some(open.as_str()));
+
+        // The open page starts from the editor's unsaved title and saves through it.
+        app.title = "Sin guardar".into();
+        app.mark_dirty();
+        app.start_rename(&open);
+        assert_eq!(
+            app.rename.as_ref().map(|r| r.text.as_str()),
+            Some("Sin guardar")
+        );
+        if let Some(r) = app.rename.as_mut() {
+            r.text = "Definitivo".into();
+        }
+        app.commit_rename()?;
+        assert_eq!(app.title, "Definitivo");
+        assert!(app.save.can_close(), "saved");
+        assert_eq!(
+            app.db.get_page(&open)?.map(|p| p.title).as_deref(),
+            Some("Definitivo")
+        );
+
+        // Empty becomes "Sin título"; cancelling changes nothing.
+        app.start_rename(&other);
+        if let Some(r) = app.rename.as_mut() {
+            r.text = "   ".into();
+        }
+        app.commit_rename()?;
+        assert_eq!(
+            app.db.get_page(&other)?.map(|p| p.title).as_deref(),
+            Some("Sin título")
+        );
+        app.start_rename(&other);
+        app.apply(RowAction::CancelRename)?;
+        assert!(app.rename.is_none());
+        assert_eq!(
+            app.db.get_page(&other)?.map(|p| p.title).as_deref(),
+            Some("Sin título")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn trashing_another_page_keeps_the_open_one() -> anyhow::Result<()> {
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let open = app.selected.clone().expect("first page");
+        let other = app.db.create_page("Para borrar", None)?;
+        app.reload_pages()?;
+        app.apply(RowAction::Trash(other))?;
+        assert_eq!(app.selected.as_deref(), Some(open.as_str()));
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("Para borrar"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_filters_titles_and_lists_content_matches() -> anyhow::Result<()> {
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let recetas = app.db.create_page("Recetas", None)?;
+        app.db.create_page("Pan de centeno", Some(&recetas))?;
+        let notas = app.db.create_page("Notas", None)?;
+        let block = app.db.add_block(&notas, "paragraph")?;
+        let mut blocks = app.db.list_blocks(&notas)?;
+        blocks[0].content = "comprar pan".into();
+        assert_eq!(blocks[0].id, block);
+        app.db.save_document(&notas, "Notas", &blocks)?;
+        app.reload_pages()?;
+
+        app.query = "pan".into();
+        app.refresh_search();
+        let filtered: Vec<(String, usize)> = app
+            .filtered
+            .iter()
+            .map(|r| (r.page.title.clone(), r.depth))
+            .collect();
+        assert_eq!(
+            filtered,
+            vec![("Recetas".into(), 0), ("Pan de centeno".into(), 1)]
+        );
+        let content: Vec<&str> = app
+            .content_matches
+            .iter()
+            .map(|p| p.title.as_str())
+            .collect();
+        assert_eq!(content, vec!["Notas"]);
+        assert_eq!(app.visible_page_ids().len(), 3);
+        assert_eq!(page_titles(&app).len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn sidebar_states_have_no_id_clashes() -> anyhow::Result<()> {
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let open = app.selected.clone().expect("first page");
+        // The same page in favorites and in the tree, plus an inline rename.
+        app.db.set_favorite(&open, true)?;
+        let child = app.db.create_page("Hija", Some(&open))?;
+        app.expanded.insert(open.clone());
+        app.reload_pages()?;
+        app.start_rename(&child);
+        let ctx = egui::Context::default();
+        for query in ["", "Hija"] {
+            app.query = query.into();
+            for _ in 0..2 {
+                let warnings: Vec<String> = app_frame(&mut app, &ctx, vec![])
+                    .into_iter()
+                    .filter(|t| t.contains(" use of ") && t.contains(" ID "))
+                    .collect();
+                assert!(warnings.is_empty(), "query {query:?}: {warnings:?}");
+            }
+        }
         Ok(())
     }
 

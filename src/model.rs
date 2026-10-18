@@ -132,3 +132,26 @@ pub struct TrashItem {
     pub deleted_at: String,
     pub subpages: usize,
 }
+
+/// Tree rows for pages whose title contains `query` (case-insensitive), plus
+/// their ancestors so each match keeps its context. Everything shown is
+/// expanded. An empty query matches nothing.
+pub fn filter_tree(pages: &[Page], query: &str) -> Vec<TreeRow> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut keep: HashSet<String> = HashSet::new();
+    for page in pages {
+        if page.title.to_lowercase().contains(&needle) {
+            keep.insert(page.id.clone());
+            keep.extend(ancestors(pages, &page.id));
+        }
+    }
+    let subset: Vec<Page> = pages
+        .iter()
+        .filter(|p| keep.contains(&p.id))
+        .cloned()
+        .collect();
+    build_tree(&subset, &keep)
+}

@@ -22,8 +22,8 @@
 
 ## Hito 2 — páginas navegables
 - [x] Anidación visual y reordenación de páginas; evitar ciclos. *(H2.1: árbol con subpáginas, plegar/desplegar, «+ Subpágina» y «Mover a…» con ciclos rechazados en la BD y destinos inválidos ocultos en la UI. H2.2: «Subir/Bajar» entre hermanas con renumeración transaccional. Tests verdes y verificación manual en macOS.)*
-- [ ] Favoritos, renombrado contextual, papelera, restauración. *(H2.3 verificada a mano: papelera por ramas con lista y «Restaurar»; sin borrado definitivo. H2.4 implementada: favoritos con migración aditiva 0002 (copias v1 restaurables); tests verdes en macOS, verificación manual pendiente. Renombrado contextual: H2.5.)*
-- [ ] Atajos de navegación y lista filtrable.
+- [ ] Favoritos, renombrado contextual, papelera, restauración. *(H2.3 y H2.4 verificadas a mano: papelera por ramas con «Restaurar», sin borrado definitivo; favoritos con migración aditiva 0002 y copias v1 restaurables. H2.5 implementada: menú contextual en cada página y renombrado en línea (F2); tests verdes en macOS, verificación manual pendiente.)*
+- [ ] Atajos de navegación y lista filtrable. *(H2.5 implementada: Cmd/Ctrl+N, Cmd/Ctrl+Mayús+N, Cmd/Ctrl+K, Alt+↑/↓, F2; la búsqueda filtra el árbol por título y lista aparte las coincidencias en el contenido. Tests verdes en macOS; verificación manual pendiente.)*
 
 ## Hito 3 — editor tipo Notion (primer valor diferencial)
 - [ ] Comandos de edición por bloque: Enter/Backspace/Tab/Shift-Tab.

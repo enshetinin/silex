@@ -47,7 +47,7 @@ Evitar recrear conexiones cada frame, filtrar SQL para búsqueda y virtualizar p
 Archivos en rutas estándar del OS; sin red, cookies, login o telemetría. No hay cifrado at-rest; documentarlo claramente. Atajos SQL y rutas de adjuntos requieren pruebas de escaping y traversal. Revisión de dependencias mediante Dependabot y auditoría futura.
 
 ## UI/UX
-Diseño editorial, navegación lateral, área central legible, estados de carga/guardado/error, accesibilidad por teclado. egui no replica automáticamente controles estéticos del OS: planificar esfuerzo visual explícito. UX de editor rich-text de varios bloques es el componente más complejo y requiere prototipos.
+Diseño editorial, navegación lateral, área central legible, estados de carga/guardado/error, accesibilidad por teclado. Atajos (H2.5) se leen al inicio de cada frame con `consume_shortcut`, antes de los widgets, comprobando primero los más específicos (Cmd+Mayús+N antes que Cmd+N). Las acciones sobre páginas (clic, menú contextual, teclado) pasan por un único `RowAction` → `SilexApp::apply`. egui no replica automáticamente controles estéticos del OS: planificar esfuerzo visual explícito. UX de editor rich-text de varios bloques es el componente más complejo y requiere prototipos.
 
 ## ADRs
 Cada decisión irreversible (formato de documento, sincronización, cifrado, editor, arquitectura de concurrencia) tiene su propia `docs/decisions/NNNN-*.md`: problema, alternativas, decisión, consecuencias, migración.

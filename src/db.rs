@@ -313,6 +313,17 @@ impl Database {
         Ok(true)
     }
 
+    /// Renames a live page. The FTS index follows through its trigger.
+    pub fn rename_page(&self, id: &str, title: &str) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE pages SET title = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, title],
+        )?;
+        ensure!(affected == 1, "La página no existe o está en la papelera");
+        Ok(())
+    }
+
     pub fn get_page(&self, id: &str) -> Result<Option<Page>> {
         self.conn
             .query_row(
