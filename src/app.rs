@@ -62,6 +62,10 @@ pub struct SilexApp {
     pending_paste: Option<(String, String)>,
     /// Last exported file, offered with "Abrir carpeta".
     last_export: Option<PathBuf>,
+    /// Markdown files being read on a worker thread.
+    import_job: Option<silex_desktop::import::ImportJob>,
+    /// Non-Markdown files dropped with the current import (reported at the end).
+    import_ignored: usize,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -191,6 +195,8 @@ impl SilexApp {
             pending_focus: None,
             pending_paste: None,
             last_export: None,
+            import_job: None,
+            import_ignored: 0,
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -1811,6 +1817,99 @@ impl SilexApp {
         });
     }
 
+    /// Files dropped on the window: `.md` files are imported in the background.
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        let (markdown, other): (Vec<PathBuf>, Vec<PathBuf>) = dropped
+            .into_iter()
+            .partition(|p| silex_desktop::import::is_markdown_path(p));
+        if markdown.is_empty() {
+            self.notice = Some(format!(
+                "Solo se importan archivos .md ({} ignorado(s)).",
+                other.len()
+            ));
+            return;
+        }
+        if self.import_job.is_some() {
+            self.notice = Some("Ya hay una importación en curso.".into());
+            return;
+        }
+        // Reported together with the result, so one message does not hide the other.
+        self.import_ignored = other.len();
+        let repaint = ctx.clone();
+        match silex_desktop::import::ImportJob::spawn(markdown, move || repaint.request_repaint()) {
+            Ok(job) => self.import_job = Some(job),
+            Err(err) => self.notice = Some(format!("Importación: {err:#}")),
+        }
+    }
+
+    /// Creates the pages read by the import job (one transaction each) and
+    /// opens the last one.
+    fn tick_import(&mut self) {
+        let Some(results) = self.import_job.as_ref().and_then(|j| j.poll()) else {
+            return;
+        };
+        self.import_job = None;
+        let mut created = Vec::new();
+        let mut errors = Vec::new();
+        for (path, result) in results {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match result.and_then(|page| {
+                self.db
+                    .create_page_with_blocks(&page.title, None, &page.blocks)
+            }) {
+                Ok(id) => created.push(id),
+                Err(err) => errors.push(format!("{name}: {err:#}")),
+            }
+        }
+        let outcome = (|| -> Result<()> {
+            self.reload_pages()?;
+            if let Some(last) = created.last() {
+                self.open_page(last.clone())?;
+            }
+            Ok(())
+        })();
+        self.report(outcome);
+        let mut message = format!("Importada(s) {} página(s).", created.len());
+        let ignored = std::mem::take(&mut self.import_ignored);
+        if ignored > 0 {
+            message.push_str(&format!(
+                " Solo se importan archivos .md ({ignored} ignorado(s))."
+            ));
+        }
+        if !errors.is_empty() {
+            message.push_str(&format!(" No se importaron: {}", errors.join("; ")));
+        }
+        self.notice = Some(message);
+    }
+
+    /// Centered hint while files are dragged over the window.
+    fn drop_hint(ctx: &egui::Context) {
+        if ctx.input(|i| i.raw.hovered_files.is_empty()) {
+            return;
+        }
+        egui::Area::new(egui::Id::unique("silex_drop_hint"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.heading("Suelta archivos .md para importarlos");
+                });
+            });
+    }
+
     /// Always-visible save state; an error offers an immediate retry.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let failed = match self.save.status() {
@@ -1918,6 +2017,7 @@ impl SilexApp {
     fn update_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
+        self.handle_dropped_files(&ctx);
         self.take_editor_key(&ctx);
         self.apply_pending_focus(&ctx);
         self.handle_selection_keys(&ctx);
@@ -1930,6 +2030,8 @@ impl SilexApp {
             let _ = self.save_now();
         }
         self.tick_backups(&ctx);
+        self.tick_import();
+        Self::drop_hint(&ctx);
         let now = Instant::now();
         if self.save.is_due(now) {
             let _ = self.save_now();
@@ -3190,6 +3292,80 @@ mod tests {
         let text = std::fs::read_to_string(&path)?;
         assert!(text.contains("- uno\\!\n  - dos\n"), "{text}"); // "!" is escaped
         assert!(app.save.can_close(), "saved before exporting");
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    /// A file dropped on the window (test double for egui's handle).
+    #[derive(Debug)]
+    struct TestDrop(std::path::PathBuf);
+
+    impl egui::DroppedFile for TestDrop {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+
+    fn drop_frame(app: &mut SilexApp, ctx: &egui::Context, files: &[std::path::PathBuf]) {
+        let input = egui::RawInput {
+            dropped_files: files
+                .iter()
+                .map(|f| std::sync::Arc::new(TestDrop(f.clone())) as egui::DroppedFileHandle)
+                .collect(),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn dropping_markdown_files_imports_them_as_pages() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir().join(format!("silex-drop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir)?;
+        let good = dir.join("receta.md");
+        std::fs::write(
+            &good,
+            "# Pan casero\n\n- harina\n  - integral\n- [x] amasar\n",
+        )?;
+        let latin1 = dir.join("vieja.md");
+        std::fs::write(&latin1, b"caf\xe9")?;
+        let other = dir.join("foto.png");
+        std::fs::write(&other, b"png")?;
+
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let ctx = egui::Context::default();
+        drop_frame(&mut app, &ctx, &[good, latin1, other.clone()]);
+        let start = std::time::Instant::now();
+        while app.import_job.is_some() && start.elapsed() < std::time::Duration::from_secs(30) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app_frame(&mut app, &ctx, vec![]);
+        }
+        assert!(app.import_job.is_none(), "import finished");
+        assert_eq!(app.title, "Pan casero", "the imported page is open");
+        assert_eq!(
+            contents(&app),
+            [
+                (Bul, 0, "harina".into()),
+                (Bul, 1, "integral".into()),
+                (BlockKind::Todo, 0, "amasar".into())
+            ]
+        );
+        let notice = app.notice.clone().unwrap_or_default();
+        assert!(notice.contains("Importada(s) 1"), "{notice}");
+        assert!(
+            notice.contains("vieja.md") && notice.contains("UTF-8"),
+            "{notice}"
+        );
+        assert!(notice.contains("1 ignorado"), "{notice}");
+
+        // Only non-Markdown files: nothing to import, just the message.
+        drop_frame(&mut app, &ctx, &[other]);
+        assert!(app.import_job.is_none());
+        let notice = app.notice.clone().unwrap_or_default();
+        assert!(notice.contains("1 ignorado"), "{notice}");
         std::fs::remove_dir_all(&dir)?;
         Ok(())
     }

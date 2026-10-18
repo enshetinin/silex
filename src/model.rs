@@ -97,6 +97,15 @@ impl Block {
     }
 }
 
+/// A block to create (import), before it has an id or a page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewBlock {
+    pub kind: BlockKind,
+    pub indent: u8,
+    pub checked: bool,
+    pub content: String,
+}
+
 /// Number shown before each numbered block (`None` for other blocks).
 /// One counter per indent level: a non-numbered block at the same level ends
 /// the list, and going back to a shallower level restarts deeper lists.

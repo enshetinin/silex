@@ -36,8 +36,8 @@
 - [x] Pruebas de cursor/foco, copy-paste y Unicode/IME. *(H3.5: pegar varias líneas crea bloques y reconstruye el formato de copia de Silex; integridad Unicode en todas las posiciones; Intro de confirmación del IME descartado durante la composición; pruebas manuales en `docs/MANUAL_QA.md`.)*
 
 ## Hito 4 — importación y exportación
-- [ ] Markdown → bloques con pruebas golden.
-- [ ] Bloques → Markdown estable. *(H4.1 implementada: `markdown::page_to_markdown` (CommonMark + tareas GFM, todo el texto escapado para volver idéntico), archivo golden y comprobación con `pulldown-cmark`; «Exportar a Markdown» a `Documentos/Silex/Exportaciones` con nombres seguros y escritura atómica. Tests verdes en macOS; verificación manual pendiente.)*
+- [ ] Markdown → bloques con pruebas golden. *(H4.2 implementada: `markdown::markdown_to_page` con `pulldown-cmark` (CommonMark + tareas GFM); el formato en línea que Silex no tiene se conserva como texto; golden de Markdown estilo Obsidian, GitHub y casos límite; ida y vuelta exacta y exportación estable; importar arrastrando `.md` a la ventana, en un hilo aparte, una transacción por página, máximo 10 MB y solo UTF-8. Tests verdes en macOS; verificación manual pendiente.)*
+- [ ] Bloques → Markdown estable. *(H4.1 verificada a mano: `markdown::page_to_markdown` (CommonMark + tareas GFM, todo el texto escapado para volver idéntico), archivo golden y comprobación con `pulldown-cmark`; «Exportar a Markdown» a `Documentos/Silex/Exportaciones` con nombres seguros y escritura atómica. Tests verdes y verificación manual en macOS.)*
 - [ ] Exportación de espacio de trabajo; adjuntos con rutas seguras.
 
 ## Hito 5 — UX de producto

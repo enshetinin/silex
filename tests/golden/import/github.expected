@@ -1,0 +1,12 @@
+título: Proyecto Silex
+paragraph 0| Descripción con un [enlace](https://example.com "Título") y una imagen ![logo](logo.png).⏎Autoenlace: <https://silex.dev> y correo <hola@silex.dev>.
+heading_2 0| Instalación
+numbered 0| Quinto paso
+numbered 0| Sexto paso
+paragraph 1| cargo build --release
+heading_3 0| Detalles de nivel 4
+paragraph 0| <details>⏎<summary>Más</summary>⏎</details>
+paragraph 0| | Columna | Otra |⏎|---------|------|⏎| a       | b    |
+numbered 0| Lista numerada
+bulleted 1| con viñeta dentro
+numbered 0| Segundo
