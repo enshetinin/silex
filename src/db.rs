@@ -14,8 +14,19 @@ use crate::model::{Block, Page, TrashItem};
 
 pub mod backup;
 
-const LATEST_SCHEMA_VERSION: i64 = 1;
-const SCHEMA_V1: &str = include_str!("db/migrations/0001_init.sql");
+/// Published migrations, in order. Never edit one that has shipped: add a new file.
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("db/migrations/0001_init.sql")),
+    (2, include_str!("db/migrations/0002_favorites.sql")),
+];
+const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
+
+/// Whether to back up an existing database before upgrading its schema.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PreMigrationBackup {
+    Yes,
+    No,
+}
 
 /// Direction for [`Database::reorder_page`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +57,7 @@ impl Database {
         let conn = Connection::open(path).context("No se puede abrir SQLite")?;
         let mut db = Self { conn };
         db.configure()?;
-        db.migrate()?;
+        db.migrate(PreMigrationBackup::Yes)?;
         Ok(db)
     }
 
@@ -95,13 +106,14 @@ impl Database {
             })?;
         // The copy is a single-file (DELETE journal) database; restore WAL and pragmas.
         self.configure()?;
-        let version: i64 = self
-            .conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))?;
-        ensure!(
-            version == LATEST_SCHEMA_VERSION,
-            "La base restaurada tiene un esquema inesperado ({version})"
-        );
+        // An older copy is upgraded in place. No extra backup: the chosen copy
+        // itself is the old-schema version, and `safety` holds the prior state.
+        self.migrate(PreMigrationBackup::No).with_context(|| {
+            format!(
+                "La copia se restauró pero no se pudo actualizar su esquema; el estado anterior está en {}",
+                safety.display()
+            )
+        })?;
         Ok(safety)
     }
 
@@ -109,7 +121,7 @@ impl Database {
         let conn = Connection::open_in_memory()?;
         let mut db = Self { conn };
         db.configure()?;
-        db.migrate()?;
+        db.migrate(PreMigrationBackup::No)?;
         Ok(db)
     }
 
@@ -121,20 +133,74 @@ impl Database {
         Ok(())
     }
 
-    fn migrate(&mut self) -> Result<()> {
+    /// Applies all pending migrations in ONE transaction: the database ends
+    /// either fully upgraded or exactly as it was. An existing file database
+    /// is backed up (verified copy) before an upgrade.
+    fn migrate(&mut self, pre_backup: PreMigrationBackup) -> Result<()> {
         let version: i64 = self
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version > LATEST_SCHEMA_VERSION {
             bail!("La base de datos usa un esquema más reciente ({version})");
         }
-        if version == 0 {
-            let tx = self.conn.transaction()?;
-            tx.execute_batch(SCHEMA_V1)?;
-            tx.pragma_update(None, "user_version", LATEST_SCHEMA_VERSION)?;
-            tx.commit()?;
+        if version == LATEST_SCHEMA_VERSION {
+            return Ok(());
         }
+        if version > 0
+            && pre_backup == PreMigrationBackup::Yes
+            && let Some(path) = self.path()
+        {
+            backup::create_backup(&path, &backup::backups_dir(&path)).context(
+                "No se pudo crear la copia previa a la actualización; la base no se ha modificado",
+            )?;
+        }
+        let tx = self.conn.transaction()?;
+        for (target, sql) in MIGRATIONS.iter().filter(|(v, _)| *v > version) {
+            tx.execute_batch(sql)
+                .with_context(|| format!("La migración al esquema {target} falló"))?;
+            tx.pragma_update(None, "user_version", target)?;
+        }
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Schema version of this database (`PRAGMA user_version`).
+    pub fn schema_version(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))?)
+    }
+
+    /// Marks or unmarks a live page as favorite. Marking keeps the original
+    /// date, so re-marking does not move it in the list.
+    pub fn set_favorite(&self, id: &str, favorite: bool) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE pages SET favorite_at = CASE WHEN ?2
+                 THEN COALESCE(favorite_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                 ELSE NULL END
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, favorite],
+        )?;
+        ensure!(affected == 1, "La página no existe o está en la papelera");
+        Ok(())
+    }
+
+    /// Live favorite pages, in the order they were marked. Trashed favorites
+    /// are hidden and come back if the page is restored.
+    pub fn list_favorites(&self) -> Result<Vec<Page>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_id, title FROM pages
+             WHERE favorite_at IS NOT NULL AND deleted_at IS NULL
+             ORDER BY favorite_at, id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Page {
+                id: r.get(0)?,
+                parent_id: r.get(1)?,
+                title: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn list_pages(&self) -> Result<Vec<Page>> {

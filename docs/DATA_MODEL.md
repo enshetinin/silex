@@ -18,10 +18,15 @@
 ### Búsqueda
 `page_search` y `block_search` son tablas virtuales FTS5 external-content que consultan el `rowid` de tablas normales. Triggers mantienen índices tras inserciones, cambios y eliminaciones. Los resultados filtran páginas con `deleted_at IS NULL`.
 
+## Versión 2 — favoritos (`0002_favorites.sql`)
+- `pages.favorite_at TEXT NULL`: `NULL` significa que no es favorita; la fecha ordena la lista de favoritos (de más antigua a más reciente). Índice parcial `pages_favorite_idx`.
+- Las favoritas en la papelera se ocultan y vuelven al restaurar la página.
+
 ## Evolución
-- La migración `0001_init.sql` es inmutable una vez liberada.
-- Nuevos campos/tipos/tablas en migración `0002_*.sql`; incrementar `LATEST_SCHEMA_VERSION` e incorporar pruebas desde una base antigua.
-- Migrar dentro de transacciones; respaldar datos antes de operaciones irreversibles.
+- Las migraciones publicadas (`0001`, `0002`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
+- Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).
+- Antes de actualizar una base existente en disco se crea una copia verificada con el esquema antiguo. Si esa copia falla, no se migra.
+- Las copias de esquemas anteriores son válidas: la verificación acepta `1..=LATEST` y la restauración actualiza la base después de restaurar.
 - Desacoplar el `BlockKind` de los nombres SQL con enum tipado cuando crezca el editor.
 - Evolucionar a `document_operations` para undo/redo e historial si existen requisitos concretos; no convertir el editor en CRDT prematuramente.
 

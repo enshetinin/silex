@@ -83,10 +83,11 @@ pub fn verify_backup(path: &Path) -> Result<()> {
         problems.join("; ")
     );
 
+    // Older schema versions are valid: restoring upgrades them.
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     ensure!(
-        version == LATEST_SCHEMA_VERSION,
-        "La copia tiene un esquema inesperado ({version})"
+        (1..=LATEST_SCHEMA_VERSION).contains(&version),
+        "La copia tiene un esquema desconocido ({version})"
     );
 
     // Table names are constants, not user input. rank = 1 also compares the
