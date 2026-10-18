@@ -20,6 +20,7 @@ pub struct SilexApp {
     expanded: HashSet<String>,
     trash_count: usize,
     trash_dialog: Option<TrashDialog>,
+    favorites: Vec<Page>,
     selected: Option<String>,
     title: String,
     blocks: Vec<Block>,
@@ -67,6 +68,7 @@ impl SilexApp {
             expanded: HashSet::new(),
             trash_count: 0,
             trash_dialog: None,
+            favorites: Vec::new(),
             selected: None,
             title: String::new(),
             blocks: Vec::new(),
@@ -84,6 +86,7 @@ impl SilexApp {
         };
         app.backup_label = app.describe_last_backup();
         app.trash_count = app.db.trash_count()?;
+        app.favorites = app.db.list_favorites()?;
         app.rebuild_tree();
         if let Some(row) = app.tree.first() {
             app.open_page(row.page.id.clone())?;
@@ -108,8 +111,38 @@ impl SilexApp {
     fn reload_pages(&mut self) -> Result<()> {
         self.pages = self.db.list_pages()?;
         self.trash_count = self.db.trash_count()?;
+        self.favorites = self.db.list_favorites()?;
         self.rebuild_tree();
         Ok(())
+    }
+
+    fn set_favorite(&mut self, id: &str, favorite: bool) -> Result<()> {
+        self.db.set_favorite(id, favorite)?;
+        self.favorites = self.db.list_favorites()?;
+        Ok(())
+    }
+
+    /// Favorites section; hidden when there are none.
+    fn favorite_rows(&mut self, ui: &mut egui::Ui) {
+        if self.favorites.is_empty() {
+            return;
+        }
+        ui.label("Favoritos");
+        let mut open = None;
+        for page in &self.favorites {
+            let selected = self.selected.as_deref() == Some(page.id.as_str());
+            if ui
+                .selectable_label(selected, display_title(&page.title))
+                .clicked()
+            {
+                open = Some(page.id.clone());
+            }
+        }
+        if let Some(id) = open {
+            let result = self.open_page(id);
+            self.report(result);
+        }
+        ui.separator();
     }
 
     /// Opens the first page in the tree, or shows the empty state.
@@ -340,7 +373,15 @@ impl SilexApp {
                     }
                 });
         });
+        let is_favorite = self.favorites.iter().any(|p| p.id == page_id);
+        let mut toggle_favorite = false;
         ui.horizontal(|ui| {
+            let label = if is_favorite {
+                "Quitar de favoritos"
+            } else {
+                "Añadir a favoritos"
+            };
+            toggle_favorite = ui.button(label).clicked();
             trash = ui
                 .button("Enviar a la papelera")
                 .on_hover_text("Se mueve con sus subpáginas; se puede restaurar")
@@ -348,6 +389,10 @@ impl SilexApp {
         });
         if subpage {
             let result = self.create_subpage(page_id);
+            self.report(result);
+        }
+        if toggle_favorite {
+            let result = self.set_favorite(page_id, !is_favorite);
             self.report(result);
         }
         if trash {
@@ -575,6 +620,9 @@ impl SilexApp {
         ui.label("Buscar (título y contenido)");
         ui.add(TextEdit::singleline(&mut self.query).hint_text("Buscar…"));
         ui.separator();
+        if self.query.is_empty() {
+            self.favorite_rows(ui);
+        }
         ui.label("Páginas");
         if self.query.is_empty() {
             egui::ScrollArea::vertical()
@@ -996,8 +1044,10 @@ mod tests {
         let child = app.db.create_page("Hija", Some(&page))?;
         app.db.create_page("Nieta", Some(&child))?;
         app.db.create_page("Hija 2", Some(&page))?;
+        app.db.set_favorite(&child, true)?;
         app.expanded.extend([page.clone(), child]);
         app.reload_pages()?;
+        assert_eq!(app.favorites.len(), 1);
         let depths: Vec<usize> = app.tree.iter().map(|r| r.depth).collect();
         assert_eq!(depths, vec![0, 1, 2, 1]);
 
