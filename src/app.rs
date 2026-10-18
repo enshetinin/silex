@@ -30,6 +30,9 @@ pub struct SilexApp {
     /// The startup backup check needs an egui context, so it runs on the first frame.
     startup_backup_pending: bool,
     restore_dialog: Option<RestoreDialog>,
+    /// Bumped when the whole document set is replaced (restore), so text
+    /// fields start with a fresh undo history instead of pre-restore text.
+    doc_generation: u64,
 }
 
 /// Backup picker; restoring needs an explicit second click on a selected copy.
@@ -62,6 +65,7 @@ impl SilexApp {
             backup_label: String::new(),
             startup_backup_pending: true,
             restore_dialog: None,
+            doc_generation: 0,
         };
         app.backup_label = app.describe_last_backup();
         if let Some(page) = app.pages.first() {
@@ -191,6 +195,7 @@ impl SilexApp {
         self.save_now()
             .context("Hay cambios sin guardar; guárdalos antes de restaurar")?;
         let safety = self.db.restore_from_backup(backup_file)?;
+        self.doc_generation += 1;
         let previous = self.selected.take();
         self.title.clear();
         self.blocks.clear();
@@ -217,6 +222,7 @@ impl SilexApp {
                 ui.label("Aún no hay copias de seguridad.");
             }
             egui::ScrollArea::vertical()
+                .id_salt("silex_restore_list")
                 .max_height(260.0)
                 .show(ui, |ui| {
                     for (i, path) in dialog.backups.iter().enumerate() {
@@ -304,6 +310,7 @@ impl SilexApp {
             Ok(pages) => {
                 let mut open = None;
                 egui::ScrollArea::vertical()
+                    .id_salt("silex_sidebar_pages")
                     .max_height(400.0)
                     .show(ui, |ui| {
                         for page in &pages {
@@ -373,6 +380,7 @@ impl SilexApp {
         let changed = ui
             .add(
                 TextEdit::singleline(&mut self.title)
+                    .id(field_id(self.doc_generation, "title", &page_id))
                     .font(egui::TextStyle::Heading)
                     .desired_width(f32::INFINITY),
             )
@@ -382,33 +390,14 @@ impl SilexApp {
         }
         ui.add_space(14.0);
         let mut modified = false;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for block in &mut self.blocks {
-                ui.horizontal(|ui| {
-                    if block.is_todo() {
-                        modified |= ui.checkbox(&mut block.checked, "").changed();
-                    }
-                    if block.kind == "heading" {
-                        modified |= ui
-                            .add(
-                                TextEdit::singleline(&mut block.content)
-                                    .font(egui::TextStyle::Heading)
-                                    .desired_width(f32::INFINITY),
-                            )
-                            .changed();
-                    } else {
-                        modified |= ui
-                            .add(
-                                TextEdit::multiline(&mut block.content)
-                                    .desired_rows(2)
-                                    .desired_width(f32::INFINITY),
-                            )
-                            .changed();
-                    }
-                });
-                ui.add_space(8.0);
-            }
-        });
+        egui::ScrollArea::vertical()
+            .id_salt("silex_editor_blocks")
+            .show(ui, |ui| {
+                for block in &mut self.blocks {
+                    modified |= block_field(ui, self.doc_generation, block);
+                    ui.add_space(8.0);
+                }
+            });
         if modified {
             self.mark_dirty();
         }
@@ -429,6 +418,21 @@ impl SilexApp {
                     self.report(result);
                 }
             }
+        });
+    }
+
+    /// Sidebar and editor columns.
+    fn layout(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(230.0);
+                self.sidebar(ui);
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.set_min_width(500.0);
+                self.editor(ui);
+            });
         });
     }
 
@@ -536,17 +540,7 @@ enum CloseAction {
 
 impl eframe::App for SilexApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(230.0);
-                self.sidebar(ui);
-            });
-            ui.separator();
-            ui.vertical(|ui| {
-                ui.set_min_width(500.0);
-                self.editor(ui);
-            });
-        });
+        self.layout(ui);
         let ctx = ui.ctx().clone();
         // Save errors are shown by the status bar, so results are not reported twice.
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
@@ -580,5 +574,165 @@ impl Drop for SilexApp {
         if let Err(err) = self.save_now() {
             eprintln!("Silex: no se guardaron cambios al cerrar: {err:#}");
         }
+    }
+}
+
+/// Text field ids follow the page/block id, not the position on screen, so
+/// each field keeps its own undo history (egui: Cmd/Ctrl+Z, Shift+Cmd+Z or
+/// Ctrl+Y) when blocks are added or pages switched. See ADR 0002.
+fn field_id(generation: u64, kind: &str, id: &str) -> egui::Id {
+    egui::Id::unique(("silex-field", generation, kind, id))
+}
+
+/// Renders one block; returns true when its content or checkbox changed.
+fn block_field(ui: &mut egui::Ui, generation: u64, block: &mut Block) -> bool {
+    let id = field_id(generation, "block", &block.id);
+    ui.horizontal(|ui| {
+        let mut changed = false;
+        if block.is_todo() {
+            changed |= ui.checkbox(&mut block.checked, "").changed();
+        }
+        let edit = if block.kind == "heading" {
+            TextEdit::singleline(&mut block.content).font(egui::TextStyle::Heading)
+        } else {
+            TextEdit::multiline(&mut block.content).desired_rows(2)
+        };
+        changed |= ui.add(edit.id(id).desired_width(f32::INFINITY)).changed();
+        changed
+    })
+    .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block(id: &str) -> Block {
+        Block {
+            id: id.into(),
+            page_id: "p".into(),
+            kind: "paragraph".into(),
+            content: String::new(),
+            checked: false,
+            position: 0,
+        }
+    }
+
+    /// Headless egui: runs one frame with the given events at `time` seconds.
+    fn frame(
+        ctx: &egui::Context,
+        time: f64,
+        events: Vec<egui::Event>,
+        blocks: &mut [Block],
+        focus: Option<egui::Id>,
+    ) -> bool {
+        let input = egui::RawInput {
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let mut changed = false;
+        let mut output = ctx.run_ui(input, |ui| {
+            if let Some(id) = focus {
+                ui.memory_mut(|m| m.request_focus(id));
+            }
+            for block in blocks.iter_mut() {
+                changed |= block_field(ui, 0, block);
+            }
+        });
+        // Headless: nothing renders the font texture, so drop it explicitly.
+        output.textures_delta.clear();
+        changed
+    }
+
+    fn type_text(text: &str) -> Vec<egui::Event> {
+        vec![egui::Event::Text(text.into())]
+    }
+
+    fn undo() -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }]
+    }
+
+    /// Collects all text painted in a frame (egui paints ID-clash warnings as text).
+    fn painted_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(inner) => inner.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    #[test]
+    fn main_layout_has_no_id_clashes() -> anyhow::Result<()> {
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let page = app.selected.clone().expect("first page is open");
+        for kind in ["heading", "paragraph", "todo"] {
+            app.db.add_block(&page, kind)?;
+        }
+        app.blocks = app.db.list_blocks(&page)?;
+
+        let ctx = egui::Context::default();
+        let mut warnings = Vec::new();
+        // Two frames: egui reports clashes against the previous frame's widgets too.
+        for time in [0.0, 0.1] {
+            let input = egui::RawInput {
+                time: Some(time),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.layout(ui));
+            output.textures_delta.clear();
+            warnings = painted_text(&output.shapes)
+                .into_iter()
+                .filter(|t| t.contains(" use of ") && t.contains(" ID "))
+                .collect();
+        }
+        assert!(warnings.is_empty(), "egui ID clashes: {warnings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn field_ids_follow_block_and_generation() {
+        assert_eq!(field_id(0, "block", "a"), field_id(0, "block", "a"));
+        assert_ne!(field_id(0, "block", "a"), field_id(0, "block", "b"));
+        assert_ne!(field_id(0, "block", "a"), field_id(1, "block", "a"));
+        assert_ne!(field_id(0, "block", "a"), field_id(0, "title", "a"));
+    }
+
+    #[test]
+    fn undo_stays_with_its_block_when_blocks_move() {
+        let ctx = egui::Context::default();
+        let a = field_id(0, "block", "a");
+        let mut blocks = vec![block("a"), block("b")];
+
+        frame(&ctx, 0.0, vec![], &mut blocks, Some(a));
+        frame(&ctx, 0.1, vec![], &mut blocks, None);
+        assert!(frame(&ctx, 0.2, type_text("hola"), &mut blocks, None));
+        // Let egui's undoer record the new state.
+        frame(&ctx, 2.0, vec![], &mut blocks, None);
+        frame(&ctx, 4.0, vec![], &mut blocks, None);
+        assert_eq!(blocks[0].content, "hola");
+
+        // A new block appears before "a": positions shift by one.
+        blocks.insert(0, block("nuevo"));
+        frame(&ctx, 4.1, vec![], &mut blocks, Some(a));
+        frame(&ctx, 4.2, vec![], &mut blocks, None);
+        let changed = frame(&ctx, 4.3, undo(), &mut blocks, None);
+
+        assert!(changed, "undo must mark the document dirty");
+        assert_eq!(blocks[1].id, "a");
+        assert_eq!(blocks[1].content, "", "undo reverts block a");
+        assert_eq!(blocks[0].content, "", "the new block is untouched");
+        assert_eq!(blocks[2].content, "", "block b is untouched");
     }
 }
