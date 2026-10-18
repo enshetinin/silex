@@ -1,5 +1,8 @@
 //! All SQL lives here. Callers never construct SQL from user input.
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
@@ -7,6 +10,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::model::{Block, Page};
+
+pub mod backup;
 
 const LATEST_SCHEMA_VERSION: i64 = 1;
 const SCHEMA_V1: &str = include_str!("db/migrations/0001_init.sql");
@@ -35,6 +40,25 @@ impl Database {
         db.configure()?;
         db.migrate()?;
         Ok(db)
+    }
+
+    /// File backing this database; `None` for in-memory databases.
+    pub fn path(&self) -> Option<PathBuf> {
+        self.conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+    }
+
+    /// True when the newest backup in `dir` is missing or older than
+    /// [`backup::MAX_AGE_HOURS`]. Uses SQLite's UTC clock, like backup names.
+    pub fn backup_due(&self, dir: &Path) -> Result<bool> {
+        let threshold: String = self.conn.query_row(
+            "SELECT strftime('%Y%m%d-%H%M%S', 'now', ?1)",
+            [format!("-{} hours", backup::MAX_AGE_HOURS)],
+            |r| r.get(0),
+        )?;
+        Ok(backup::newest_stamp(dir)?.is_none_or(|newest| newest < threshold))
     }
 
     pub fn open_in_memory() -> Result<Self> {

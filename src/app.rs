@@ -3,7 +3,10 @@ use std::time::Instant;
 use anyhow::Result;
 use eframe::egui::{self, TextEdit};
 use silex_desktop::{
-    db::Database,
+    db::{
+        Database,
+        backup::{self, BackupJob},
+    },
     model::{Block, Page},
     save_state::{SaveState, SaveStatus},
 };
@@ -22,6 +25,10 @@ pub struct SilexApp {
     close_dialog: bool,
     /// Set once the user may leave: everything saved or changes discarded.
     allow_close: bool,
+    backup_job: Option<BackupJob>,
+    backup_label: String,
+    /// The startup backup check needs an egui context, so it runs on the first frame.
+    startup_backup_pending: bool,
 }
 
 impl SilexApp {
@@ -43,7 +50,11 @@ impl SilexApp {
             notice: None,
             close_dialog: false,
             allow_close: false,
+            backup_job: None,
+            backup_label: String::new(),
+            startup_backup_pending: true,
         };
+        app.backup_label = app.describe_last_backup();
         if let Some(page) = app.pages.first() {
             app.open_page(page.id.clone())?;
         }
@@ -91,6 +102,60 @@ impl SilexApp {
             Err(err) => {
                 self.save.record_failure(Instant::now(), format!("{err:#}"));
                 Err(err)
+            }
+        }
+    }
+
+    fn describe_last_backup(&self) -> String {
+        let Some(path) = self.db.path() else {
+            return "Copias no disponibles (base en memoria)".into();
+        };
+        match backup::newest_stamp(&backup::backups_dir(&path)) {
+            Ok(Some(stamp)) => format!("Última copia: {}", backup::describe_stamp(&stamp)),
+            Ok(None) => "Aún no hay copias".into(),
+            Err(err) => format!("Copias: {err:#}"),
+        }
+    }
+
+    fn start_backup(&mut self, ctx: &egui::Context) {
+        if self.backup_job.is_some() {
+            return;
+        }
+        let Some(source) = self.db.path() else {
+            return;
+        };
+        let dir = backup::backups_dir(&source);
+        let ctx = ctx.clone();
+        match BackupJob::spawn(source, dir, move || ctx.request_repaint()) {
+            Ok(job) => {
+                self.backup_job = Some(job);
+                self.backup_label = "Creando copia…".into();
+            }
+            Err(err) => self.notice = Some(format!("Copia de seguridad: {err:#}")),
+        }
+    }
+
+    /// Automatic backup at startup when the newest one is too old, then
+    /// collects results from the worker without blocking the UI.
+    fn tick_backups(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.startup_backup_pending)
+            && let Some(path) = self.db.path()
+        {
+            match self.db.backup_due(&backup::backups_dir(&path)) {
+                Ok(true) => self.start_backup(ctx),
+                Ok(false) => {}
+                Err(err) => self.notice = Some(format!("Copia de seguridad: {err:#}")),
+            }
+        }
+        let Some(result) = self.backup_job.as_ref().and_then(BackupJob::poll) else {
+            return;
+        };
+        self.backup_job = None;
+        match result {
+            Ok(_) => self.backup_label = self.describe_last_backup(),
+            Err(err) => {
+                self.backup_label = "La última copia falló".into();
+                self.notice = Some(format!("Copia de seguridad fallida: {err:#}"));
             }
         }
     }
@@ -151,6 +216,15 @@ impl SilexApp {
                 self.open_page(id)
             })();
             self.report(result);
+        }
+        ui.separator();
+        ui.small(&self.backup_label);
+        let can_backup = self.backup_job.is_none() && self.db.path().is_some();
+        if ui
+            .add_enabled(can_backup, egui::Button::new("Crear copia ahora"))
+            .clicked()
+        {
+            self.start_backup(ui.ctx());
         }
     }
 
@@ -351,6 +425,7 @@ impl eframe::App for SilexApp {
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             let _ = self.save_now();
         }
+        self.tick_backups(&ctx);
         let now = Instant::now();
         if self.save.is_due(now) {
             let _ = self.save_now();

@@ -32,7 +32,7 @@
 - Falta backup/restauración con interfaz de usuario.
 - FTS frase exacta; el UX de búsqueda necesita ranking, snippets, prefijos y normalización.
 - El schema permite pages hijas de páginas enviadas a la papelera; hay que definir semántica recursiva.
-- FTS external-content se enlaza por el `rowid` implícito de `pages`/`blocks` (PK `TEXT`). SQLite documenta que `VACUUM` puede cambiar esos `rowid`; no se ha reproducido, pero los backups con `VACUUM INTO` (hito 1) deben verificar o reconstruir el índice (`INSERT INTO page_search(page_search) VALUES('rebuild')`) y tener un test.
+- FTS external-content se enlaza por el `rowid` implícito de `pages`/`blocks` (PK `TEXT`). SQLite documenta que `VACUUM` puede cambiar esos `rowid`. Por eso las copias usan la API de backup (copia páginas y conserva `rowid`), no `VACUUM INTO`, y cada copia pasa el `integrity-check` de FTS5 contra su tabla de contenido (test `verify_detects_search_index_out_of_sync`). No ejecutar `VACUUM` sin un `rebuild` posterior del índice.
 - Si un guardado falla, los cambios siguen en memoria, el error se muestra y se reintenta con backoff (`src/save_state.rs`). Cerrar la ventana con cambios sin guardar se bloquea hasta reintentar con éxito o descartar explícitamente. Si el proceso termina sin petición de cierre (p. ej. lo mata el sistema), solo queda el último guardado automático.
 
 ## Tests mínimos posteriores

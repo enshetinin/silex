@@ -35,7 +35,7 @@ Actualmente las consultas son cortas y se ejecutan en el hilo UI (medido: < 1 ms
 - WAL cuando esté soportado por el archivo; `synchronous=FULL` en el starter.
 - FTS5 mediante triggers para títulos y contenido de bloques.
 - Esquema con `PRAGMA user_version`, transacciones de migración y rechazo a esquemas posteriores.
-- Las copias deben ser consistentes: preferir SQLite backup API/VACUUM INTO; **no copiar solo el .sqlite3 mientras la app está abierta con WAL**.
+- Copias (`src/db/backup.rs`): API de backup de SQLite en un hilo `silex-backup` con su propia conexión. El resultado vuelve por un canal, y la UI solo lo consulta en cada frame. Se escribe en `*.partial`, se pasa a modo de diario `DELETE` (un solo archivo), se verifica (`integrity_check`, `user_version`, `integrity-check` de FTS5) y solo entonces se renombra a `backups/silex-AAAAMMDD-HHMMSS.sqlite3` (UTC). La rotación (10) solo borra archivos con ese patrón y solo después de una copia verificada. Si la app se cierra a mitad de una copia, el `.partial` se limpia en la siguiente. **Nunca copiar solo el .sqlite3 mientras la app está abierta con WAL.**
 - La papelera inicial solo oculta páginas; restauración y reglas recursivas se desarrollan después.
 
 ## Rendimiento
