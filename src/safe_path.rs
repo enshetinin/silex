@@ -83,3 +83,23 @@ pub fn join_inside(root: &Path, parts: &[&str]) -> Result<PathBuf> {
     }
     Ok(path)
 }
+
+/// A safe stem whose file (`stem.extension`) **and** same-named folder
+/// (`stem`) are both free among `taken` (compared without case); reserves
+/// both. Used where a page's file sits next to the folder of its subpages.
+pub fn unique_stem(title: &str, extension: &str, taken: &mut HashSet<String>) -> String {
+    let base = safe_stem(title);
+    let mut stem = base.clone();
+    let mut n = 2;
+    let busy = |stem: &str, taken: &HashSet<String>| {
+        taken.contains(&stem.to_lowercase())
+            || taken.contains(&format!("{stem}.{extension}").to_lowercase())
+    };
+    while busy(&stem, taken) {
+        stem = format!("{base} ({n})");
+        n += 1;
+    }
+    taken.insert(stem.to_lowercase());
+    taken.insert(format!("{stem}.{extension}").to_lowercase());
+    stem
+}

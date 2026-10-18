@@ -62,6 +62,13 @@ impl Database {
         Ok(db)
     }
 
+    /// Current UTC time as `YYYYMMDD-HHMMSS` (from SQLite, like backup names).
+    pub fn utc_stamp(&self) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row("SELECT strftime('%Y%m%d-%H%M%S', 'now')", [], |r| r.get(0))?)
+    }
+
     /// File backing this database; `None` for in-memory databases.
     pub fn path(&self) -> Option<PathBuf> {
         self.conn

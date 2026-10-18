@@ -66,6 +66,8 @@ pub struct SilexApp {
     import_job: Option<silex_desktop::import::ImportJob>,
     /// Non-Markdown files dropped with the current import (reported at the end).
     import_ignored: usize,
+    /// Whole-workspace export running on a worker thread.
+    export_job: Option<silex_desktop::export::WorkspaceExportJob>,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -197,6 +199,7 @@ impl SilexApp {
             last_export: None,
             import_job: None,
             import_ignored: 0,
+            export_job: None,
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -1076,8 +1079,14 @@ impl SilexApp {
         };
         ui.horizontal(|ui| {
             ui.label(format!("Exportada a {}", path.display()));
+            // A workspace export is a folder: open it; for a page, its folder.
+            let folder = if path.is_dir() {
+                Some(path.as_path())
+            } else {
+                path.parent()
+            };
             if ui.small_button("Abrir carpeta").clicked()
-                && let Some(dir) = path.parent()
+                && let Some(dir) = folder
             {
                 let result = silex_desktop::export::open_in_file_manager(dir);
                 self.report(result);
@@ -1607,6 +1616,21 @@ impl SilexApp {
         {
             self.open_trash_dialog();
         }
+        let can_export = self.export_job.is_none() && self.db.path().is_some();
+        let label = if self.export_job.is_some() {
+            "Exportando…"
+        } else {
+            "Exportar todo a Markdown"
+        };
+        if ui
+            .add_enabled(can_export, egui::Button::new(label))
+            .on_hover_text("Todas las páginas (sin la papelera) en una carpeta nueva")
+            .clicked()
+        {
+            let result = silex_desktop::export::export_root()
+                .and_then(|root| self.start_workspace_export(ui.ctx(), root));
+            self.report(result);
+        }
         Self::shortcuts_help(ui);
         ui.separator();
         ui.small(&self.backup_label);
@@ -1815,6 +1839,40 @@ impl SilexApp {
                 self.editor(ui);
             });
         });
+    }
+
+    /// Starts exporting every page to a new folder under `root`, in the background.
+    fn start_workspace_export(&mut self, ctx: &egui::Context, root: PathBuf) -> Result<()> {
+        // A save error is shown by the status bar; the export reads the database.
+        let _ = self.save_now();
+        let db_path = self
+            .db
+            .path()
+            .context("No se puede exportar una base en memoria")?;
+        let repaint = ctx.clone();
+        self.export_job = Some(silex_desktop::export::WorkspaceExportJob::spawn(
+            db_path,
+            root,
+            move || repaint.request_repaint(),
+        )?);
+        Ok(())
+    }
+
+    fn tick_workspace_export(&mut self) {
+        let Some(result) = self.export_job.as_ref().and_then(|j| j.poll()) else {
+            return;
+        };
+        self.export_job = None;
+        match result {
+            Ok(export) => {
+                self.notice = Some(format!(
+                    "Espacio de trabajo exportado ({} página(s)).",
+                    export.pages
+                ));
+                self.last_export = Some(export.dir);
+            }
+            Err(err) => self.notice = Some(format!("No se pudo exportar: {err:#}")),
+        }
     }
 
     /// Files dropped on the window: `.md` files are imported in the background.
@@ -2031,6 +2089,7 @@ impl SilexApp {
         }
         self.tick_backups(&ctx);
         self.tick_import();
+        self.tick_workspace_export();
         Self::drop_hint(&ctx);
         let now = Instant::now();
         if self.save.is_due(now) {
@@ -3366,6 +3425,36 @@ mod tests {
         assert!(app.import_job.is_none());
         let notice = app.notice.clone().unwrap_or_default();
         assert!(notice.contains("1 ignorado"), "{notice}");
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_export_runs_in_the_background_and_saves_first() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir().join(format!("silex-app-ws-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir)?;
+        let mut app = SilexApp::new(Database::open(dir.join("silex.sqlite3"))?)?;
+        app.title = "Título sin guardar".into();
+        app.mark_dirty();
+        let ctx = egui::Context::default();
+        app.start_workspace_export(&ctx, dir.join("exportaciones"))?;
+        assert!(app.save.can_close(), "saved before exporting");
+        let start = std::time::Instant::now();
+        while app.export_job.is_some() && start.elapsed() < std::time::Duration::from_secs(30) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app_frame(&mut app, &ctx, vec![]);
+        }
+        let folder = app.last_export.clone().expect("export finished");
+        assert!(folder.join("Título sin guardar.md").exists());
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("1 página"))
+        );
+
+        // In-memory databases cannot be exported from another thread.
+        let mut memory = SilexApp::new(Database::open_in_memory()?)?;
+        assert!(memory.start_workspace_export(&ctx, dir.join("x")).is_err());
         std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
