@@ -30,8 +30,10 @@ impl Drop for TempDir {
 
 /// Version 1 of a document, backed up; then edited into version 2.
 struct Scenario {
-    tmp: TempDir,
+    // Fields drop in declaration order: the database must close before its
+    // folder is removed (Windows cannot delete open files).
     db: Database,
+    tmp: TempDir,
     page_id: String,
     later_page: String,
     v1_backup: PathBuf,

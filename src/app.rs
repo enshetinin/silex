@@ -3345,14 +3345,33 @@ mod tests {
     fn exporting_writes_what_is_on_screen_and_offers_the_folder() -> anyhow::Result<()> {
         let (mut app, ctx) = editor_app(&[(Bul, 0, "uno"), (Bul, 1, "dos")], 0, 3)?;
         type_into(&mut app, &ctx, "!"); // unsaved edit
-        let dir = std::env::temp_dir().join(format!("silex-app-export-{}", uuid::Uuid::new_v4()));
+        // Removed on drop; the in-memory app keeps no files open inside it.
+        let tmp = TempFolder::new("silex-app-export")?;
+        let dir = tmp.0.clone();
         app.export_current_page_to(&dir)?;
         let path = app.last_export.clone().expect("export offered");
         let text = std::fs::read_to_string(&path)?;
         assert!(text.contains("- uno\\!\n  - dos\n"), "{text}"); // "!" is escaped
         assert!(app.save.can_close(), "saved before exporting");
-        std::fs::remove_dir_all(&dir)?;
         Ok(())
+    }
+
+    /// Temporary folder removed on drop (best effort). Declare it before
+    /// anything that keeps files inside it open, so it is dropped last.
+    struct TempFolder(std::path::PathBuf);
+
+    impl TempFolder {
+        fn new(prefix: &str) -> anyhow::Result<Self> {
+            let dir = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir)?;
+            Ok(Self(dir))
+        }
+    }
+
+    impl Drop for TempFolder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     /// A file dropped on the window (test double for egui's handle).
@@ -3382,8 +3401,10 @@ mod tests {
 
     #[test]
     fn dropping_markdown_files_imports_them_as_pages() -> anyhow::Result<()> {
-        let dir = std::env::temp_dir().join(format!("silex-drop-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir)?;
+        // Declared before the app: dropped after it, once its files are closed
+        // (Windows cannot delete open files).
+        let tmp = TempFolder::new("silex-drop")?;
+        let dir = tmp.0.clone();
         let good = dir.join("receta.md");
         std::fs::write(
             &good,
@@ -3425,14 +3446,15 @@ mod tests {
         assert!(app.import_job.is_none());
         let notice = app.notice.clone().unwrap_or_default();
         assert!(notice.contains("1 ignorado"), "{notice}");
-        std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
 
     #[test]
     fn workspace_export_runs_in_the_background_and_saves_first() -> anyhow::Result<()> {
-        let dir = std::env::temp_dir().join(format!("silex-app-ws-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir)?;
+        // Declared before the app: dropped after it, once its files are closed
+        // (Windows cannot delete open files).
+        let tmp = TempFolder::new("silex-app-ws")?;
+        let dir = tmp.0.clone();
         let mut app = SilexApp::new(Database::open(dir.join("silex.sqlite3"))?)?;
         // A file database would start the automatic backup on the first frame,
         // still writing into `dir` while the test cleans up: not under test here.
@@ -3458,7 +3480,6 @@ mod tests {
         // In-memory databases cannot be exported from another thread.
         let mut memory = SilexApp::new(Database::open_in_memory()?)?;
         assert!(memory.start_workspace_export(&ctx, dir.join("x")).is_err());
-        std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
 
