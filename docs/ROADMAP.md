@@ -16,7 +16,7 @@
 
 ## Hito 1 — documentos seguros
 - [ ] Crear backups automáticos verificables y restauración.
-- [ ] Recuperación de errores de escritura, señal clara de documento sin guardar.
+- [ ] Recuperación de errores de escritura, señal clara de documento sin guardar. *(H1.1 implementada: estado visible, reintento con backoff 1–30 s, cierre bloqueado con «Reintentar / Salir sin guardar». Tests automáticos verdes en macOS; verificación manual pendiente.)*
 - [ ] Tests de edición/cierre/apertura y manejo de fallos.
 - [ ] Acciones deshacer/rehacer de texto con estrategia documentada.
 

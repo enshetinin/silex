@@ -1,10 +1,11 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 use eframe::egui::{self, TextEdit};
 use silex_desktop::{
     db::Database,
     model::{Block, Page},
+    save_state::{SaveState, SaveStatus},
 };
 
 pub struct SilexApp {
@@ -15,8 +16,12 @@ pub struct SilexApp {
     blocks: Vec<Block>,
     new_page_title: String,
     query: String,
-    status: String,
-    modified_at: Option<Instant>,
+    save: SaveState,
+    /// Errors from actions other than saving (search, create, open).
+    notice: Option<String>,
+    close_dialog: bool,
+    /// Set once the user may leave: everything saved or changes discarded.
+    allow_close: bool,
 }
 
 impl SilexApp {
@@ -34,8 +39,10 @@ impl SilexApp {
             blocks: Vec::new(),
             new_page_title: String::new(),
             query: String::new(),
-            status: "Guardado localmente".into(),
-            modified_at: None,
+            save: SaveState::default(),
+            notice: None,
+            close_dialog: false,
+            allow_close: false,
         };
         if let Some(page) = app.pages.first() {
             app.open_page(page.id.clone())?;
@@ -44,13 +51,12 @@ impl SilexApp {
     }
 
     fn open_page(&mut self, id: String) -> Result<()> {
-        self.save_if_dirty()?;
+        self.save_now()?;
         let page = self.db.get_page(&id)?;
         if let Some(page) = page {
             self.blocks = self.db.list_blocks(&id)?;
             self.title = page.title;
             self.selected = Some(id);
-            self.status = "Guardado localmente".into();
         }
         Ok(())
     }
@@ -61,26 +67,37 @@ impl SilexApp {
     }
 
     fn mark_dirty(&mut self) {
-        self.modified_at = Some(Instant::now());
-        self.status = "Cambios sin guardar…".into();
+        self.save.mark_dirty(Instant::now());
     }
 
-    fn save_if_dirty(&mut self) -> Result<()> {
-        if self.modified_at.is_none() {
+    /// Saves pending edits now. On failure the edits stay in memory, the
+    /// error is shown in the status bar and a retry is scheduled.
+    fn save_now(&mut self) -> Result<()> {
+        if !self.save.is_dirty() {
             return Ok(());
         }
-        if let Some(ref id) = self.selected {
-            self.db.save_document(id, &self.title, &self.blocks)?;
-            self.reload_pages()?;
+        let Some(id) = self.selected.clone() else {
+            self.save.record_success();
+            return Ok(());
+        };
+        match self.db.save_document(&id, &self.title, &self.blocks) {
+            Ok(()) => {
+                self.save.record_success();
+                // The save already succeeded; a failed list refresh is only a notice.
+                let refreshed = self.reload_pages();
+                self.report(refreshed);
+                Ok(())
+            }
+            Err(err) => {
+                self.save.record_failure(Instant::now(), format!("{err:#}"));
+                Err(err)
+            }
         }
-        self.modified_at = None;
-        self.status = "Guardado localmente".into();
-        Ok(())
     }
 
     fn report<T>(&mut self, result: Result<T>) {
         if let Err(err) = result {
-            self.status = format!("Error: {err:#}");
+            self.notice = Some(format!("{err:#}"));
         }
     }
 
@@ -115,13 +132,13 @@ impl SilexApp {
                     self.report(result);
                 }
             }
-            Err(err) => self.status = format!("Error de búsqueda: {err}"),
+            Err(err) => self.notice = Some(format!("Error de búsqueda: {err:#}")),
         }
         ui.separator();
         ui.add(TextEdit::singleline(&mut self.new_page_title).hint_text("Nombre de página"));
         if ui.button("+ Crear página").clicked() {
             let result = (|| -> Result<()> {
-                self.save_if_dirty()?;
+                self.save_now()?;
                 let title = self.new_page_title.trim();
                 let title = if title.is_empty() {
                     "Sin título"
@@ -145,10 +162,12 @@ impl SilexApp {
         ui.horizontal(|ui| {
             ui.heading("Documento");
             if ui.button("Guardar").clicked() {
-                let result = self.save_if_dirty();
-                self.report(result);
+                // A save error is already shown by the status bar.
+                let _ = self.save_now();
             }
+            self.status_bar(ui);
         });
+        self.notice_bar(ui);
         ui.separator();
         let changed = ui
             .add(
@@ -201,7 +220,7 @@ impl SilexApp {
             ] {
                 if ui.button(label).clicked() {
                     let result = (|| -> Result<()> {
-                        self.save_if_dirty()?;
+                        self.save_now()?;
                         self.db.add_block(&page_id, kind)?;
                         self.blocks = self.db.list_blocks(&page_id)?;
                         Ok(())
@@ -210,9 +229,108 @@ impl SilexApp {
                 }
             }
         });
-        ui.add_space(16.0);
-        ui.small(&self.status);
     }
+
+    /// Always-visible save state; an error offers an immediate retry.
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let failed = match self.save.status() {
+            SaveStatus::Saved => {
+                ui.label("Guardado");
+                None
+            }
+            SaveStatus::Dirty => {
+                ui.label("Cambios sin guardar…");
+                None
+            }
+            SaveStatus::Failed { message } => Some(message.to_owned()),
+        };
+        if let Some(message) = failed {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("Error al guardar: {message}"),
+            );
+            if ui.button("Reintentar").clicked() {
+                let _ = self.save_now();
+            }
+        }
+    }
+
+    fn notice_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(notice) = self.notice.clone() else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.colored_label(ui.visuals().warn_fg_color, notice);
+            if ui.small_button("Cerrar aviso").clicked() {
+                self.notice = None;
+            }
+        });
+    }
+
+    /// Intercepts window close: save first; if that fails, keep the window
+    /// open and let the user retry or explicitly discard.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if self.allow_close || !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        let _ = self.save_now();
+        if !self.save.can_close() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_dialog = true;
+        }
+    }
+
+    fn close_dialog(&mut self, ctx: &egui::Context) {
+        if !self.close_dialog {
+            return;
+        }
+        let error = match self.save.status() {
+            SaveStatus::Failed { message } => message.to_owned(),
+            _ => "Hay cambios pendientes de guardar.".to_owned(),
+        };
+        let mut action = None;
+        let response = egui::Modal::new(egui::Id::unique("silex_close_unsaved")).show(ctx, |ui| {
+            ui.heading("No se pudieron guardar los cambios");
+            ui.label(format!("Error: {error}"));
+            ui.label("Si sales ahora, se perderán los cambios no guardados de esta página.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Reintentar").clicked() {
+                    action = Some(CloseAction::Retry);
+                }
+                if ui.button("Salir sin guardar").clicked() {
+                    action = Some(CloseAction::Discard);
+                }
+                if ui.button("Cancelar").clicked() {
+                    action = Some(CloseAction::Cancel);
+                }
+            });
+        });
+        if action.is_none() && response.should_close() {
+            action = Some(CloseAction::Cancel);
+        }
+        match action {
+            Some(CloseAction::Retry) => {
+                if self.save_now().is_ok() {
+                    self.allow_close = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            Some(CloseAction::Discard) => {
+                self.save.discard();
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Some(CloseAction::Cancel) => self.close_dialog = false,
+            None => {}
+        }
+    }
+}
+
+enum CloseAction {
+    Retry,
+    Discard,
+    Cancel,
 }
 
 impl eframe::App for SilexApp {
@@ -228,26 +346,26 @@ impl eframe::App for SilexApp {
                 self.editor(ui);
             });
         });
+        let ctx = ui.ctx().clone();
+        // Save errors are shown by the status bar, so results are not reported twice.
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
-            let result = self.save_if_dirty();
-            self.report(result);
+            let _ = self.save_now();
         }
-        if self
-            .modified_at
-            .is_some_and(|t| t.elapsed() >= Duration::from_millis(650))
-        {
-            let result = self.save_if_dirty();
-            self.report(result);
+        let now = Instant::now();
+        if self.save.is_due(now) {
+            let _ = self.save_now();
         }
-        // UI may be idle between edits; schedule a repaint for the autosave timer.
-        if self.modified_at.is_some() {
-            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        self.handle_close_request(&ctx);
+        self.close_dialog(&ctx);
+        // The UI may be idle between edits; wake up for the next autosave or retry.
+        if let Some(at) = self.save.next_attempt() {
+            ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
         }
     }
 
-    /// Explicit shutdown hook: flush pending edits before the window closes.
+    /// Last-chance save when the app shuts down without a close request.
     fn on_exit(&mut self) {
-        if let Err(err) = self.save_if_dirty() {
+        if let Err(err) = self.save_now() {
             eprintln!("Silex: no se guardaron cambios al cerrar: {err:#}");
         }
     }
@@ -256,7 +374,7 @@ impl eframe::App for SilexApp {
 /// Safety net in case `on_exit` did not run; a second save is a no-op.
 impl Drop for SilexApp {
     fn drop(&mut self) {
-        if let Err(err) = self.save_if_dirty() {
+        if let Err(err) = self.save_now() {
             eprintln!("Silex: no se guardaron cambios al cerrar: {err:#}");
         }
     }
