@@ -1,4 +1,5 @@
-//! Fills a NEW database with 100 pages × 10 blocks for manual UX checks.
+//! Fills a NEW database with 100 pages × 10 blocks, plus a database («Base de
+//! prueba») with 1000 rows, for manual UX checks.
 //! Usage: cargo run --example seed -- /tmp/silex-dev.sqlite3
 use anyhow::{Context, Result, bail};
 use silex_desktop::db::Database;
@@ -6,6 +7,7 @@ use silex_desktop::model::BlockKind;
 
 const PAGES: usize = 100;
 const BLOCKS_PER_PAGE: usize = 10;
+const ROWS: usize = 1000;
 const KINDS: [BlockKind; 9] = BlockKind::ALL;
 
 fn main() -> Result<()> {
@@ -32,8 +34,12 @@ fn main() -> Result<()> {
         }
         db.save_document(&page_id, &title, &blocks)?;
     }
+    let base = db.create_database("Base de prueba", None)?;
+    for r in 0..ROWS {
+        db.create_row(&base, &format!("Fila de prueba {r:04}"))?;
+    }
     println!(
-        "Creadas {PAGES} páginas y {} bloques en {}",
+        "Creadas {PAGES} páginas, {} bloques y una base de {ROWS} filas en {}",
         PAGES * BLOCKS_PER_PAGE,
         path.to_string_lossy()
     );

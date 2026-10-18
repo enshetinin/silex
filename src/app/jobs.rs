@@ -17,7 +17,14 @@ impl SilexApp {
     pub(super) fn export_current_page_to(&mut self, dir: &std::path::Path) -> Result<()> {
         // A save error is shown by the status bar; export what the user sees anyway.
         let _ = self.save_now();
-        let path = silex_desktop::export::export_page(dir, &self.title, &self.blocks)?;
+        let path = match &self.database {
+            Some(state) => {
+                let titles: Vec<&str> = state.rows.iter().map(|r| r.title.as_str()).collect();
+                let markdown = silex_desktop::markdown::database_to_markdown(&self.title, &titles);
+                silex_desktop::export::export_markdown(dir, &self.title, &markdown)?
+            }
+            None => silex_desktop::export::export_page(dir, &self.title, &self.blocks)?,
+        };
         self.last_export = Some(path);
         Ok(())
     }

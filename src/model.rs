@@ -5,6 +5,32 @@ pub struct Page {
     pub id: String,
     pub parent_id: Option<String>,
     pub title: String,
+    pub kind: PageKind,
+}
+
+/// A normal page, or a database whose child pages are its rows (ADR 0006).
+/// Stored as text; see [`PageKind::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PageKind {
+    #[default]
+    Page,
+    Database,
+}
+
+impl PageKind {
+    /// Name stored in SQLite (must match the CHECK in migration 0005).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PageKind::Page => "page",
+            PageKind::Database => "database",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        [PageKind::Page, PageKind::Database]
+            .into_iter()
+            .find(|k| k.as_str() == name)
+    }
 }
 
 /// Block types (ADR 0003). Stored as text; see [`BlockKind::as_str`].
@@ -74,6 +100,37 @@ impl BlockKind {
             BlockKind::Heading1 | BlockKind::Heading2 | BlockKind::Heading3
         )
     }
+}
+
+/// How a database view shows its rows (ADR 0006). Board is H6.5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ViewKind {
+    Table,
+    Board,
+}
+
+impl ViewKind {
+    /// Name stored in SQLite (must match the CHECK in migration 0005).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ViewKind::Table => "table",
+            ViewKind::Board => "board",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        [ViewKind::Table, ViewKind::Board]
+            .into_iter()
+            .find(|k| k.as_str() == name)
+    }
+}
+
+/// A saved way of looking at a database (its configuration comes in H6.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatabaseView {
+    pub id: String,
+    pub name: String,
+    pub kind: ViewKind,
 }
 
 /// Deepest indent level a block can have (CHECK in migration 0003).
@@ -193,6 +250,39 @@ pub fn build_tree(pages: &[Page], expanded: &HashSet<String>) -> Vec<TreeRow> {
         }
     }
     rows
+}
+
+/// The pages the sidebar shows: everything except the rows of databases and
+/// their subpages (ADR 0006: rows are opened from the database's table, the
+/// search or favorites). Removing a whole branch keeps `build_tree` from
+/// putting a row's subpage at the root as if it were an orphan. A database
+/// itself is always shown, so even a stored cycle never hides one.
+pub fn without_database_rows(pages: &[Page]) -> Vec<Page> {
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    for page in pages {
+        if let Some(parent) = page.parent_id.as_deref() {
+            children.entry(parent).or_default().push(page.id.as_str());
+        }
+    }
+    // Linear walk down from every database; `insert` stops on cycles.
+    let mut hidden: HashSet<&str> = HashSet::new();
+    let mut stack: Vec<&str> = pages
+        .iter()
+        .filter(|p| p.kind == PageKind::Database)
+        .map(|p| p.id.as_str())
+        .collect();
+    while let Some(id) = stack.pop() {
+        for child in children.get(id).into_iter().flatten() {
+            if hidden.insert(child) {
+                stack.push(child);
+            }
+        }
+    }
+    pages
+        .iter()
+        .filter(|p| !hidden.contains(p.id.as_str()) || p.kind == PageKind::Database)
+        .cloned()
+        .collect()
 }
 
 /// Ids of all descendants of `id` (not including `id`).

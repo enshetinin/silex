@@ -1045,6 +1045,18 @@ impl SilexApp {
                         });
                         ui.add_space(theme::space::LG);
 
+                        // A database shows its table instead of blocks (ADR 0006).
+                        if self.database.as_ref().is_some_and(|d| d.id == page_id) {
+                            self.caret = None;
+                            // Lined up with the title text, like blocks.
+                            ui.horizontal_top(|ui| {
+                                gutter_space(ui);
+                                ui.vertical(|ui| self.database_table(ui));
+                            });
+                            ui.add_space(theme::space::XXL);
+                            return;
+                        }
+
                         let numbers = list_numbers(&self.blocks);
                         let scroll_to = self.pending_focus.as_ref().map(|(id, _)| id.clone());
                         self.caret = None;

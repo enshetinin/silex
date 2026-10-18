@@ -10,7 +10,9 @@ use directories::ProjectDirs;
 use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::model::{Block, BlockKind, MAX_INDENT, NewBlock, Page, TrashItem};
+use crate::model::{
+    Block, BlockKind, DatabaseView, MAX_INDENT, NewBlock, Page, PageKind, TrashItem, ViewKind,
+};
 use crate::search::{self, BlockMatch, Candidate, SearchHit};
 use crate::settings::Settings;
 
@@ -22,6 +24,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("db/migrations/0002_favorites.sql")),
     (3, include_str!("db/migrations/0003_block_kinds.sql")),
     (4, include_str!("db/migrations/0004_settings.sql")),
+    (5, include_str!("db/migrations/0005_databases.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -234,31 +237,19 @@ impl Database {
     /// are hidden and come back if the page is restored.
     pub fn list_favorites(&self) -> Result<Vec<Page>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_id, title FROM pages
+            "SELECT id, parent_id, title, kind FROM pages
              WHERE favorite_at IS NOT NULL AND deleted_at IS NULL
              ORDER BY favorite_at, id",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Page {
-                id: r.get(0)?,
-                parent_id: r.get(1)?,
-                title: r.get(2)?,
-            })
-        })?;
+        let rows = stmt.query_map([], |r| read_page(r, 0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn list_pages(&self) -> Result<Vec<Page>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_id, title FROM pages WHERE deleted_at IS NULL ORDER BY sort_order, created_at, id",
+            "SELECT id, parent_id, title, kind FROM pages WHERE deleted_at IS NULL ORDER BY sort_order, created_at, id",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Page {
-                id: r.get(0)?,
-                parent_id: r.get(1)?,
-                title: r.get(2)?,
-            })
-        })?;
+        let rows = stmt.query_map([], |r| read_page(r, 0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -286,6 +277,10 @@ impl Database {
         ensure!(live(id)?, "La página no existe o está en la papelera");
         if let Some(parent) = new_parent {
             ensure!(live(parent)?, "El destino no existe o está en la papelera");
+            ensure!(
+                page_kind(&tx, parent)? != Some(PageKind::Database),
+                "Una página no se puede mover dentro de una base de datos"
+            );
             // Walk up from the destination; UNION deduplicates, so it ends even on bad data.
             let creates_cycle: bool = tx.query_row(
                 "WITH RECURSIVE chain(id) AS (
@@ -369,6 +364,90 @@ impl Database {
         Ok(())
     }
 
+    /// Creates a database (ADR 0006): a page of kind `database` with its first
+    /// view, «Tabla», in one transaction. It goes last among its siblings.
+    /// A database cannot be created inside another one (it would be a row).
+    pub fn create_database(&mut self, title: &str, parent_id: Option<&str>) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        if let Some(parent) = parent_id {
+            match page_kind(&tx, parent)? {
+                None => bail!("El destino no existe o está en la papelera"),
+                Some(PageKind::Database) => {
+                    bail!("Una base de datos no se puede crear dentro de otra")
+                }
+                Some(PageKind::Page) => {}
+            }
+        }
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO pages (id, title, parent_id, kind, sort_order)
+             VALUES (?1, ?2, ?3, ?4, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages WHERE parent_id IS ?3))",
+            params![id, title, parent_id, PageKind::Database.as_str()],
+        )?;
+        tx.execute(
+            "INSERT INTO db_views (id, database_id, name, kind, position) VALUES (?1, ?2, ?3, ?4, 0)",
+            params![
+                Uuid::new_v4().to_string(),
+                id,
+                "Tabla",
+                ViewKind::Table.as_str()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Adds a row (a child page) at the end of a live database.
+    pub fn create_row(&mut self, database_id: &str, title: &str) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        ensure!(
+            page_kind(&tx, database_id)? == Some(PageKind::Database),
+            "La base de datos no existe o está en la papelera"
+        );
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO pages (id, title, parent_id, sort_order)
+             VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages WHERE parent_id = ?3))",
+            params![id, title, database_id],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Live rows of a database, in their manual order (as subpages are).
+    pub fn database_rows(&self, database_id: &str) -> Result<Vec<Page>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_id, title, kind FROM pages
+             WHERE parent_id = ?1 AND deleted_at IS NULL
+             ORDER BY sort_order, created_at, id",
+        )?;
+        let rows = stmt.query_map([database_id], |r| read_page(r, 0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Views of a database, in their order. An unknown view kind is skipped
+    /// (a newer Silex may add kinds), never an error that hides the data.
+    pub fn database_views(&self, database_id: &str) -> Result<Vec<DatabaseView>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, kind FROM db_views WHERE database_id = ?1 ORDER BY position, id",
+        )?;
+        let rows = stmt.query_map([database_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut views = Vec::new();
+        for row in rows {
+            let (id, name, kind) = row?;
+            if let Some(kind) = ViewKind::parse(&kind) {
+                views.push(DatabaseView { id, name, kind });
+            }
+        }
+        Ok(views)
+    }
+
     /// Creates a page with its blocks in one transaction (import): either the
     /// whole page exists afterwards or nothing was created.
     pub fn create_page_with_blocks(
@@ -408,15 +487,9 @@ impl Database {
     pub fn get_page(&self, id: &str) -> Result<Option<Page>> {
         self.conn
             .query_row(
-                "SELECT id, parent_id, title FROM pages WHERE id = ?1 AND deleted_at IS NULL",
+                "SELECT id, parent_id, title, kind FROM pages WHERE id = ?1 AND deleted_at IS NULL",
                 [id],
-                |r| {
-                    Ok(Page {
-                        id: r.get(0)?,
-                        parent_id: r.get(1)?,
-                        title: r.get(2)?,
-                    })
-                },
+                |r| read_page(r, 0),
             )
             .optional()
             .map_err(Into::into)
@@ -569,20 +642,11 @@ impl Database {
     /// branch are not listed separately.
     pub fn list_trash(&self) -> Result<Vec<TrashItem>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_id, title, deleted_at FROM pages
+            "SELECT id, parent_id, title, kind, deleted_at FROM pages
              WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, title",
         )?;
         let trashed: Vec<(Page, String)> = stmt
-            .query_map([], |r| {
-                Ok((
-                    Page {
-                        id: r.get(0)?,
-                        parent_id: r.get(1)?,
-                        title: r.get(2)?,
-                    },
-                    r.get(3)?,
-                ))
-            })?
+            .query_map([], |r| Ok((read_page(r, 0)?, r.get(4)?)))?
             .collect::<rusqlite::Result<_>>()?;
         let stamp_of: HashMap<&str, &str> = trashed
             .iter()
@@ -673,7 +737,7 @@ impl Database {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT p.id, p.parent_id, p.title FROM pages p
+            "SELECT DISTINCT p.id, p.parent_id, p.title, p.kind FROM pages p
              WHERE p.deleted_at IS NULL AND (
                  p.rowid IN (SELECT rowid FROM page_search WHERE page_search MATCH ?1)
                  OR p.id IN (
@@ -682,13 +746,7 @@ impl Database {
                  )
              ) ORDER BY p.title",
         )?;
-        let rows = stmt.query_map([phrase], |r| {
-            Ok(Page {
-                id: r.get(0)?,
-                parent_id: r.get(1)?,
-                title: r.get(2)?,
-            })
-        })?;
+        let rows = stmt.query_map([phrase], |r| read_page(r, 0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -709,18 +767,14 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
 
         let mut titles = tx.prepare(
-            "SELECT p.id, p.parent_id, p.title, bm25(page_search), highlight(page_search, 0, ?2, ?3)
+            "SELECT p.id, p.parent_id, p.title, p.kind, bm25(page_search), highlight(page_search, 0, ?2, ?3)
              FROM page_search JOIN pages p ON p.rowid = page_search.rowid
              WHERE page_search MATCH ?1 AND p.deleted_at IS NULL",
         )?;
         let rows = titles.query_map(params![query, start, end], |r| {
             Ok(Candidate {
-                page: Page {
-                    id: r.get(0)?,
-                    parent_id: r.get(1)?,
-                    title: r.get(2)?,
-                },
-                title: Some((r.get(3)?, r.get(4)?)),
+                page: read_page(r, 0)?,
+                title: Some((r.get(4)?, r.get(5)?)),
                 block: None,
             })
         })?;
@@ -731,19 +785,15 @@ impl Database {
 
         // Best block first; on a tie, the one higher up in the page.
         let mut blocks = tx.prepare(
-            "SELECT p.id, p.parent_id, p.title, b.id, b.rowid, bm25(block_search) AS score
+            "SELECT p.id, p.parent_id, p.title, p.kind, b.id, b.rowid, bm25(block_search) AS score
              FROM block_search JOIN blocks b ON b.rowid = block_search.rowid
              JOIN pages p ON p.id = b.page_id
              WHERE block_search MATCH ?1 AND p.deleted_at IS NULL
              ORDER BY score, b.position, b.rowid",
         )?;
         let rows = blocks.query_map([&query], |r| {
-            let page = Page {
-                id: r.get(0)?,
-                parent_id: r.get(1)?,
-                title: r.get(2)?,
-            };
-            let block: (String, i64, f64) = (r.get(3)?, r.get(4)?, r.get(5)?);
+            let page = read_page(r, 0)?;
+            let block: (String, i64, f64) = (r.get(4)?, r.get(5)?, r.get(6)?);
             Ok((page, block))
         })?;
         for row in rows {
@@ -795,6 +845,42 @@ impl Database {
         }
         Ok(hits)
     }
+}
+
+/// Kind of a live page; `None` if it is missing or in the trash.
+fn page_kind(conn: &Connection, id: &str) -> Result<Option<PageKind>> {
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT kind FROM pages WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match kind {
+        None => Ok(None),
+        Some(kind) => PageKind::parse(&kind)
+            .map(Some)
+            .with_context(|| format!("tipo de página desconocido: {kind}")),
+    }
+}
+
+/// Maps the page columns `id, parent_id, title, kind` starting at column
+/// `at`. An unknown kind is a conversion error, not a panic.
+fn read_page(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Page> {
+    let kind: String = r.get(at + 3)?;
+    let kind = PageKind::parse(&kind).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            at + 3,
+            rusqlite::types::Type::Text,
+            format!("tipo de página desconocido: {kind}").into(),
+        )
+    })?;
+    Ok(Page {
+        id: r.get(at)?,
+        parent_id: r.get(at + 1)?,
+        title: r.get(at + 2)?,
+        kind,
+    })
 }
 
 /// Maps a `blocks` row (id, page_id, kind, content, checked, position, indent).

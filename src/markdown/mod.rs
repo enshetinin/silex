@@ -6,5 +6,5 @@
 mod export;
 mod import;
 
-pub use export::page_to_markdown;
+pub use export::{database_to_markdown, page_to_markdown};
 pub use import::{ImportedPage, markdown_to_page};

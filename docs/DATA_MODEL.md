@@ -34,6 +34,12 @@
 - Rust valida cada valor al leer (`settings::Settings::from_pairs`): una clave desconocida o un valor inválido se ignoran y se usa el valor por defecto; nunca impiden arrancar.
 - Los ajustes viven en la base, así que entran en las copias de seguridad: restaurar una copia restaura también sus ajustes.
 
+## Versión 5 — bases de datos (`0005_databases.sql`, ADR 0006)
+- `pages.kind TEXT NOT NULL DEFAULT 'page' CHECK (kind IN ('page', 'database'))`: se añade sin reconstruir `pages`, y las páginas existentes quedan como `page`. En Rust es `PageKind`; un tipo desconocido al leer es un error, no un pánico.
+- Una base de datos es una página de tipo `database`; sus **filas** son sus subpáginas vivas (`Database::database_rows`, en el orden de `sort_order`). Una base de datos no es destino de `move_page` ni puede crearse dentro de otra (las dos cosas se rechazan en la base, no solo en la interfaz).
+- `db_properties`, `db_select_options`, `db_values` y `db_views` llevan el esquema completo del ADR: propiedades tipadas con borrado lógico, opciones de selección con color, un valor por celda en la columna de su tipo (fechas `AAAA-MM-DD` comprobadas con `date(x) IS x`) y vistas con configuración JSON. `create_database` crea la página y su vista «Tabla» en una transacción. H6.1 solo usa `pages.kind` y `db_views`; el resto llega en H6.2–H6.5.
+- Probado: v4→v5 y v1→v5 conservando todo, un fallo a mitad (con `pages.kind` ya añadida) que deja la v4 intacta, y una copia v4 restaurada y actualizada.
+
 ## Evolución
 - Las migraciones publicadas (`0001`, `0002`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).

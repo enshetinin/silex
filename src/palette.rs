@@ -7,7 +7,9 @@ use crate::settings::{Settings, ThemeMode, zoom_step};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Command {
     NewPage,
+    NewDatabase,
     NewSubpage,
+    NewRow,
     RenamePage,
     AddFavorite,
     RemoveFavorite,
@@ -32,6 +34,8 @@ pub enum Command {
 pub struct PaletteContext {
     /// A page is open in the editor.
     pub page_open: bool,
+    /// The open page is a database (its children are rows).
+    pub database_open: bool,
     /// The open page is a favorite.
     pub favorite: bool,
     /// The database is a file (backups and workspace export need one).
@@ -46,9 +50,11 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 19] = [
+    pub const ALL: [Command; 21] = [
         Command::NewPage,
+        Command::NewDatabase,
         Command::NewSubpage,
+        Command::NewRow,
         Command::RenamePage,
         Command::AddFavorite,
         Command::RemoveFavorite,
@@ -71,7 +77,9 @@ impl Command {
     pub fn label(self) -> &'static str {
         match self {
             Command::NewPage => "Nueva página",
+            Command::NewDatabase => "Nueva base de datos",
             Command::NewSubpage => "Nueva subpágina",
+            Command::NewRow => "Nueva fila",
             Command::RenamePage => "Renombrar la página",
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
@@ -96,7 +104,9 @@ impl Command {
     fn keywords(self) -> &'static [&'static str] {
         match self {
             Command::NewPage => &["crear", "documento", "new", "page"],
+            Command::NewDatabase => &["crear", "tabla", "coleccion", "database", "table"],
             Command::NewSubpage => &["crear", "hija", "anidada", "child"],
+            Command::NewRow => &["crear", "entrada", "registro", "row"],
             Command::RenamePage => &["titulo", "nombre", "cambiar", "rename"],
             Command::AddFavorite => &["estrella", "marcar", "favorite", "star"],
             Command::RemoveFavorite => &["estrella", "desmarcar", "favorite", "star"],
@@ -122,13 +132,15 @@ impl Command {
         let theme = cx.settings.theme;
         let zoom = cx.settings.zoom_percent;
         match self {
-            Command::NewPage | Command::SaveNow | Command::OpenTrash | Command::ShowShortcuts => {
-                true
-            }
-            Command::NewSubpage
-            | Command::RenamePage
-            | Command::ExportPage
-            | Command::TrashPage => cx.page_open,
+            Command::NewPage
+            | Command::NewDatabase
+            | Command::SaveNow
+            | Command::OpenTrash
+            | Command::ShowShortcuts => true,
+            // Inside a database a child is a row: «Nueva fila» instead.
+            Command::NewSubpage => cx.page_open && !cx.database_open,
+            Command::NewRow => cx.database_open,
+            Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
             Command::AddFavorite => cx.page_open && !cx.favorite,
             Command::RemoveFavorite => cx.page_open && cx.favorite,
             Command::BackupNow | Command::RestoreBackup => cx.file_database && !cx.backup_running,
@@ -212,6 +224,7 @@ mod tests {
     fn cx() -> PaletteContext {
         PaletteContext {
             page_open: true,
+            database_open: false,
             favorite: false,
             file_database: true,
             backup_running: false,
@@ -269,6 +282,22 @@ mod tests {
             assert!(!listed.contains(&hidden), "{hidden:?}");
         }
         assert!(listed.contains(&Command::NewPage));
+        assert!(listed.contains(&Command::NewDatabase));
+        assert!(!listed.contains(&Command::NewRow), "no database open");
+
+        let database = PaletteContext {
+            database_open: true,
+            ..cx()
+        };
+        assert!(Command::NewRow.available(&database));
+        assert!(
+            !Command::NewSubpage.available(&database),
+            "a child is a row"
+        );
+        assert_eq!(
+            matching_commands("nueva fila", &database),
+            [Command::NewRow]
+        );
 
         let favorite = PaletteContext {
             favorite: true,
@@ -303,8 +332,9 @@ mod tests {
     fn words_match_labels_and_keywords_without_accents() {
         assert_eq!(
             matching_commands("nueva", &cx()),
-            [Command::NewPage, Command::NewSubpage]
+            [Command::NewPage, Command::NewDatabase, Command::NewSubpage]
         );
+        assert_eq!(matching_commands("tabla", &cx()), [Command::NewDatabase]);
         assert_eq!(matching_commands("SUBPAGINA", &cx()), [Command::NewSubpage]);
         assert_eq!(matching_commands("oscuro", &cx()), [Command::ThemeDark]);
         assert_eq!(matching_commands("dark", &cx()), [Command::ThemeDark]);

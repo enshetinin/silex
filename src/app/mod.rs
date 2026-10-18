@@ -6,12 +6,13 @@ use eframe::egui::{self};
 use silex_desktop::{
     db::{Database, Shift, backup::BackupJob},
     history::{History, Snapshot},
-    model::{Block, Page, TreeRow, ancestors, build_tree},
+    model::{Block, Page, PageKind, TreeRow, ancestors, build_tree, without_database_rows},
     save_state::SaveState,
     settings::{Settings, ThemeMode},
 };
 
 mod blocks;
+mod database;
 mod dialogs;
 mod document;
 pub mod icons;
@@ -27,7 +28,7 @@ mod tests;
 pub mod theme;
 
 pub use self::startup::StartupError;
-use self::{blocks::*, dialogs::*, search::*, sidebar::*};
+use self::{blocks::*, database::*, dialogs::*, search::*, sidebar::*};
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
 /// entry the Linux packages install (`silex-desktop.desktop`, ADR 0005).
@@ -51,6 +52,8 @@ pub struct SilexApp {
     favorites: Vec<Page>,
     /// The search window (Cmd+K), while open.
     search: Option<SearchWindow>,
+    /// The open page's rows and views, when it is a database (ADR 0006).
+    database: Option<DatabaseState>,
     /// The keyboard shortcuts window (from the command palette).
     shortcuts_dialog: bool,
     rename: Option<Rename>,
@@ -148,6 +151,7 @@ impl SilexApp {
             trash_dialog: None,
             favorites: Vec::new(),
             search: None,
+            database: None,
             shortcuts_dialog: false,
             rename: None,
             selected: None,
@@ -207,6 +211,10 @@ impl SilexApp {
             self.slash_dismissed = None;
             self.selection = None;
             self.blocks = self.db.list_blocks(&id)?;
+            self.database = None;
+            if page.kind == PageKind::Database {
+                self.load_database(&id)?;
+            }
             self.title = page.title;
             self.reset_history();
             // Make the open page visible in the tree.
@@ -222,7 +230,7 @@ impl SilexApp {
         self.trash_count = self.db.trash_count()?;
         self.favorites = self.db.list_favorites()?;
         self.rebuild_tree();
-        Ok(())
+        self.refresh_database()
     }
 
     fn set_favorite(&mut self, id: &str, favorite: bool) -> Result<()> {
@@ -237,6 +245,7 @@ impl SilexApp {
             Some(id) => self.open_page(id),
             None => {
                 self.selected = None;
+                self.database = None;
                 self.title.clear();
                 self.blocks.clear();
                 self.reset_history();
@@ -277,8 +286,15 @@ impl SilexApp {
         self.open_page(id.to_owned())
     }
 
+    /// Sidebar rows: every page except the rows of databases.
     fn rebuild_tree(&mut self) {
-        self.tree = build_tree(&self.pages, &self.expanded);
+        self.tree = build_tree(&without_database_rows(&self.pages), &self.expanded);
+    }
+
+    fn is_database(&self, id: &str) -> bool {
+        self.pages
+            .iter()
+            .any(|p| p.id == id && p.kind == PageKind::Database)
     }
 
     fn toggle_expanded(&mut self, id: &str) {
@@ -288,7 +304,11 @@ impl SilexApp {
         self.rebuild_tree();
     }
 
+    /// A new page inside `parent`; inside a database, a new row.
     fn create_subpage(&mut self, parent: &str) -> Result<()> {
+        if self.is_database(parent) {
+            return self.add_row(parent);
+        }
         self.save_now()?;
         let id = self.db.create_page("Sin título", Some(parent))?;
         self.expanded.insert(parent.to_owned());
@@ -313,6 +333,16 @@ impl SilexApp {
         if self.db.reorder_page(id, shift)? {
             self.reload_pages()?;
         }
+        Ok(())
+    }
+
+    /// A new database (with its «Tabla» view), opened with its title ready.
+    fn create_database(&mut self, parent: Option<&str>) -> Result<()> {
+        self.save_now()?;
+        let id = self.db.create_database("", parent)?;
+        self.reload_pages()?;
+        self.open_page(id)?;
+        self.focus_title = true;
         Ok(())
     }
 

@@ -13,7 +13,8 @@ use super::*;
 /// Icon shown before a command.
 pub(super) fn command_icon(command: Command) -> &'static str {
     match command {
-        Command::NewPage | Command::NewSubpage => icons::PLUS,
+        Command::NewPage | Command::NewSubpage | Command::NewRow => icons::PLUS,
+        Command::NewDatabase => icons::TABLE,
         Command::RenamePage => icons::TEXT,
         Command::AddFavorite | Command::RemoveFavorite => icons::STAR,
         Command::ExportPage | Command::ExportWorkspace => icons::EXPORT,
@@ -34,7 +35,8 @@ pub(super) fn command_icon(command: Command) -> &'static str {
 pub(super) fn command_shortcut(command: Command, cmd: &str) -> Option<String> {
     Some(match command {
         Command::NewPage => format!("{cmd}+N"),
-        Command::NewSubpage => format!("{cmd}+Mayús+N"),
+        // In a database Cmd+Shift+N adds a row (`create_subpage`).
+        Command::NewSubpage | Command::NewRow => format!("{cmd}+Mayús+N"),
         Command::RenamePage => "F2".to_owned(),
         Command::SaveNow => format!("{cmd}+S"),
         Command::ZoomIn => format!("{cmd}++"),
@@ -49,6 +51,7 @@ impl SilexApp {
     pub(super) fn palette_context(&self) -> PaletteContext {
         PaletteContext {
             page_open: self.selected.is_some(),
+            database_open: self.database.is_some(),
             favorite: self
                 .selected
                 .as_ref()
@@ -71,6 +74,8 @@ impl SilexApp {
         };
         match (command, page) {
             (Command::NewPage, _) => self.create_root_page("Sin título")?,
+            (Command::NewDatabase, _) => self.create_database(None)?,
+            (Command::NewRow, Some(id)) => self.add_row(&id)?,
             (Command::NewSubpage, Some(id)) => self.create_subpage(&id)?,
             // The open page is renamed in its title, as from its "…" menu.
             (Command::RenamePage, Some(_)) => self.focus_title = true,

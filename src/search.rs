@@ -304,6 +304,7 @@ mod tests {
                 id: id.into(),
                 parent_id: None,
                 title: id.into(),
+                kind: Default::default(),
             },
             title: title.map(|s| (s, id.to_owned())),
             block: block.map(|s| (format!("b-{id}"), 0, s)),

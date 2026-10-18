@@ -143,6 +143,23 @@ fn push_code(out: &mut String, leading: &str, content: &str) {
     out.push('\n');
 }
 
+/// Renders a database (ADR 0006): `# title`, then a GFM table with one row
+/// per entry. H6.1 has only the «Nombre» column; the rows themselves are
+/// exported as subpages. Cell text is escaped like block text (`|`
+/// included), and line breaks become spaces, since a table row is one line.
+pub fn database_to_markdown(title: &str, rows: &[&str]) -> String {
+    let mut out = String::new();
+    out.push_str("# ");
+    out.push_str(&escape_line(&title.replace('\n', " "), false));
+    out.push_str("\n\n| Nombre |\n| --- |\n");
+    for row in rows {
+        out.push_str("| ");
+        out.push_str(&escape_line(&row.replace(['\n', '\r'], " "), false));
+        out.push_str(" |\n");
+    }
+    out
+}
+
 /// Escapes one line of block text so Markdown reads it back verbatim.
 /// `line_start` also guards constructs only recognised at the start of a
 /// line (lists, thematic breaks, setext underlines).

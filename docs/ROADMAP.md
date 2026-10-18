@@ -53,7 +53,7 @@
 
 ## Hito 6 — bases de datos tipo Notion
 - [x] Diseño separado de propiedades tipadas y vistas; ADR específica. *(ADR 0006, aceptada el 2026-10-18: la base de datos es una página y sus filas, subpáginas ocultas en la barra lateral; propiedades de texto, número, casilla, fecha y selección en tablas propias (`db_properties`, `db_select_options`, `db_values`, `db_views`), migración 0005 aditiva; filtros y orden en Rust; deshacer de la tabla en H6.4. Esquema comprobado en SQLite: rechaza fechas imposibles, tipos y colores desconocidos y valores de filas inexistentes. Historias H6.1–H6.5.)*
-- [ ] Vista tabla editable, filtros y ordenación, después Kanban.
+- [ ] Vista tabla editable, filtros y ordenación, después Kanban. *(H6.1: migración 0005 con el esquema completo del ADR (tests v4→v5, v1→v5, fallo a mitad y copia v4); «Nueva base de datos» desde el «+» de «Páginas» y la paleta; la página de la base muestra la tabla con la columna Nombre editable en la celda, «Nueva fila» (también Cmd+Mayús+N), «Abrir» para ver la fila como página y su menú con clic derecho; las filas no salen en la barra lateral, la búsqueda las muestra con la ruta de la base, y la papelera se lleva la base con sus filas; exportación a Markdown como tabla. Medido en release: 10 000 filas se abren en 5 ms y un frame de la tabla tarda 1,6 ms. Tests verdes y captura en macOS; verificación manual pendiente.)*
 
 ## Hito 7 — funcionalidades opcionales
 - [ ] Historial/versionado, enlaces bidireccionales, plantillas.

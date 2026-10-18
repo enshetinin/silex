@@ -63,6 +63,9 @@ pub const WARNING: &str = "\u{e4e2}";
 pub const INFO: &str = "\u{e2ce}";
 pub const OPEN_EXTERNAL: &str = "\u{e5de}";
 pub const KEYBOARD: &str = "\u{e2d8}";
+pub const TABLE: &str = "\u{e476}";
+/// "Aa": the name column of a database (text-aa).
+pub const TEXT_AA: &str = "\u{e6ee}";
 
 /// Every icon above, for tests.
 #[cfg(test)]
@@ -109,4 +112,6 @@ pub const ALL: &[(&str, &str)] = &[
     ("INFO", INFO),
     ("OPEN_EXTERNAL", OPEN_EXTERNAL),
     ("KEYBOARD", KEYBOARD),
+    ("TABLE", TABLE),
+    ("TEXT_AA", TEXT_AA),
 ];

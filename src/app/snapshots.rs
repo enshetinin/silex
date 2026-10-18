@@ -500,3 +500,67 @@ fn startup_error() -> anyhow::Result<()> {
     harness.snapshot("startup_error_light");
     Ok(())
 }
+
+// ---- Databases (H6.1) ----
+
+/// The demo app with a database «Lecturas» (three rows) open.
+fn database_app() -> anyhow::Result<(SilexApp, String, Vec<String>)> {
+    let mut app = demo_app()?;
+    let base = app.db.create_database("Lecturas", None)?;
+    let rows = ["Rayuela", "Pedro Páramo", "Ficciones"]
+        .into_iter()
+        .map(|title| app.db.create_row(&base, title))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    app.reload_pages()?;
+    app.open_page(base.clone())?;
+    Ok((app, base, rows))
+}
+
+#[test]
+fn database_rows_open_as_pages_and_every_control_has_a_name() -> anyhow::Result<()> {
+    let (app, base, rows) = database_app()?;
+    let mut harness = a11y_harness(app);
+    assert_accessible(&harness, "database table");
+    assert!(harness.query_by_label("3 filas").is_some());
+    click_button(&mut harness, "Abrir «Pedro Páramo»");
+    assert_eq!(harness.state().selected.as_deref(), Some(rows[1].as_str()));
+    assert!(harness.state().database.is_none(), "a row is a page");
+    // Its breadcrumb leads back to the database.
+    click_button(&mut harness, "Lecturas");
+    assert_eq!(harness.state().selected.as_deref(), Some(base.as_str()));
+    Ok(())
+}
+
+#[test]
+fn the_pages_plus_menu_creates_a_database() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    click_button(&mut harness, "Añadir");
+    assert_accessible(&harness, "add menu");
+    harness
+        .get_all_by_label_contains("Nueva base de datos")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .expect("menu item")
+        .click();
+    harness.run();
+    let state = harness.state();
+    let open = state.selected.clone().expect("opened");
+    assert!(state.database.as_ref().is_some_and(|d| d.id == open));
+    Ok(())
+}
+
+#[test]
+fn database_table() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (app, _, _) = database_app()?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot("database_table_light");
+    Ok(())
+}

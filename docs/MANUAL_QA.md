@@ -69,3 +69,14 @@ Descárgalos de los *artifacts* del workflow «Paquetes» (GitHub → Actions �
 - Linux (`.deb`): `sudo apt install ./silex-desktop_<versión>_amd64.deb`. Silex aparece en el menú de aplicaciones con su icono, y la ventana abierta usa ese icono en el dock o la barra (X11 y Wayland).
 - Linux (AppImage): `chmod +x silex-desktop_<versión>_x86_64.AppImage` y ábrelo. Debe arrancar en Ubuntu 22.04 o posterior.
 
+## 9. Bases de datos (H6.1)
+- «+» de «Páginas» → «Nueva base de datos»: se abre con el título listo para escribir, la pestaña «Tabla», la columna «Nombre» y «Todavía no hay filas.». En la barra lateral aparece con el icono de tabla.
+- «Nueva fila» (o Cmd+Mayús+N, o la paleta): aparece una fila con el cursor en su nombre. Escribe y pulsa Intro; añade varias seguidas.
+- Edita un nombre y, sin pulsar Intro, cambia de página o cierra la app: al volver, el nombre está guardado.
+- «Abrir» en una fila: se abre como página, con la ruta «Base › Fila» arriba; escribe bloques y vuelve a la base desde la ruta. Las filas nunca aparecen en la barra lateral.
+- Clic derecho en una fila: «Renombrar» pone el cursor en su celda; «Enviar a la papelera» la quita de la tabla, y restaurarla desde la papelera la devuelve a su base.
+- Envía la base entera a la papelera y restáurala: vuelve con todas sus filas.
+- Cmd+K: busca el nombre de una fila; el resultado muestra la ruta de la base.
+- «…» → «Exportar a Markdown» en la base: un `.md` con una tabla de nombres. «Exportar todo» incluye además una carpeta con las filas.
+- Con la semilla (`cargo run --example seed -- /tmp/silex-qa.sqlite3`), «Base de prueba» tiene 1000 filas: se abre al momento y el desplazamiento de la tabla es fluido.
+

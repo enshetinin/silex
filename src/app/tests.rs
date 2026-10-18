@@ -1519,3 +1519,204 @@ fn the_window_icon_is_embedded_and_readable() {
     assert_eq!((icon.width, icon.height), (512, 512));
     assert_eq!(icon.rgba.len(), 512 * 512 * 4);
 }
+
+// ---- Databases (H6.1, ADR 0006) ----
+
+/// App with a new, open database and the egui context it was drawn with.
+fn database_app() -> anyhow::Result<(SilexApp, egui::Context, String)> {
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    app.create_database(None)?;
+    let id = app.selected.clone().expect("database open");
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, id))
+}
+
+fn row_titles(app: &SilexApp) -> Vec<String> {
+    app.database
+        .as_ref()
+        .map(|d| d.rows.iter().map(|r| r.title.clone()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_new_database_opens_with_an_empty_table() -> anyhow::Result<()> {
+    let (mut app, ctx, id) = database_app()?;
+    assert_eq!(
+        app.pages.iter().find(|p| p.id == id).map(|p| p.kind),
+        Some(PageKind::Database)
+    );
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    let title = field_id(app.doc_generation, "title", &id);
+    assert!(ctx.memory(|m| m.has_focus(title)), "title ready to type");
+    assert!(app.title.is_empty());
+    for text in [
+        "Tabla",
+        "Nombre",
+        "0 filas",
+        "Todavía no hay filas.",
+        " Nueva fila",
+    ] {
+        assert!(painted.iter().any(|t| t == text), "{text:?} in {painted:?}");
+    }
+    // The database is in the sidebar, with no rows below it.
+    assert!(app.tree.iter().any(|r| r.page.id == id && !r.has_children));
+    Ok(())
+}
+
+#[test]
+fn a_new_row_takes_its_name_and_stays_out_of_the_sidebar() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, id) = database_app()?;
+    app.add_row(&id)?;
+    let row = app
+        .database
+        .as_ref()
+        .map(|d| d.rows[0].id.clone())
+        .expect("a row");
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        ctx.memory(|m| m.has_focus(row_name_id(&row))),
+        "name ready to type"
+    );
+
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("Rayuela".into())]);
+    assert_eq!(row_titles(&app), ["Rayuela"]);
+    assert_eq!(
+        app.db.get_page(&row)?.map(|p| p.title).as_deref(),
+        Some(""),
+        "not yet"
+    );
+    // Enter leaves the cell: the name is saved.
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        app.db.get_page(&row)?.map(|p| p.title).as_deref(),
+        Some("Rayuela")
+    );
+    assert!(app.database.as_ref().is_some_and(|d| d.dirty.is_empty()));
+    assert!(
+        app.tree.iter().all(|r| r.page.id != row),
+        "rows stay out of the tree"
+    );
+    assert!(app.pages.iter().any(|p| p.id == row), "but they are pages");
+    assert_eq!(app.selected.as_deref(), Some(id.as_str()));
+    Ok(())
+}
+
+#[test]
+fn an_unsaved_row_name_is_saved_when_leaving_the_database() -> anyhow::Result<()> {
+    let (mut app, ctx, id) = database_app()?;
+    app.add_row(&id)?;
+    let row = app
+        .database
+        .as_ref()
+        .map(|d| d.rows[0].id.clone())
+        .expect("a row");
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Text("Pedro Páramo".into())],
+    );
+    // Straight to another page, with the cell still focused.
+    let other = app.db.create_page("Notas", None)?;
+    app.reload_pages()?;
+    app.open_page(other)?;
+    assert!(app.database.is_none());
+    assert_eq!(
+        app.db.get_page(&row)?.map(|p| p.title).as_deref(),
+        Some("Pedro Páramo")
+    );
+    Ok(())
+}
+
+#[test]
+fn rows_come_from_shortcuts_and_leave_through_the_trash() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, id) = database_app()?;
+    // Cmd+Shift+N in a database adds a row (not a subpage page).
+    app_frame(&mut app, &ctx, vec![key(Key::N, M::COMMAND | M::SHIFT)]);
+    app_frame(&mut app, &ctx, vec![key(Key::N, M::COMMAND | M::SHIFT)]);
+    assert_eq!(row_titles(&app).len(), 2);
+    assert_eq!(
+        app.selected.as_deref(),
+        Some(id.as_str()),
+        "still in the table"
+    );
+    // The palette's «Nueva fila» does the same.
+    app.run_command(&ctx, silex_desktop::palette::Command::NewRow)?;
+    assert_eq!(row_titles(&app).len(), 3);
+
+    let row = app
+        .database
+        .as_ref()
+        .map(|d| d.rows[0].id.clone())
+        .expect("a row");
+    app.apply(RowAction::Trash(row.clone()))?;
+    assert_eq!(row_titles(&app).len(), 2, "gone from the table");
+    assert_eq!(
+        app.selected.as_deref(),
+        Some(id.as_str()),
+        "the database stays open"
+    );
+    app.restore_from_trash(&row)?;
+    assert_eq!(
+        app.selected.as_deref(),
+        Some(row.as_str()),
+        "restored row opens as a page"
+    );
+    let parent = app
+        .pages
+        .iter()
+        .find(|p| p.id == row)
+        .and_then(|p| p.parent_id.clone());
+    assert_eq!(parent.as_deref(), Some(id.as_str()), "back in its database");
+    Ok(())
+}
+
+#[test]
+fn exporting_a_database_writes_its_table() -> anyhow::Result<()> {
+    let (mut app, ctx, id) = database_app()?;
+    app.title = "Lecturas".into();
+    app.mark_dirty();
+    app.db.create_row(&id, "Rayuela")?;
+    app.reload_pages()?;
+    app_frame(&mut app, &ctx, vec![]);
+    let tmp = TempFolder::new("silex-app-db-export")?;
+    app.export_current_page_to(&tmp.0)?;
+    let path = app.last_export.clone().expect("exported");
+    assert_eq!(
+        std::fs::read_to_string(path)?,
+        "# Lecturas\n\n| Nombre |\n| --- |\n| Rayuela |\n"
+    );
+    Ok(())
+}
+
+/// Manual: `cargo test --release --bin silex-desktop database_scale -- --ignored --nocapture`.
+/// Prints timings (ADR 0006 targets: < 50 ms to open, < 16 ms per frame).
+#[test]
+#[ignore = "scale smoke test; run manually"]
+fn database_scale_smoke() -> anyhow::Result<()> {
+    for count in [1_000, 10_000] {
+        let mut db = Database::open_in_memory()?;
+        let base = db.create_database("Grande", None)?;
+        for i in 0..count {
+            db.create_row(&base, &format!("Fila {i}"))?;
+        }
+        let mut app = SilexApp::new(db)?;
+        let t = std::time::Instant::now();
+        app.open_page(base.clone())?;
+        println!("{count} filas: abrir la base {:?}", t.elapsed());
+        let ctx = egui::Context::default();
+        app_frame(&mut app, &ctx, vec![]);
+        let t = std::time::Instant::now();
+        for _ in 0..10 {
+            app_frame(&mut app, &ctx, vec![]);
+        }
+        println!("{count} filas: un frame de la tabla {:?}", t.elapsed() / 10);
+    }
+    Ok(())
+}
