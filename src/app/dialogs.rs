@@ -240,7 +240,7 @@ impl SilexApp {
         match self.save.status() {
             SaveStatus::Saved => {
                 ui.label(egui::RichText::new("Guardado").small().color(p.text_muted));
-                ui.label(icons::icon(icons::CHECK).small().color(p.text_muted));
+                ui.label(icons::icon(icons::CHECK).size(14.0).color(p.text_muted));
             }
             SaveStatus::Dirty => {
                 ui.label(

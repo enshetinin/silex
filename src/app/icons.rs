@@ -9,9 +9,11 @@ use eframe::egui::{FontFamily, FontId, RichText};
 /// it (see `theme::fonts` for why they cannot share the text families).
 pub const FAMILY: &str = "icons";
 
-/// An icon as rich text (its own font family).
+/// An icon as rich text (its own font family), at the standard size.
 pub fn icon(icon: &str) -> RichText {
-    RichText::new(icon).family(FontFamily::Name(FAMILY.into()))
+    RichText::new(icon)
+        .family(FontFamily::Name(FAMILY.into()))
+        .size(crate::app::theme::icon::MD)
 }
 
 /// Font for painting an icon directly.

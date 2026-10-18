@@ -40,8 +40,11 @@ pub(super) fn search_id() -> egui::Id {
 
 /// Height of every sidebar row.
 const ROW_HEIGHT: f32 = 28.0;
-/// Indent per tree level.
-const ROW_INDENT: f32 = 16.0;
+/// Width of the caret slot before a row's icon.
+const CARET_SLOT: f32 = 22.0;
+/// Indent per tree level: one caret slot, so a child's caret sits under
+/// its parent's icon.
+const ROW_INDENT: f32 = CARET_SLOT;
 
 /// Dark sidebar styling for this `Ui` (popups opened from it keep the
 /// normal theme, since they live on their own layer).
@@ -68,9 +71,13 @@ fn sidebar_style(ui: &mut egui::Ui, p: &theme::Palette) {
 }
 
 /// Small muted section title.
+/// Indented like row content, so it lines up with the rows' first icon.
 fn section_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(theme::space::XS);
-    ui.label(egui::RichText::new(title).small().weak());
+    ui.horizontal(|ui| {
+        ui.add_space(theme::space::SM);
+        ui.label(egui::RichText::new(title).small().weak());
+    });
     ui.add_space(2.0);
 }
 
@@ -79,6 +86,7 @@ fn section_header_with_add(ui: &mut egui::Ui, title: &str, tooltip: &str) -> boo
     ui.add_space(theme::space::XS);
     let clicked = ui
         .horizontal(|ui| {
+            ui.add_space(theme::space::SM);
             ui.label(egui::RichText::new(title).small().weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add(
@@ -163,6 +171,22 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
     };
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(theme::radius::MD), fill);
+    if parts.selected {
+        // Selected page: an accent bar along the left edge, following the
+        // row's rounded corners.
+        let bar = egui::Rect::from_min_size(rect.left_top(), egui::vec2(3.0, rect.height()));
+        let r = theme::radius::MD;
+        ui.painter().rect_filled(
+            bar,
+            egui::CornerRadius {
+                nw: r,
+                sw: r,
+                ne: 0,
+                se: 0,
+            },
+            p.sidebar_selected_text,
+        );
+    }
     if row.has_focus() {
         // Keyboard focus: an outline, distinct from hover and selection.
         ui.painter().rect_stroke(
@@ -177,12 +201,12 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
     let mut x = rect.left() + theme::space::SM + parts.depth as f32 * ROW_INDENT;
     // Icon buttons must fit inside the row: the theme's minimum interact
     // height (28 px) would make rows with buttons taller than the others.
-    ui.spacing_mut().interact_size.y = 22.0;
+    ui.spacing_mut().interact_size.y = 24.0;
     // Interact + paint instead of `put`: `put` reserves the button's real
-    // size (wider than 22 px), which made the panel grow a little every frame.
+    // size (wider than 24 px), which made the panel grow a little every frame.
     let row_id = row.id;
     let icon_button = |ui: &mut egui::Ui, center: egui::Pos2, icon: &str, name: &str| {
-        let rect = egui::Rect::from_center_size(center, egui::vec2(22.0, 22.0));
+        let rect = egui::Rect::from_center_size(center, egui::vec2(24.0, 24.0));
         let response = ui.interact(rect, row_id.with(icon), egui::Sense::click());
         // Painted by hand, so name it for screen readers and keyboard users.
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
@@ -195,7 +219,7 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
             rect.center(),
             egui::Align2::CENTER_CENTER,
             icon,
-            icons::font(14.0),
+            icons::font(theme::icon::MD),
             if active {
                 p.sidebar_text
             } else {
@@ -217,23 +241,23 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
             } else {
                 "Mostrar subpáginas"
             };
-            let response = icon_button(ui, egui::pos2(x + 8.0, cy), icon, name);
+            let response = icon_button(ui, egui::pos2(x + 10.0, cy), icon, name);
             caret = Some(response);
         }
-        x += 20.0;
+        x += CARET_SLOT;
     }
     ui.painter().text(
         egui::pos2(x, cy),
         egui::Align2::LEFT_CENTER,
         parts.icon,
-        icons::font(15.0),
+        icons::font(theme::icon::MD),
         if parts.selected {
-            p.sidebar_text
+            p.sidebar_selected_text
         } else {
             p.sidebar_muted
         },
     );
-    x += 24.0;
+    x += 26.0;
 
     let mut right = rect.right() - theme::space::XS;
     let (mut plus, mut more) = (None, None);
@@ -245,18 +269,18 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
     if parts.hover_actions && (hovered || focus_inside || menu_open) {
         more = Some(icon_button(
             ui,
-            egui::pos2(right - 11.0, cy),
+            egui::pos2(right - 12.0, cy),
             icons::DOTS_THREE,
             "Más acciones",
         ));
-        right -= 24.0;
+        right -= 26.0;
         plus = Some(icon_button(
             ui,
-            egui::pos2(right - 11.0, cy),
+            egui::pos2(right - 12.0, cy),
             icons::PLUS,
             "Nueva subpágina",
         ));
-        right -= 24.0;
+        right -= 26.0;
     }
     if let Some(trailing) = &parts.trailing {
         let galley = ui.painter().layout_no_wrap(
@@ -283,9 +307,13 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
         |ui| {
             ui.add(
-                egui::Label::new(egui::RichText::new(parts.label).color(p.sidebar_text))
-                    .truncate()
-                    .selectable(false),
+                egui::Label::new(egui::RichText::new(parts.label).color(if parts.selected {
+                    p.sidebar_selected_text
+                } else {
+                    p.sidebar_text
+                }))
+                .truncate()
+                .selectable(false),
             );
         },
     );
