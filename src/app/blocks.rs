@@ -854,14 +854,16 @@ impl SilexApp {
             return;
         }
         ui.separator();
-        let changed = ui
-            .add(
-                TextEdit::singleline(&mut self.title)
-                    .id(field_id(self.doc_generation, "title", &page_id))
-                    .font(egui::TextStyle::Heading)
-                    .desired_width(f32::INFINITY),
-            )
-            .changed();
+        let title = ui.add(
+            TextEdit::singleline(&mut self.title)
+                .id(field_id(self.doc_generation, "title", &page_id))
+                .font(egui::TextStyle::Heading)
+                .desired_width(f32::INFINITY),
+        );
+        if std::mem::take(&mut self.focus_title) {
+            title.request_focus();
+        }
+        let changed = title.changed();
         if changed {
             self.changed(EditKind::Text("title".into()));
         }

@@ -42,7 +42,10 @@ pub struct SilexApp {
     selected: Option<String>,
     title: String,
     blocks: Vec<Block>,
-    new_page_title: String,
+    /// Focus the page title on the next frame (a new page was just created).
+    focus_title: bool,
+    /// Fonts and styles installed (done on the first frame).
+    theme_installed: bool,
     query: String,
     save: SaveState,
     /// Errors from actions other than saving (search, create, open).
@@ -133,7 +136,8 @@ impl SilexApp {
             selected: None,
             title: String::new(),
             blocks: Vec::new(),
-            new_page_title: String::new(),
+            focus_title: false,
+            theme_installed: false,
             query: String::new(),
             save: SaveState::default(),
             notice: None,
@@ -267,7 +271,9 @@ impl SilexApp {
         let id = self.db.create_page("Sin título", Some(parent))?;
         self.expanded.insert(parent.to_owned());
         self.reload_pages()?;
-        self.open_page(id)
+        self.open_page(id)?;
+        self.focus_title = true;
+        Ok(())
     }
 
     fn move_page(&mut self, id: &str, new_parent: Option<&str>) -> Result<()> {
@@ -292,7 +298,9 @@ impl SilexApp {
         self.save_now()?;
         let id = self.db.create_page(title, None)?;
         self.reload_pages()?;
-        self.open_page(id)
+        self.open_page(id)?;
+        self.focus_title = true;
+        Ok(())
     }
 
     /// Keyboard shortcuts, read before any widget so text fields do not see them.
@@ -357,22 +365,35 @@ impl SilexApp {
 
     /// Sidebar and editor columns.
     fn layout(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(230.0);
-                self.sidebar(ui);
-            });
-            ui.separator();
-            ui.vertical(|ui| {
-                ui.set_min_width(500.0);
-                self.editor(ui);
-            });
-        });
+        let p = theme::current(ui.ctx());
+        egui::Panel::left("silex_sidebar")
+            .resizable(true)
+            .default_size(260.0)
+            .size_range(220.0..=420.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(p.sidebar_bg)
+                    .inner_margin(egui::Margin::symmetric(10, 14)),
+            )
+            .show(ui, |ui| self.sidebar(ui));
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(p.bg)
+                    .inner_margin(egui::Margin::symmetric(24, 16)),
+            )
+            .show(ui, |ui| self.editor(ui));
     }
 
     /// One frame: shortcuts, layout, dialogs, background work and autosave.
     fn update_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if !std::mem::replace(&mut self.theme_installed, true) {
+            // Before anything is laid out, so even the first frame uses them.
+            theme::install(&ctx);
+            // This frame's root Ui copied the old style when it was created.
+            ui.set_style(ctx.global_style());
+        }
         // The root Ui has no background of its own: paint the theme canvas
         // over the whole window (otherwise the window clear color shows).
         ui.painter()

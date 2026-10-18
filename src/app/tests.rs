@@ -102,7 +102,7 @@ fn main_layout_has_no_id_clashes() -> anyhow::Result<()> {
             time: Some(time),
             ..Default::default()
         };
-        let mut output = ctx.run_ui(input, |ui| app.layout(ui));
+        let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
         output.textures_delta.clear();
         warnings = painted_text(&output.shapes)
             .into_iter()
@@ -1095,6 +1095,21 @@ fn workspace_export_runs_in_the_background_and_saves_first() -> anyhow::Result<(
     // In-memory databases cannot be exported from another thread.
     let mut memory = SilexApp::new(Database::open_in_memory()?)?;
     assert!(memory.start_workspace_export(&ctx, dir.join("x")).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_new_page_opens_with_its_title_ready_to_type() -> anyhow::Result<()> {
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![]);
+    app.create_root_page("Sin título")?;
+    app_frame(&mut app, &ctx, vec![]);
+    let page = app.selected.clone().expect("new page open");
+    let title = field_id(app.doc_generation, "title", &page);
+    assert!(ctx.memory(|m| m.has_focus(title)), "title focused");
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("!".into())]);
+    assert_eq!(app.title, "Sin título!");
     Ok(())
 }
 

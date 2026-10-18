@@ -141,7 +141,8 @@ pub fn current(ctx: &egui::Context) -> &'static Palette {
 }
 
 /// Installs fonts and both themes' styles. The theme follows the system
-/// (egui's default `ThemePreference::System`).
+/// (egui's default `ThemePreference::System`). `SilexApp` calls it on its
+/// first frame: the named text styles must exist before anything uses them.
 pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts());
     ctx.set_style_of(Theme::Light, style(&LIGHT, false));
@@ -171,21 +172,21 @@ fn fonts() -> FontDefinitions {
         include_bytes!("../../assets/fonts/Phosphor-Regular.ttf"),
     );
 
-    // Inter first, egui's fonts (emoji, symbols) as fallback, icons last
-    // (their codepoints are in the Private Use Area, unused by text).
+    // Icons get a family of their own and are always drawn with it. They
+    // cannot share a fallback chain with text: Inter has 745 glyphs in the
+    // Private Use Area (17 of them on our icons' codepoints), and Phosphor
+    // has empty ASCII glyphs (used for icon-name ligatures).
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
     proportional.insert(0, "Inter".to_owned());
-    proportional.push("Phosphor".to_owned());
     let mut semibold = vec!["Inter-SemiBold".to_owned()];
     semibold.extend(proportional.iter().skip(1).cloned());
     fonts
         .families
         .insert(FontFamily::Name(SEMIBOLD.into()), semibold);
-    fonts
-        .families
-        .entry(FontFamily::Monospace)
-        .or_default()
-        .push("Phosphor".to_owned());
+    fonts.families.insert(
+        FontFamily::Name(crate::app::icons::FAMILY.into()),
+        vec!["Phosphor".to_owned()],
+    );
     fonts
 }
 
@@ -424,9 +425,26 @@ mod tests {
         };
         assert!(has('ñ', FontFamily::Proportional));
         assert!(has('ñ', FontFamily::Name(SEMIBOLD.into())));
-        assert!(has(
-            crate::app::icons::PLUS.chars().next().unwrap_or(' '),
-            FontFamily::Proportional
-        ));
+
+        // The icon family is Phosphor alone, and text families never use it.
+        let fonts = fonts();
+        let icons = FontFamily::Name(crate::app::icons::FAMILY.into());
+        assert_eq!(fonts.families[&icons], ["Phosphor"]);
+        for family in [
+            FontFamily::Proportional,
+            FontFamily::Monospace,
+            FontFamily::Name(SEMIBOLD.into()),
+        ] {
+            let list = &fonts.families[&family];
+            assert!(
+                !list.iter().any(|f| f == "Phosphor"),
+                "{family:?}: {list:?}"
+            );
+        }
+        // Every icon we define exists in the icon font.
+        for (name, icon) in crate::app::icons::ALL {
+            let c = icon.chars().next().unwrap_or(' ');
+            assert!(has(c, icons.clone()), "icon {name} ({c:?}) missing");
+        }
     }
 }

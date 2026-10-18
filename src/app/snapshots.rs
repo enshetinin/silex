@@ -11,7 +11,9 @@
 //! ```
 //!
 //! Reference images are produced on macOS.
+use eframe::egui;
 use egui_kittest::Harness;
+use egui_kittest::kittest::{NodeT, Queryable};
 use silex_desktop::db::Database;
 use silex_desktop::model::BlockKind;
 
@@ -85,6 +87,16 @@ fn demo_app() -> anyhow::Result<SilexApp> {
 }
 
 fn snapshot(name: &str, theme: eframe::egui::Theme) -> anyhow::Result<()> {
+    snapshot_with(name, theme, |_| {})
+}
+
+/// Renders the demo app, lets `interact` act on it (hover, click…), and
+/// compares with the reference image.
+fn snapshot_with(
+    name: &str,
+    theme: eframe::egui::Theme,
+    interact: impl FnOnce(&mut Harness<'_, SilexApp>),
+) -> anyhow::Result<()> {
     if !enabled() {
         return Ok(());
     }
@@ -99,6 +111,8 @@ fn snapshot(name: &str, theme: eframe::egui::Theme) -> anyhow::Result<()> {
         .with_accessibility_check(false)
         .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
     harness.run();
+    interact(&mut harness);
+    harness.run();
     harness.snapshot(name);
     Ok(())
 }
@@ -111,4 +125,21 @@ fn main_window_light() -> anyhow::Result<()> {
 #[test]
 fn main_window_dark() -> anyhow::Result<()> {
     snapshot("main_window_dark", eframe::egui::Theme::Dark)
+}
+
+#[test]
+fn sidebar_row_hover_shows_actions() -> anyhow::Result<()> {
+    snapshot_with(
+        "sidebar_hover_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            // The row (a button with the page title as its accessible name).
+            if let Some(row) = harness
+                .get_all_by_label("Notas de lectura")
+                .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+            {
+                row.hover();
+            }
+        },
+    )
 }

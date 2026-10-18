@@ -5,10 +5,11 @@ use anyhow::Result;
 use eframe::egui::{self, TextEdit};
 use silex_desktop::{
     db::Shift,
-    model::{Page, TreeRow, descendants, filter_tree},
+    model::{TreeRow, descendants, filter_tree},
 };
 
 use super::*;
+use super::{icons, theme};
 
 /// Inline rename in the sidebar.
 pub(super) struct Rename {
@@ -36,13 +37,224 @@ pub(super) fn search_id() -> egui::Id {
     egui::Id::unique("silex-search")
 }
 
+/// Height of every sidebar row.
+const ROW_HEIGHT: f32 = 28.0;
+/// Indent per tree level.
+const ROW_INDENT: f32 = 16.0;
+
+/// Dark sidebar styling for this `Ui` (popups opened from it keep the
+/// normal theme, since they live on their own layer).
+fn sidebar_style(ui: &mut egui::Ui, p: &theme::Palette) {
+    let v = ui.visuals_mut();
+    v.override_text_color = Some(p.sidebar_text);
+    v.weak_text_color = Some(p.sidebar_muted);
+    v.extreme_bg_color = p.sidebar_hover;
+    v.text_edit_bg_color = Some(p.sidebar_hover);
+    v.selection.bg_fill = p.sidebar_selected;
+    v.widgets.noninteractive.fg_stroke.color = p.sidebar_text;
+    v.widgets.noninteractive.bg_stroke.color = p.sidebar_hover;
+    for (state, fill) in [
+        (&mut v.widgets.inactive, p.sidebar_hover),
+        (&mut v.widgets.hovered, p.sidebar_selected),
+        (&mut v.widgets.active, p.sidebar_selected),
+        (&mut v.widgets.open, p.sidebar_selected),
+    ] {
+        state.bg_fill = fill;
+        state.weak_bg_fill = fill;
+        state.bg_stroke = egui::Stroke::NONE;
+        state.fg_stroke.color = p.sidebar_text;
+    }
+}
+
+/// Small muted section title.
+fn section_header(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(theme::space::XS);
+    ui.label(egui::RichText::new(title).small().weak());
+    ui.add_space(2.0);
+}
+
+/// Section title with a "+" at the right; returns whether "+" was clicked.
+fn section_header_with_add(ui: &mut egui::Ui, title: &str, tooltip: &str) -> bool {
+    ui.add_space(theme::space::XS);
+    let clicked = ui
+        .horizontal(|ui| {
+            ui.label(egui::RichText::new(title).small().weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Button::new(icons::icon(icons::PLUS).weak()).frame_when_inactive(false),
+                )
+                .on_hover_text(tooltip)
+                .clicked()
+            })
+            .inner
+        })
+        .inner;
+    ui.add_space(2.0);
+    clicked
+}
+
+/// What a sidebar row shows.
+struct RowParts<'a> {
+    depth: usize,
+    /// `Some(expanded)` when the row has children to show or hide.
+    caret: Option<bool>,
+    /// Reserve room for a caret (tree rows) so titles line up.
+    caret_slot: bool,
+    icon: &'a str,
+    label: &'a str,
+    /// Muted text at the right (e.g. a count).
+    trailing: Option<String>,
+    selected: bool,
+    /// Show "+" and "…" while hovered.
+    hover_actions: bool,
+}
+
+impl<'a> RowParts<'a> {
+    /// A plain navigation row (footer).
+    fn nav(icon: &'a str, label: &'a str, trailing: Option<String>) -> Self {
+        Self {
+            depth: 0,
+            caret: None,
+            caret_slot: false,
+            icon,
+            label,
+            trailing,
+            selected: false,
+            hover_actions: false,
+        }
+    }
+}
+
+/// Responses of the interactive parts of a row.
+struct RowOutput {
+    row: egui::Response,
+    caret: Option<egui::Response>,
+    plus: Option<egui::Response>,
+    more: Option<egui::Response>,
+    /// Where the title is drawn (used by the inline rename field).
+    label_rect: egui::Rect,
+}
+
+/// One sidebar row: full-width clickable area with hover and selected
+/// backgrounds, laid out by hand so every part stays aligned.
+fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
+    let p = theme::current(ui.ctx());
+    let interact_height = ui.spacing().interact_size.y;
+    let (rect, row) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    row.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Button, true, parts.selected, parts.label)
+    });
+    let hovered = ui.rect_contains_pointer(rect);
+    let fill = if parts.selected {
+        p.sidebar_selected
+    } else if hovered || row.has_focus() {
+        p.sidebar_hover
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(theme::radius::MD), fill);
+
+    let cy = rect.center().y;
+    let mut x = rect.left() + theme::space::SM + parts.depth as f32 * ROW_INDENT;
+    // Icon buttons must fit inside the row: the theme's minimum interact
+    // height (28 px) would make rows with buttons taller than the others.
+    ui.spacing_mut().interact_size.y = 22.0;
+    let icon_button = |ui: &mut egui::Ui, center: egui::Pos2, icon: &str| {
+        ui.put(
+            egui::Rect::from_center_size(center, egui::vec2(22.0, 22.0)),
+            egui::Button::new(icons::icon(icon).color(p.sidebar_muted)).frame_when_inactive(false),
+        )
+    };
+    let mut caret = None;
+    if parts.caret_slot {
+        if let Some(expanded) = parts.caret {
+            let icon = if expanded {
+                icons::CARET_DOWN
+            } else {
+                icons::CARET_RIGHT
+            };
+            let response = icon_button(ui, egui::pos2(x + 8.0, cy), icon)
+                .on_hover_text("Mostrar u ocultar subpáginas");
+            caret = Some(response);
+        }
+        x += 20.0;
+    }
+    ui.painter().text(
+        egui::pos2(x, cy),
+        egui::Align2::LEFT_CENTER,
+        parts.icon,
+        icons::font(15.0),
+        if parts.selected {
+            p.sidebar_text
+        } else {
+            p.sidebar_muted
+        },
+    );
+    x += 24.0;
+
+    let mut right = rect.right() - theme::space::XS;
+    let (mut plus, mut more) = (None, None);
+    if parts.hover_actions && hovered {
+        more = Some(
+            icon_button(ui, egui::pos2(right - 11.0, cy), icons::DOTS_THREE)
+                .on_hover_text("Más acciones"),
+        );
+        right -= 24.0;
+        plus = Some(icon_button(ui, egui::pos2(right - 11.0, cy), icons::PLUS));
+        right -= 24.0;
+    }
+    if let Some(trailing) = &parts.trailing {
+        let galley = ui.painter().layout_no_wrap(
+            trailing.clone(),
+            egui::FontId::proportional(12.0),
+            p.sidebar_muted,
+        );
+        right -= theme::space::XS;
+        ui.painter().galley(
+            egui::pos2(right - galley.size().x, cy - galley.size().y / 2.0),
+            galley.clone(),
+            p.sidebar_muted,
+        );
+        right -= galley.size().x + theme::space::SM;
+    }
+    let label_rect = egui::Rect::from_min_max(
+        egui::pos2(x, rect.top() + 2.0),
+        egui::pos2(right.max(x), rect.bottom() - 2.0),
+    );
+    // Left-aligned (`put` would center the label in the rect).
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(label_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.add(
+                egui::Label::new(egui::RichText::new(parts.label).color(p.sidebar_text))
+                    .truncate()
+                    .selectable(false),
+            );
+        },
+    );
+    ui.spacing_mut().interact_size.y = interact_height;
+    RowOutput {
+        row,
+        caret,
+        plus,
+        more,
+        label_rect,
+    }
+}
+
 impl SilexApp {
     /// Favorites section; hidden when there are none.
     pub(super) fn favorite_rows(&mut self, ui: &mut egui::Ui) {
         if self.favorites.is_empty() {
             return;
         }
-        ui.label("Favoritos");
+        section_header(ui, "Favoritos");
         let rows: Vec<TreeRow> = self
             .favorites
             .iter()
@@ -52,47 +264,26 @@ impl SilexApp {
                 has_children: false,
             })
             .collect();
-        self.page_rows(ui, &rows, false, "fav");
-        ui.separator();
+        self.page_rows(ui, &rows, false, "fav", icons::STAR);
+        ui.add_space(theme::space::MD);
     }
 
-    /// Page rows (tree, favorites or search): indentation, optional
-    /// expand arrow, title or inline rename field, and a context menu.
-    /// `section` keeps widget ids distinct when a page appears twice.
+    /// Page rows (tree, favorites or search): indentation, optional expand
+    /// arrow, icon, title (or the inline rename field), and on hover "+"
+    /// (new subpage) and "…" (page menu). `section` keeps widget ids
+    /// distinct when a page appears twice.
     pub(super) fn page_rows(
         &mut self,
         ui: &mut egui::Ui,
         rows: &[TreeRow],
         arrows: bool,
         section: &str,
+        icon: &str,
     ) {
         let mut actions = Vec::new();
         for row in rows {
             ui.push_id((section, &row.page.id), |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(row.depth as f32 * 14.0);
-                    if arrows {
-                        let (_, response) =
-                            ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
-                        if row.has_children {
-                            let openness = if self.expanded.contains(&row.page.id) {
-                                1.0
-                            } else {
-                                0.0
-                            };
-                            let response = response
-                                .on_hover_text("Mostrar u ocultar subpáginas")
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            egui::collapsing_header::paint_default_icon(ui, openness, &response);
-                            if response.clicked() {
-                                actions.push(RowAction::Toggle(row.page.id.clone()));
-                            }
-                        }
-                    }
-                    if let Some(action) = self.row_label(ui, &row.page, section) {
-                        actions.push(action);
-                    }
-                });
+                actions.extend(self.page_row(ui, row, arrows, section, icon));
             });
         }
         for action in actions {
@@ -101,42 +292,93 @@ impl SilexApp {
         }
     }
 
-    /// Title (with context menu) or, while renaming, the inline text field.
-    pub(super) fn row_label(
+    fn page_row(
         &mut self,
         ui: &mut egui::Ui,
-        page: &Page,
+        row: &TreeRow,
+        arrows: bool,
         section: &str,
-    ) -> Option<RowAction> {
-        if let Some(rename) = self.rename.as_mut().filter(|r| r.id == page.id) {
-            let response = ui.add(
-                TextEdit::singleline(&mut rename.text)
-                    .id(egui::Id::unique(("silex-rename", section, &page.id)))
-                    .desired_width(f32::INFINITY),
-            );
-            if rename.focus {
-                response.request_focus();
-                rename.focus = false;
-            }
-            if response.lost_focus() {
-                return Some(if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    RowAction::CancelRename
-                } else {
-                    RowAction::CommitRename
-                });
-            }
-            return None;
+        icon: &str,
+    ) -> Vec<RowAction> {
+        let id = row.page.id.clone();
+        let mut actions = Vec::new();
+        let renaming = self.rename.as_ref().is_some_and(|r| r.id == id);
+        let parts = RowParts {
+            depth: row.depth,
+            caret: (arrows && row.has_children).then(|| self.expanded.contains(&id)),
+            caret_slot: arrows,
+            icon,
+            label: display_title(&row.page.title),
+            trailing: None,
+            selected: self.selected.as_deref() == Some(id.as_str()),
+            hover_actions: !renaming,
+        };
+        let mut out = sidebar_row(ui, &parts);
+        if let Some(caret) = &out.caret
+            && caret.clicked()
+        {
+            actions.push(RowAction::Toggle(id.clone()));
         }
-        let selected = self.selected.as_deref() == Some(page.id.as_str());
-        let response = ui.selectable_label(selected, display_title(&page.title));
-        let mut action = response.clicked().then(|| RowAction::Open(page.id.clone()));
-        response.context_menu(|ui| {
-            if let Some(chosen) = self.page_menu(ui, &page.id) {
-                action = Some(chosen);
+        if let Some(plus) = out.plus.take()
+            && plus.on_hover_text("Nueva subpágina").clicked()
+        {
+            actions.push(RowAction::Subpage(id.clone()));
+        }
+        if let Some(more) = &out.more {
+            egui::Popup::menu(more).show(|ui| {
+                if let Some(chosen) = self.page_menu(ui, &id) {
+                    actions.push(chosen);
+                    ui.close();
+                }
+            });
+        }
+        if renaming {
+            if let Some(action) = self.rename_field(ui, out.label_rect, section, &id) {
+                actions.push(action);
+            }
+            return actions;
+        }
+        if out.row.double_clicked() {
+            actions.push(RowAction::StartRename(id.clone()));
+        } else if out.row.clicked() {
+            actions.push(RowAction::Open(id.clone()));
+        }
+        out.row.context_menu(|ui| {
+            if let Some(chosen) = self.page_menu(ui, &id) {
+                actions.push(chosen);
                 ui.close();
             }
         });
-        action
+        actions
+    }
+
+    /// Inline rename field drawn over the row's title.
+    fn rename_field(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        section: &str,
+        id: &str,
+    ) -> Option<RowAction> {
+        let rename = self.rename.as_mut()?;
+        let response = ui.put(
+            rect,
+            TextEdit::singleline(&mut rename.text)
+                .id(egui::Id::unique(("silex-rename", section, id)))
+                .desired_width(rect.width()),
+        );
+        if rename.focus {
+            response.request_focus();
+            rename.focus = false;
+        }
+        if response.lost_focus() {
+            return Some(if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                RowAction::CancelRename
+            } else {
+                RowAction::CommitRename
+            });
+        }
+        None
     }
 
     /// Context menu for a page.
@@ -330,77 +572,160 @@ impl SilexApp {
     }
 
     pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Silex");
-        ui.label("Tu espacio local");
-        ui.separator();
-        ui.label("Buscar (título y contenido)");
-        ui.add(
-            TextEdit::singleline(&mut self.query)
-                .id(search_id())
-                .hint_text(format!("Buscar… ({}+K)", cmd_label(ui.ctx()))),
+        let p = theme::current(ui.ctx());
+        sidebar_style(ui, p);
+
+        ui.label(
+            egui::RichText::new("Silex")
+                .text_style(egui::TextStyle::Name(theme::text::H3.into()))
+                .color(p.sidebar_text),
         );
-        ui.separator();
-        if self.query.trim().is_empty() {
-            self.favorite_rows(ui);
-            ui.label("Páginas");
-            let rows = self.tree.clone();
-            egui::ScrollArea::vertical()
-                .id_salt("silex_sidebar_tree")
-                .max_height(400.0)
-                .show(ui, |ui| self.page_rows(ui, &rows, true, "tree"));
-        } else {
-            self.search_results(ui);
-        }
-        ui.separator();
-        ui.add(TextEdit::singleline(&mut self.new_page_title).hint_text("Nombre de página"));
-        if ui.button("+ Crear página").clicked() {
-            let title = match self.new_page_title.trim() {
-                "" => "Sin título".to_owned(),
-                t => t.to_owned(),
-            };
-            let result = self.create_root_page(&title);
-            if result.is_ok() {
-                self.new_page_title.clear();
-            }
+        ui.add_space(theme::space::MD);
+        let new_page = ui.add_sized(
+            [ui.available_width(), 32.0],
+            egui::Button::new((
+                icons::icon(icons::PLUS).color(p.on_accent),
+                egui::RichText::new("Nueva página").color(p.on_accent),
+            ))
+            .fill(p.accent_strong)
+            .corner_radius(theme::radius::MD),
+        );
+        if new_page.clicked() {
+            let result = self.create_root_page("Sin título");
             self.report(result);
         }
-        if ui
-            .button(format!("Papelera ({})", self.trash_count))
-            .clicked()
-        {
+        ui.add_space(theme::space::SM);
+        self.search_field(ui, p);
+        ui.add_space(theme::space::MD);
+
+        egui::Panel::bottom("silex_sidebar_footer")
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 6)))
+            .show(ui, |ui| self.sidebar_footer(ui, p));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("silex_sidebar_tree")
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        if self.query.trim().is_empty() {
+                            self.favorite_rows(ui);
+                            if section_header_with_add(ui, "Páginas", "Nueva página") {
+                                let result = self.create_root_page("Sin título");
+                                self.report(result);
+                            }
+                            let rows = self.tree.clone();
+                            self.page_rows(ui, &rows, true, "tree", icons::PAGE);
+                        } else {
+                            self.search_results(ui);
+                        }
+                    });
+            });
+    }
+
+    /// Rounded search box with icon and shortcut hint.
+    fn search_field(&mut self, ui: &mut egui::Ui, p: &theme::Palette) {
+        egui::Frame::new()
+            .fill(p.sidebar_hover)
+            .corner_radius(theme::radius::MD)
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                let row = egui::vec2(ui.available_width(), 24.0);
+                ui.allocate_ui_with_layout(
+                    row,
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.label(icons::icon(icons::SEARCH).color(p.sidebar_muted));
+                        let hint_text = format!("{}+K", cmd_label(ui.ctx()));
+                        let hint_width = ui
+                            .painter()
+                            .layout_no_wrap(
+                                hint_text.clone(),
+                                egui::FontId::proportional(12.0),
+                                p.sidebar_muted,
+                            )
+                            .size()
+                            .x;
+                        let spacing = ui.spacing().item_spacing.x;
+                        ui.add(
+                            TextEdit::singleline(&mut self.query)
+                                .id(search_id())
+                                .frame(egui::Frame::NONE)
+                                .margin(egui::Margin::ZERO)
+                                .align(egui::Align2::LEFT_CENTER)
+                                .min_size(egui::vec2(0.0, 24.0))
+                                .hint_text(egui::RichText::new("Buscar").color(p.sidebar_muted))
+                                .desired_width(ui.available_width() - hint_width - spacing),
+                        );
+                        ui.label(
+                            egui::RichText::new(hint_text)
+                                .small()
+                                .color(p.sidebar_muted),
+                        );
+                    },
+                );
+            });
+    }
+
+    /// Trash, backups/export and shortcuts, pinned to the bottom.
+    fn sidebar_footer(&mut self, ui: &mut egui::Ui, p: &theme::Palette) {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        let trash = sidebar_row(
+            ui,
+            &RowParts::nav(icons::TRASH, "Papelera", Some(self.trash_count.to_string())),
+        );
+        if trash.row.clicked() {
             self.open_trash_dialog();
         }
-        let can_export = self.export_job.is_none() && self.db.path().is_some();
-        let label = if self.export_job.is_some() {
-            "Exportando…"
-        } else {
-            "Exportar todo a Markdown"
-        };
-        if ui
-            .add_enabled(can_export, egui::Button::new(label))
-            .on_hover_text("Todas las páginas (sin la papelera) en una carpeta nueva")
-            .clicked()
-        {
-            let result = silex_desktop::export::export_root()
-                .and_then(|root| self.start_workspace_export(ui.ctx(), root));
-            self.report(result);
-        }
-        Self::shortcuts_help(ui);
-        ui.separator();
-        ui.small(&self.backup_label);
-        let can_backup = self.backup_job.is_none() && self.db.path().is_some();
-        if ui
-            .add_enabled(can_backup, egui::Button::new("Crear copia ahora"))
-            .clicked()
-        {
-            self.start_backup(ui.ctx());
-        }
-        if ui
-            .add_enabled(can_backup, egui::Button::new("Restaurar una copia…"))
-            .clicked()
-        {
-            self.open_restore_dialog();
-        }
+
+        let backups = sidebar_row(
+            ui,
+            &RowParts::nav(icons::BACKUP, "Copias y exportación", None),
+        );
+        egui::Popup::menu(&backups.row).show(|ui| {
+            ui.label(egui::RichText::new(&self.backup_label).small().weak());
+            ui.separator();
+            let can_backup = self.backup_job.is_none() && self.db.path().is_some();
+            if ui
+                .add_enabled(can_backup, egui::Button::new("Crear copia ahora"))
+                .clicked()
+            {
+                self.start_backup(ui.ctx());
+                ui.close();
+            }
+            if ui
+                .add_enabled(can_backup, egui::Button::new("Restaurar una copia…"))
+                .clicked()
+            {
+                self.open_restore_dialog();
+                ui.close();
+            }
+            ui.separator();
+            let can_export = self.export_job.is_none() && self.db.path().is_some();
+            let label = if self.export_job.is_some() {
+                "Exportando…"
+            } else {
+                "Exportar todo a Markdown"
+            };
+            if ui
+                .add_enabled(can_export, egui::Button::new(label))
+                .on_hover_text("Todas las páginas (sin la papelera) en una carpeta nueva")
+                .clicked()
+            {
+                let result = silex_desktop::export::export_root()
+                    .and_then(|root| self.start_workspace_export(ui.ctx(), root));
+                self.report(result);
+                ui.close();
+            }
+        });
+
+        let shortcuts = sidebar_row(
+            ui,
+            &RowParts::nav(icons::KEYBOARD, "Atajos de teclado", None),
+        );
+        egui::Popup::menu(&shortcuts.row).show(Self::shortcuts_help);
+        let _ = p;
     }
 
     /// Search: title matches as a filtered tree, then pages that only match
@@ -417,44 +742,39 @@ impl SilexApp {
                 has_children: false,
             })
             .collect();
-        egui::ScrollArea::vertical()
-            .id_salt("silex_sidebar_search")
-            .max_height(400.0)
-            .show(ui, |ui| {
-                ui.label("Páginas");
-                if filtered.is_empty() {
-                    ui.weak("Ningún título coincide.");
-                }
-                self.page_rows(ui, &filtered, false, "filter");
-                if !content.is_empty() {
-                    ui.add_space(6.0);
-                    ui.label("En el contenido");
-                    self.page_rows(ui, &content, false, "content");
-                }
-            });
+        section_header(ui, "Páginas");
+        if filtered.is_empty() {
+            ui.weak("Ningún título coincide.");
+        }
+        self.page_rows(ui, &filtered, false, "filter", icons::PAGE);
+        if !content.is_empty() {
+            ui.add_space(theme::space::MD);
+            section_header(ui, "En el contenido");
+            self.page_rows(ui, &content, false, "content", icons::PAGE);
+        }
     }
 
     pub(super) fn shortcuts_help(ui: &mut egui::Ui) {
         let cmd = cmd_label(ui.ctx());
-        ui.collapsing("Atajos de teclado", |ui| {
-            for (keys, what) in [
-                (format!("{cmd}+N"), "Nueva página"),
-                (format!("{cmd}+Mayús+N"), "Nueva subpágina"),
-                (format!("{cmd}+K"), "Buscar"),
-                ("Alt+↑ / Alt+↓".to_owned(), "Página anterior / siguiente"),
-                ("F2".to_owned(), "Renombrar la página abierta"),
-                (format!("{cmd}+S"), "Guardar ahora"),
-                (
-                    format!("{cmd}+Z / {cmd}+Mayús+Z"),
-                    "Deshacer / rehacer texto",
-                ),
-                ("Clic derecho".to_owned(), "Acciones de una página"),
-            ] {
-                ui.horizontal(|ui| {
+        egui::Grid::new("silex_shortcuts")
+            .num_columns(2)
+            .spacing([theme::space::LG, theme::space::XS])
+            .show(ui, |ui| {
+                for (keys, what) in [
+                    (format!("{cmd}+N"), "Nueva página"),
+                    (format!("{cmd}+Mayús+N"), "Nueva subpágina"),
+                    (format!("{cmd}+K"), "Buscar"),
+                    ("Alt+↑ / Alt+↓".to_owned(), "Página anterior / siguiente"),
+                    ("F2".to_owned(), "Renombrar la página abierta"),
+                    (format!("{cmd}+S"), "Guardar ahora"),
+                    (format!("{cmd}+Z / {cmd}+Mayús+Z"), "Deshacer / rehacer"),
+                    ("/".to_owned(), "Cambiar el tipo de bloque"),
+                    ("Clic derecho".to_owned(), "Acciones de una página"),
+                ] {
                     ui.monospace(keys);
                     ui.label(what);
-                });
-            }
-        });
+                    ui.end_row();
+                }
+            });
     }
 }

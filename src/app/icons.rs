@@ -3,6 +3,22 @@
 //! (see `assets/fonts/README.md`). Add icons here as the UI needs them.
 #![allow(dead_code)] // the set is filled in ahead of the screens that use it
 
+use eframe::egui::{FontFamily, FontId, RichText};
+
+/// Font family that contains only the icon font. Icons must be drawn with
+/// it (see `theme::fonts` for why they cannot share the text families).
+pub const FAMILY: &str = "icons";
+
+/// An icon as rich text (its own font family).
+pub fn icon(icon: &str) -> RichText {
+    RichText::new(icon).family(FontFamily::Name(FAMILY.into()))
+}
+
+/// Font for painting an icon directly.
+pub fn font(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(FAMILY.into()))
+}
+
 pub const PLUS: &str = "\u{e3d4}";
 pub const DOTS_THREE: &str = "\u{e1fe}";
 pub const DOTS_THREE_VERTICAL: &str = "\u{e208}";
@@ -45,3 +61,50 @@ pub const WARNING: &str = "\u{e4e2}";
 pub const INFO: &str = "\u{e2ce}";
 pub const OPEN_EXTERNAL: &str = "\u{e5de}";
 pub const KEYBOARD: &str = "\u{e2d8}";
+
+/// Every icon above, for tests.
+#[cfg(test)]
+pub const ALL: &[(&str, &str)] = &[
+    ("PLUS", PLUS),
+    ("DOTS_THREE", DOTS_THREE),
+    ("DOTS_THREE_VERTICAL", DOTS_THREE_VERTICAL),
+    ("DRAG_HANDLE", DRAG_HANDLE),
+    ("CARET_RIGHT", CARET_RIGHT),
+    ("CARET_DOWN", CARET_DOWN),
+    ("SEARCH", SEARCH),
+    ("STAR", STAR),
+    ("TRASH", TRASH),
+    ("PAGE", PAGE),
+    ("FOLDER", FOLDER),
+    ("FOLDER_OPEN", FOLDER_OPEN),
+    ("UNDO", UNDO),
+    ("REDO", REDO),
+    ("EXPORT", EXPORT),
+    ("DOWNLOAD", DOWNLOAD),
+    ("UPLOAD", UPLOAD),
+    ("SETTINGS", SETTINGS),
+    ("BACKUP", BACKUP),
+    ("CLOSE", CLOSE),
+    ("CHECK", CHECK),
+    ("TEXT", TEXT),
+    ("HEADING_1", HEADING_1),
+    ("HEADING_2", HEADING_2),
+    ("HEADING_3", HEADING_3),
+    ("LIST_BULLETS", LIST_BULLETS),
+    ("LIST_NUMBERS", LIST_NUMBERS),
+    ("TODO", TODO),
+    ("QUOTE", QUOTE),
+    ("CODE", CODE),
+    ("COPY", COPY),
+    ("ARROW_UP", ARROW_UP),
+    ("ARROW_DOWN", ARROW_DOWN),
+    ("SIDEBAR", SIDEBAR),
+    ("SUN", SUN),
+    ("MOON", MOON),
+    ("HOME", HOME),
+    ("SAVE", SAVE),
+    ("WARNING", WARNING),
+    ("INFO", INFO),
+    ("OPEN_EXTERNAL", OPEN_EXTERNAL),
+    ("KEYBOARD", KEYBOARD),
+];
