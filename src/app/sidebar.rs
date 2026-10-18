@@ -1,11 +1,9 @@
-//! Sidebar: page tree, favorites, search results, page menu and rename.
-use std::collections::HashSet;
-
+//! Sidebar: page tree, favorites, search button, page menu and rename.
 use anyhow::Result;
 use eframe::egui::{self, TextEdit};
 use silex_desktop::{
     db::Shift,
-    model::{TreeRow, descendants, filter_tree},
+    model::{TreeRow, descendants},
 };
 
 use super::*;
@@ -32,10 +30,6 @@ pub(super) enum RowAction {
     Reorder(String, Shift),
     Move(String, Option<String>),
     Trash(String),
-}
-
-pub(super) fn search_id() -> egui::Id {
-    egui::Id::unique("silex-search")
 }
 
 /// Height of every sidebar row.
@@ -597,42 +591,9 @@ impl SilexApp {
         }
     }
 
-    /// Recomputes search results when the query or the pages changed.
-    pub(super) fn refresh_search(&mut self) {
-        if self.searched_query.as_deref() == Some(self.query.as_str()) {
-            return;
-        }
-        self.searched_query = Some(self.query.clone());
-        self.filtered = filter_tree(&self.pages, &self.query);
-        let shown: HashSet<&str> = self.filtered.iter().map(|r| r.page.id.as_str()).collect();
-        self.content_matches = match self.db.search_pages(&self.query) {
-            Ok(found) => found
-                .into_iter()
-                .filter(|p| !shown.contains(p.id.as_str()))
-                .collect(),
-            Err(err) => {
-                self.notice = Some(format!("Error de búsqueda: {err:#}"));
-                Vec::new()
-            }
-        };
-    }
-
-    /// Ids of the page rows currently visible, top to bottom (for keyboard navigation).
-    pub(super) fn visible_page_ids(&self) -> Vec<String> {
-        if self.query.trim().is_empty() {
-            self.tree.iter().map(|r| r.page.id.clone()).collect()
-        } else {
-            self.filtered
-                .iter()
-                .map(|r| &r.page)
-                .chain(&self.content_matches)
-                .map(|p| p.id.clone())
-                .collect()
-        }
-    }
-
+    /// Opens the page above or below the open one in the visible tree.
     pub(super) fn open_adjacent(&mut self, step: isize) -> Result<()> {
-        let ids = self.visible_page_ids();
+        let ids: Vec<&str> = self.tree.iter().map(|r| r.page.id.as_str()).collect();
         if ids.is_empty() {
             return Ok(());
         }
@@ -647,7 +608,8 @@ impl SilexApp {
         if Some(next) == current {
             return Ok(());
         }
-        self.open_page(ids[next].clone())
+        let id = ids[next].to_owned();
+        self.open_page(id)
     }
 
     pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
@@ -674,7 +636,7 @@ impl SilexApp {
             self.report(result);
         }
         ui.add_space(theme::space::SM);
-        self.search_field(ui, p);
+        self.search_button(ui, p);
         ui.add_space(theme::space::MD);
 
         egui::Panel::bottom("silex_sidebar_footer")
@@ -688,63 +650,33 @@ impl SilexApp {
                     .auto_shrink(false)
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 1.0;
-                        if self.query.trim().is_empty() {
-                            self.favorite_rows(ui);
-                            if section_header_with_add(ui, "Páginas", "Nueva página") {
-                                let result = self.create_root_page("Sin título");
-                                self.report(result);
-                            }
-                            let rows = self.tree.clone();
-                            self.page_rows(ui, &rows, true, "tree", icons::PAGE);
-                        } else {
-                            self.search_results(ui);
+                        self.favorite_rows(ui);
+                        if section_header_with_add(ui, "Páginas", "Nueva página") {
+                            let result = self.create_root_page("Sin título");
+                            self.report(result);
                         }
+                        let rows = self.tree.clone();
+                        self.page_rows(ui, &rows, true, "tree", icons::PAGE);
                     });
             });
     }
 
-    /// Rounded search box with icon and shortcut hint.
-    fn search_field(&mut self, ui: &mut egui::Ui, p: &theme::Palette) {
-        egui::Frame::new()
+    /// Looks like a search box; opens the search window (also Cmd+K).
+    fn search_button(&mut self, ui: &mut egui::Ui, p: &theme::Palette) {
+        let hint = format!("{}+K", cmd_label(ui.ctx()));
+        let button = ui.add(
+            egui::Button::new((
+                icons::icon(icons::SEARCH).color(p.sidebar_muted),
+                egui::RichText::new("Buscar").color(p.sidebar_muted),
+            ))
+            .shortcut_text(egui::RichText::new(hint).small().color(p.sidebar_muted))
             .fill(p.sidebar_hover)
             .corner_radius(theme::radius::MD)
-            .inner_margin(egui::Margin::symmetric(8, 4))
-            .show(ui, |ui| {
-                let row = egui::vec2(ui.available_width(), 24.0);
-                ui.allocate_ui_with_layout(
-                    row,
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.label(icons::icon(icons::SEARCH).color(p.sidebar_muted));
-                        let hint_text = format!("{}+K", cmd_label(ui.ctx()));
-                        let hint_width = ui
-                            .painter()
-                            .layout_no_wrap(
-                                hint_text.clone(),
-                                egui::FontId::proportional(12.0),
-                                p.sidebar_muted,
-                            )
-                            .size()
-                            .x;
-                        let spacing = ui.spacing().item_spacing.x;
-                        ui.add(
-                            TextEdit::singleline(&mut self.query)
-                                .id(search_id())
-                                .frame(egui::Frame::NONE)
-                                .margin(egui::Margin::ZERO)
-                                .align(egui::Align2::LEFT_CENTER)
-                                .min_size(egui::vec2(0.0, 24.0))
-                                .hint_text(egui::RichText::new("Buscar").color(p.sidebar_muted))
-                                .desired_width(ui.available_width() - hint_width - spacing),
-                        );
-                        ui.label(
-                            egui::RichText::new(hint_text)
-                                .small()
-                                .color(p.sidebar_muted),
-                        );
-                    },
-                );
-            });
+            .min_size(egui::vec2(ui.available_width(), 32.0)),
+        );
+        if button.clicked() {
+            self.open_search(ui.ctx());
+        }
     }
 
     /// Trash, backups/export and shortcuts, pinned to the bottom.
@@ -838,32 +770,6 @@ impl SilexApp {
         self.set_settings(&ctx, settings);
     }
 
-    /// Search: title matches as a filtered tree, then pages that only match
-    /// in their content (FTS, which also ignores accents).
-    pub(super) fn search_results(&mut self, ui: &mut egui::Ui) {
-        self.refresh_search();
-        let filtered = self.filtered.clone();
-        let content: Vec<TreeRow> = self
-            .content_matches
-            .iter()
-            .map(|page| TreeRow {
-                page: page.clone(),
-                depth: 0,
-                has_children: false,
-            })
-            .collect();
-        section_header(ui, "Páginas");
-        if filtered.is_empty() {
-            ui.weak("Ningún título coincide.");
-        }
-        self.page_rows(ui, &filtered, false, "filter", icons::PAGE);
-        if !content.is_empty() {
-            ui.add_space(theme::space::MD);
-            section_header(ui, "En el contenido");
-            self.page_rows(ui, &content, false, "content", icons::PAGE);
-        }
-    }
-
     pub(super) fn shortcuts_help(ui: &mut egui::Ui) {
         let cmd = cmd_label(ui.ctx());
         egui::Grid::new("silex_shortcuts")
@@ -873,7 +779,7 @@ impl SilexApp {
                 for (keys, what) in [
                     (format!("{cmd}+N"), "Nueva página"),
                     (format!("{cmd}+Mayús+N"), "Nueva subpágina"),
-                    (format!("{cmd}+K"), "Buscar"),
+                    (format!("{cmd}+K"), "Buscar en títulos y contenido"),
                     ("Alt+↑ / Alt+↓".to_owned(), "Página anterior / siguiente"),
                     ("F2".to_owned(), "Renombrar la página abierta"),
                     (format!("{cmd}+S"), "Guardar ahora"),

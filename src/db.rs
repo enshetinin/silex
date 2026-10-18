@@ -11,6 +11,7 @@ use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::model::{Block, BlockKind, MAX_INDENT, NewBlock, Page, TrashItem};
+use crate::search::{self, BlockMatch, Candidate, SearchHit};
 use crate::settings::Settings;
 
 pub mod backup;
@@ -652,23 +653,16 @@ impl Database {
         Ok(self.list_trash()?.len())
     }
 
-    /// Escape arbitrary input into quoted alphanumeric tokens for safe FTS queries.
+    /// Live pages whose title, or one of whose blocks, contains every word of
+    /// `term` (whole words, A–Z by title). An empty term lists every page.
+    /// Arbitrary input is safe: see [`search::fts_query`].
     pub fn search_pages(&self, term: &str) -> Result<Vec<Page>> {
         if term.trim().is_empty() {
             return self.list_pages();
         }
-        let normalized: String = term
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-            .collect();
-        let terms: Vec<String> = normalized
-            .split_whitespace()
-            .map(|part| format!("\"{part}\""))
-            .collect();
-        if terms.is_empty() {
+        let Some(phrase) = search::fts_query(term, false) else {
             return Ok(Vec::new());
-        }
-        let phrase = terms.join(" AND ");
+        };
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT p.id, p.parent_id, p.title FROM pages p
              WHERE p.deleted_at IS NULL AND (
@@ -687,6 +681,110 @@ impl Database {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Global search (H5.7): live pages whose title or one of whose blocks
+    /// contains every word, also as the start of a longer word, ignoring
+    /// case and accents. Ranked by [`search::rank`]: title matches first,
+    /// then by FTS5 `bm25`. At most [`search::MAX_RESULTS`]; each result
+    /// with a content match carries a snippet of its best block.
+    pub fn search(&self, input: &str) -> Result<Vec<SearchHit>> {
+        let Some(query) = search::fts_query(input, true) else {
+            return Ok(Vec::new());
+        };
+        let start = search::MATCH_START.to_string();
+        let end = search::MATCH_END.to_string();
+        let mut found: HashMap<String, Candidate> = HashMap::new();
+        // One read transaction: the three queries see the same data, even if
+        // another connection writes in between. Dropping it ends it.
+        let tx = self.conn.unchecked_transaction()?;
+
+        let mut titles = tx.prepare(
+            "SELECT p.id, p.parent_id, p.title, bm25(page_search), highlight(page_search, 0, ?2, ?3)
+             FROM page_search JOIN pages p ON p.rowid = page_search.rowid
+             WHERE page_search MATCH ?1 AND p.deleted_at IS NULL",
+        )?;
+        let rows = titles.query_map(params![query, start, end], |r| {
+            Ok(Candidate {
+                page: Page {
+                    id: r.get(0)?,
+                    parent_id: r.get(1)?,
+                    title: r.get(2)?,
+                },
+                title: Some((r.get(3)?, r.get(4)?)),
+                block: None,
+            })
+        })?;
+        for candidate in rows {
+            let candidate = candidate?;
+            found.insert(candidate.page.id.clone(), candidate);
+        }
+
+        // Best block first; on a tie, the one higher up in the page.
+        let mut blocks = tx.prepare(
+            "SELECT p.id, p.parent_id, p.title, b.id, b.rowid, bm25(block_search) AS score
+             FROM block_search JOIN blocks b ON b.rowid = block_search.rowid
+             JOIN pages p ON p.id = b.page_id
+             WHERE block_search MATCH ?1 AND p.deleted_at IS NULL
+             ORDER BY score, b.position, b.rowid",
+        )?;
+        let rows = blocks.query_map([&query], |r| {
+            let page = Page {
+                id: r.get(0)?,
+                parent_id: r.get(1)?,
+                title: r.get(2)?,
+            };
+            let block: (String, i64, f64) = (r.get(3)?, r.get(4)?, r.get(5)?);
+            Ok((page, block))
+        })?;
+        for row in rows {
+            let (page, block) = row?;
+            let candidate = found.entry(page.id.clone()).or_insert(Candidate {
+                page,
+                title: None,
+                block: None,
+            });
+            if candidate.block.is_none() {
+                candidate.block = Some(block);
+            }
+        }
+
+        let mut ranked: Vec<Candidate> = found.into_values().collect();
+        search::rank(&mut ranked);
+        ranked.truncate(search::MAX_RESULTS);
+
+        // Snippets only for the results that are returned.
+        let mut snippet = tx.prepare(
+            "SELECT snippet(block_search, 0, ?2, ?3, '…', ?4), highlight(block_search, 0, ?2, ?3)
+             FROM block_search WHERE block_search MATCH ?1 AND rowid = ?5",
+        )?;
+        let mut hits = Vec::with_capacity(ranked.len());
+        for candidate in ranked {
+            let title = match &candidate.title {
+                Some((_, marked)) => search::parse_marked(marked),
+                None => search::parse_marked(&candidate.page.title),
+            };
+            let block = match candidate.block {
+                Some((block_id, rowid, _)) => snippet
+                    .query_row(
+                        params![query, start, end, search::SNIPPET_TOKENS, rowid],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                    )
+                    .optional()?
+                    .map(|(cut, full)| BlockMatch {
+                        block_id,
+                        snippet: search::parse_marked(&cut),
+                        char_offset: search::first_match_offset(&full),
+                    }),
+                None => None,
+            };
+            hits.push(SearchHit {
+                page: candidate.page,
+                title,
+                block,
+            });
+        }
+        Ok(hits)
     }
 }
 

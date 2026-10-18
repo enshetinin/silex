@@ -187,10 +187,6 @@ fn app_frame(app: &mut SilexApp, ctx: &egui::Context, events: Vec<egui::Event>) 
     painted_text(&output.shapes)
 }
 
-fn page_titles(app: &SilexApp) -> Vec<String> {
-    app.pages.iter().map(|p| p.title.clone()).collect()
-}
-
 #[test]
 fn keyboard_shortcuts_create_and_navigate() -> anyhow::Result<()> {
     use egui::{Key, Modifiers as M};
@@ -228,10 +224,14 @@ fn keyboard_shortcuts_create_and_navigate() -> anyhow::Result<()> {
     app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::ALT)]);
     assert_eq!(app.selected.as_deref(), Some(second.as_str()));
 
-    // Cmd+K focuses the search field; F2 starts renaming the open page.
+    // Cmd+K opens the search window with its field focused; Escape closes it.
     app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
     app_frame(&mut app, &ctx, vec![]);
-    assert!(ctx.memory(|m| m.has_focus(search_id())));
+    assert!(app.search.is_some());
+    assert!(ctx.memory(|m| m.has_focus(search_field_id())));
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.search.is_none());
+    // F2 starts renaming the open page.
     app_frame(&mut app, &ctx, vec![key(Key::F2, M::NONE)]);
     assert_eq!(
         app.rename.as_ref().map(|r| r.id.as_str()),
@@ -314,38 +314,200 @@ fn trashing_another_page_keeps_the_open_one() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[test]
-fn search_filters_titles_and_lists_content_matches() -> anyhow::Result<()> {
-    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+/// Pages for the search tests: "Recetas" ─ "Pan de centeno", and "Notas"
+/// whose second block mentions bread. Returns (pan de centeno, notas).
+fn search_pages(app: &mut SilexApp) -> anyhow::Result<(String, String)> {
     let recetas = app.db.create_page("Recetas", None)?;
-    app.db.create_page("Pan de centeno", Some(&recetas))?;
-    let notas = app.db.create_page("Notas", None)?;
-    let block = app.db.add_block(&notas, BlockKind::Paragraph)?;
-    let mut blocks = app.db.list_blocks(&notas)?;
-    blocks[0].content = "comprar pan".into();
-    assert_eq!(blocks[0].id, block);
-    app.db.save_document(&notas, "Notas", &blocks)?;
+    let pan = app.db.create_page("Pan de centeno", Some(&recetas))?;
+    let blocks = [
+        ("Lista de la compra", BlockKind::Heading2),
+        ("leche, huevos y pan integral", BlockKind::Bulleted),
+    ];
+    let new: Vec<_> = blocks
+        .iter()
+        .map(|(text, kind)| silex_desktop::model::NewBlock {
+            kind: *kind,
+            indent: 0,
+            checked: false,
+            content: (*text).to_owned(),
+        })
+        .collect();
+    let notas = app.db.create_page_with_blocks("Notas", None, &new)?;
     app.reload_pages()?;
+    Ok((pan, notas))
+}
 
-    app.query = "pan".into();
-    app.refresh_search();
-    let filtered: Vec<(String, usize)> = app
-        .filtered
-        .iter()
-        .map(|r| (r.page.title.clone(), r.depth))
-        .collect();
-    assert_eq!(
-        filtered,
-        vec![("Recetas".into(), 0), ("Pan de centeno".into(), 1)]
+#[test]
+fn search_window_ranks_results_and_opens_the_match() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    let (pan, notas) = search_pages(&mut app)?;
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("pan".into())]);
+    let window = app.search.as_ref().expect("window open");
+    let found: Vec<&str> = window.results.iter().map(|h| h.page.id.as_str()).collect();
+    // The title match first, then the content match.
+    assert_eq!(found, [pan.as_str(), notas.as_str()]);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Recetas"), "path shown");
+
+    // ↓ then Enter opens "Notas" with the cursor on the match.
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    assert_eq!(app.search.as_ref().map(|w| w.selected), Some(1));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.search.is_none(), "closed");
+    assert_eq!(app.selected.as_deref(), Some(notas.as_str()));
+    let block = app.blocks[1].id.clone();
+    let offset = "leche, huevos y ".chars().count();
+    assert_eq!(app.pending_focus, Some((block, offset)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(1));
+    assert_eq!(caret_char(&app), Some(offset));
+    Ok(())
+}
+
+#[test]
+fn enter_never_opens_a_result_of_an_older_query() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    let (pan, notas) = search_pages(&mut app)?;
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("centeno".into())]);
+    let shown: Vec<String> = app
+        .search
+        .as_ref()
+        .map(|w| w.results.iter().map(|h| h.page.id.clone()).collect())
+        .unwrap_or_default();
+    assert_eq!(shown, [pan]);
+    // New text and Enter arrive in the same frame: Enter is read before the
+    // field takes the text, while the old results are still listed.
+    app_frame(&mut app, &ctx, vec![key(Key::A, M::COMMAND)]);
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Text("leche".into()), key(Key::Enter, M::NONE)],
     );
-    let content: Vec<&str> = app
-        .content_matches
-        .iter()
-        .map(|p| p.title.as_str())
-        .collect();
-    assert_eq!(content, vec!["Notas"]);
-    assert_eq!(app.visible_page_ids().len(), 3);
-    assert_eq!(page_titles(&app).len(), 4);
+    assert!(app.search.is_none());
+    assert_eq!(app.selected.as_deref(), Some(notas.as_str()));
+    Ok(())
+}
+
+#[test]
+fn search_window_has_the_keyboard_until_it_closes() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    search_pages(&mut app)?;
+    let ctx = egui::Context::default();
+    let pages = app.pages.len();
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    // Other shortcuts wait while the window is open.
+    app_frame(&mut app, &ctx, vec![key(Key::N, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::ALT)]);
+    assert_eq!(app.pages.len(), pages, "Cmd+N did nothing");
+    // Enter with no results does nothing; Cmd+K closes.
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("zzz".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t.contains("Nada coincide")));
+    assert!(app.search.is_some());
+    assert!(
+        ctx.memory(|m| m.has_focus(search_field_id())),
+        "the field keeps the focus"
+    );
+    // The focus comes back to the field if it is lost.
+    ctx.memory_mut(|m| m.surrender_focus(search_field_id()));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("!".into())]);
+    assert_eq!(app.search.as_ref().map(|w| w.query.as_str()), Some("zzz!"));
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    assert!(app.search.is_none());
+    // Reopened, it starts empty.
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    assert!(app.search.as_ref().is_some_and(|w| w.query.is_empty()));
+    Ok(())
+}
+
+#[test]
+fn opening_search_saves_first_and_drops_the_block_selection() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno"), (Par, 0, "dos")], 0, 3)?;
+    type_into(&mut app, &ctx, " tilo");
+    app.selection = Some(BlockSelection {
+        anchor: app.blocks[1].id.clone(),
+        head: app.blocks[1].id.clone(),
+    });
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    assert!(app.save.can_close(), "saved before searching");
+    assert!(app.selection.is_none());
+    // Keys go to the window, never to the old selection.
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    assert_eq!(texts(&app), ["uno tilo", "dos"]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("tilo".into())]);
+    assert_eq!(app.search.as_ref().map(|w| w.results.len()), Some(1));
+    Ok(())
+}
+
+#[test]
+fn enter_confirming_an_ime_composition_does_not_open_a_result() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    search_pages(&mut app)?;
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("pan ".into())]);
+    let opened = app.selected.clone();
+    let preedit = egui::Event::Ime(egui::ImeEvent::Preedit {
+        text: "に".into(),
+        active_range_chars: None,
+    });
+    app_frame(&mut app, &ctx, vec![preedit]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Ime(egui::ImeEvent::Commit("に".into()))],
+    );
+    assert!(app.search.is_some(), "still open");
+    assert_eq!(app.selected, opened);
+    Ok(())
+}
+
+#[test]
+fn search_runs_on_a_worker_with_a_file_database() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    // Declared before the app: dropped after it (Windows cannot delete open files).
+    let tmp = TempFolder::new("silex-app-search")?;
+    let mut app = SilexApp::new(Database::open(tmp.0.join("silex.sqlite3"))?)?;
+    app.startup_backup_pending = false;
+    let (pan, notas) = search_pages(&mut app)?;
+    let ctx = egui::Context::default();
+    let wait_for = |app: &mut SilexApp, done: &dyn Fn(&SilexApp) -> bool| {
+        let start = std::time::Instant::now();
+        while !done(app) && start.elapsed() < std::time::Duration::from_secs(30) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app_frame(app, &ctx, vec![]);
+        }
+    };
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("centeno".into())]);
+    wait_for(&mut app, &|app| {
+        app.search.as_ref().is_some_and(|w| !w.results.is_empty())
+    });
+    let window = app.search.as_ref().expect("window open");
+    assert_eq!(window.error, None);
+    let found: Vec<&str> = window.results.iter().map(|h| h.page.id.as_str()).collect();
+    assert_eq!(found, [pan.as_str()]);
+
+    // Enter right after typing opens a result of the new query, never one
+    // of the previous query that is still on screen.
+    app_frame(&mut app, &ctx, vec![key(Key::A, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("leche".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    wait_for(&mut app, &|app| app.search.is_none());
+    assert_eq!(app.selected.as_deref(), Some(notas.as_str()));
+    drop(app);
     Ok(())
 }
 
@@ -360,14 +522,19 @@ fn sidebar_states_have_no_id_clashes() -> anyhow::Result<()> {
     app.reload_pages()?;
     app.start_rename(&child);
     let ctx = egui::Context::default();
-    for query in ["", "Hija"] {
-        app.query = query.into();
+    for state in ["at rest", "search window"] {
+        if state == "search window" {
+            app.open_search(&ctx);
+            if let Some(window) = app.search.as_mut() {
+                window.query = "hija".into();
+            }
+        }
         for _ in 0..2 {
             let warnings: Vec<String> = app_frame(&mut app, &ctx, vec![])
                 .into_iter()
                 .filter(|t| t.contains(" use of ") && t.contains(" ID "))
                 .collect();
-            assert!(warnings.is_empty(), "query {query:?}: {warnings:?}");
+            assert!(warnings.is_empty(), "{state}: {warnings:?}");
         }
     }
     Ok(())

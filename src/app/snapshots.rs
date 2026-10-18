@@ -191,6 +191,22 @@ fn assert_accessible(harness: &Harness<'_, SilexApp>, state: &str) {
     );
 }
 
+/// The sidebar's "Buscar" button (its name also holds the shortcut).
+fn search_button<'h>(harness: &'h Harness<'_, SilexApp>) -> egui_kittest::Node<'h> {
+    harness
+        .get_all_by_label_contains("Buscar")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .expect("search button")
+}
+
+/// Opens the search window from the sidebar and types `query`.
+fn open_search(harness: &mut Harness<'_, SilexApp>, query: &str) {
+    search_button(harness).click();
+    harness.run();
+    harness.event(egui::Event::Text(query.into()));
+    harness.run();
+}
+
 fn click_button(harness: &mut Harness<'_, SilexApp>, label: &str) {
     harness
         .get_all_by_label(label)
@@ -235,11 +251,17 @@ fn every_control_has_a_name() -> anyhow::Result<()> {
         harness.run();
     }
 
-    harness.state_mut().query = "receta".into();
-    harness.run();
+    open_search(&mut harness, "dise");
     assert_accessible(&harness, "search results");
+    // Each result is a button named with its title, path and snippet.
+    let result = harness
+        .get_all_by_label_contains("Diseño de la interfaz, en Proyecto Silex")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button);
+    assert!(result.is_some(), "result row is named");
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    assert!(harness.state().search.is_none());
 
-    harness.state_mut().query.clear();
     harness.state_mut().selected = None;
     harness.run();
     assert_accessible(&harness, "no page open");
@@ -301,10 +323,9 @@ fn keyboard_focus_is_visible() -> anyhow::Result<()> {
         "keyboard_focus_light",
         eframe::egui::Theme::Light,
         |harness| {
-            // Tab from the search field to the first tree rows.
-            harness
-                .ctx
-                .memory_mut(|m| m.request_focus(super::sidebar::search_id()));
+            // Tab from the search button: the footer comes before the tree
+            // (its panel is laid out first).
+            search_button(harness).focus();
             harness.run();
             for _ in 0..3 {
                 harness.key_press(egui::Key::Tab);
@@ -377,5 +398,23 @@ fn slash_menu() -> anyhow::Result<()> {
     snapshot_with("slash_menu_light", eframe::egui::Theme::Light, |harness| {
         click_button(harness, "Añadir bloque");
         harness.event(egui::Event::Text("/".into()));
+    })
+}
+
+#[test]
+fn search_window() -> anyhow::Result<()> {
+    snapshot_with(
+        "search_window_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            open_search(harness, "dise");
+        },
+    )
+}
+
+#[test]
+fn search_window_dark() -> anyhow::Result<()> {
+    snapshot_with("search_window_dark", eframe::egui::Theme::Dark, |harness| {
+        open_search(harness, "dise");
     })
 }

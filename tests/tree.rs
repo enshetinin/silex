@@ -333,68 +333,6 @@ mod reorder {
     }
 }
 
-mod filter {
-    use super::{page, r};
-    use silex_desktop::model::filter_tree;
-
-    fn rows(pages: &[silex_desktop::model::Page], q: &str) -> Vec<(String, usize, bool)> {
-        filter_tree(pages, q)
-            .into_iter()
-            .map(|r| (r.page.id, r.depth, r.has_children))
-            .collect()
-    }
-
-    /// recetas ─ pan ─ pan dulce ; viajes ─ islandia
-    fn pages() -> Vec<silex_desktop::model::Page> {
-        let mut p = vec![
-            page("recetas", None),
-            page("pan", Some("recetas")),
-            page("pan dulce", Some("pan")),
-            page("viajes", None),
-            page("islandia", Some("viajes")),
-        ];
-        // Titles differ from ids in case to test case-insensitivity.
-        p[2].title = "Pan Dulce de Navidad".into();
-        p
-    }
-
-    #[test]
-    fn matches_come_with_their_ancestors_expanded() {
-        assert_eq!(
-            rows(&pages(), "dulce"),
-            vec![
-                r("recetas", 0, true),
-                r("pan", 1, true),
-                r("pan dulce", 2, false)
-            ]
-        );
-    }
-
-    #[test]
-    fn matching_is_case_insensitive_and_shows_every_match() {
-        // "PAN" matches "PAN" and "Pan Dulce de Navidad"; both sit under recetas.
-        assert_eq!(
-            rows(&pages(), "  PAN "),
-            vec![
-                r("recetas", 0, true),
-                r("pan", 1, true),
-                r("pan dulce", 2, false)
-            ]
-        );
-    }
-
-    #[test]
-    fn children_of_a_match_are_not_included_unless_they_match() {
-        assert_eq!(rows(&pages(), "viajes"), vec![r("viajes", 0, false)]);
-    }
-
-    #[test]
-    fn empty_query_or_no_match_gives_nothing() {
-        assert!(rows(&pages(), "   ").is_empty());
-        assert!(rows(&pages(), "zzz").is_empty());
-    }
-}
-
 mod rename {
     use silex_desktop::db::Database;
 

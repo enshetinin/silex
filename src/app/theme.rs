@@ -352,6 +352,18 @@ mod tests {
             ("text_muted / bg", p.text_muted, p.bg, TEXT),
             ("text_muted / surface", p.text_muted, p.surface, TEXT),
             ("text_muted / subtle", p.text_muted, p.subtle, TEXT),
+            (
+                "text_muted / accent_soft (selected search result)",
+                p.text_muted,
+                p.accent_soft,
+                TEXT,
+            ),
+            (
+                "accent_strong / accent_soft (selected result icon)",
+                p.accent_strong,
+                p.accent_soft,
+                NON_TEXT,
+            ),
             ("accent_strong / bg (links)", p.accent_strong, p.bg, TEXT),
             (
                 "on_accent / accent_strong",
@@ -443,6 +455,10 @@ mod tests {
         };
         assert!(has('ñ', FontFamily::Proportional));
         assert!(has('ñ', FontFamily::Name(SEMIBOLD.into())));
+        // Used by the search window and breadcrumbs.
+        for c in ['↑', '↓', '›', '…', '«', '»'] {
+            assert!(has(c, FontFamily::Proportional), "{c:?}");
+        }
 
         // The icon family is Phosphor alone, and text families never use it.
         let fonts = fonts();
