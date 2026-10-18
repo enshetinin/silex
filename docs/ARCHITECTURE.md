@@ -5,13 +5,25 @@ Aplicación **nativa renderizada en Rust** usando egui/eframe, persistencia loca
 
 ## Módulos actuales
 ```
-src/main.rs                 # Bootstrap del proceso, DB y ventana
-src/app.rs                  # Estado y composición de interfaz egui
-src/lib.rs                  # Biblioteca reutilizable
-src/model.rs                # Page, Block sin dependencia GUI
-src/db.rs                   # Persistencia y consultas parametrizadas
-src/db/migrations/          # SQL versionado embebido en binario
-tests/database.rs           # Persistencia, búsqueda y migraciones
+src/main.rs                 # Arranque: base de datos y ventana
+src/app/                    # Aplicación egui (binario); todos extienden SilexApp
+  mod.rs                    #   Estado, frame, atajos y operaciones de página
+  sidebar.rs                #   Árbol, favoritos, búsqueda, menú de página, renombrar
+  blocks.rs                 #   Editor de bloques: teclas, selección, menú /, pegar
+  document.rs               #   Guardado y deshacer del documento
+  dialogs.rs                #   Papelera, restaurar, cierre; barras de estado y aviso
+  jobs.rs                   #   Copias, importación y exportación en segundo plano
+  tests.rs                  #   Tests de la app sin ventana
+src/lib.rs                  # Biblioteca sin egui:
+src/model.rs                #   Page, Block, BlockKind, árbol y numeración
+src/db.rs, src/db/          #   SQLite: consultas, migraciones, copias (backup.rs)
+src/editor.rs               #   Operaciones puras del editor de bloques
+src/history.rs              #   Instantáneas para deshacer/rehacer
+src/save_state.rs           #   Cuándo guardar y reintentar
+src/markdown/               #   Markdown ↔ bloques
+src/import.rs, src/export.rs#   Lectura y escritura de archivos
+src/safe_path.rs            #   Nombres de archivo seguros
+tests/                      # Tests de integración y archivos golden
 ```
 
 ## Arquitectura destino (crear solo cuando crezca)
