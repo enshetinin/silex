@@ -36,8 +36,10 @@ product-name = "Silex"
 # Also the name of the data folder on macOS (`directories`); never change it.
 identifier = "dev.silex.Silex"
 publisher = "Silex"
-# Shown by Linux menus and package managers.
+# Shown by Linux menus and package managers (.deb Maintainer: `authors`).
 description = "Espacio de trabajo local para escribir y organizar notas"
+long-description = "Silex guarda tus páginas en una base SQLite en tu equipo, sin cuentas, sin nube y sin telemetría. Editor por bloques, búsqueda global, papelera, copias de seguridad y exportación a Markdown."
+authors = ["Yev"]
 copyright = "Copyright (c) 2026 Yev"
 category = "Productivity"
 # No `license-file`: it would make the .dmg and the Windows installer ask the
@@ -50,6 +52,11 @@ icons = [
     "assets/app-icon/silex.ico",
 ]
 binaries = [{ path = "silex-desktop", main = true }]
+
+[package.metadata.packager.nsis]
+# cargo-packager's template with the per-user install folder moved to
+# %LOCALAPPDATA%\Programs\Silex, outside the data folder (see its header).
+template = "packaging/windows/installer.nsi"
 
 [package.metadata.packager.macos]
 minimum-system-version = "11.0"
