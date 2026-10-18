@@ -97,3 +97,4 @@ Cada decisión irreversible (formato de documento, sincronización, cifrado, edi
 - `0003-block-model.md`: tipos de bloque ampliados y lista plana con sangría.
 - `0004-document-undo.md`: deshacer/rehacer del documento con instantáneas (sustituye a 0002).
 - `0005-packaging.md`: cargo-packager, identificador `dev.silex.Silex`, iconos y firma pendiente.
+- `0006-databases.md`: bases de datos como páginas, filas como subpáginas, propiedades tipadas en tablas propias y vistas con configuración JSON (Hito 6).
