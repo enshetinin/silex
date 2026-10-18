@@ -35,8 +35,10 @@ Actualmente las consultas son cortas y se ejecutan en el hilo UI (medido: < 1 ms
 - WAL cuando esté soportado por el archivo; `synchronous=FULL` en el starter.
 - FTS5 mediante triggers para títulos y contenido de bloques.
 - Esquema con `PRAGMA user_version`, transacciones de migración y rechazo a esquemas posteriores.
-- Las copias deben ser consistentes: preferir SQLite backup API/VACUUM INTO; **no copiar solo el .sqlite3 mientras la app está abierta con WAL**.
-- La papelera inicial solo oculta páginas; restauración y reglas recursivas se desarrollan después.
+- Copias (`src/db/backup.rs`): API de backup de SQLite en un hilo `silex-backup` con su propia conexión. El resultado vuelve por un canal, y la UI solo lo consulta en cada frame. Se escribe en `*.partial`, se pasa a modo de diario `DELETE` (un solo archivo), se verifica (`integrity_check`, `user_version`, `integrity-check` de FTS5) y solo entonces se renombra a `backups/silex-AAAAMMDD-HHMMSS.sqlite3` (UTC). La rotación (10) solo borra archivos con ese patrón y solo después de una copia verificada. Si la app se cierra a mitad de una copia, el `.partial` se limpia en la siguiente. **Nunca copiar solo el .sqlite3 mientras la app está abierta con WAL.**
+- Restauración (`Database::restore_from_backup`): verifica la copia elegida, crea una copia verificada del estado actual y solo entonces sobrescribe la base con la API de backup, que deshace la escritura en la base si no termina. Después reaplica los pragmas (WAL, FK). La copia previa aparece la primera en la lista, para poder deshacer la restauración.
+- **Deuda:** la restauración corre en el hilo de la UI, porque usa la conexión principal (medido: unos 25 ms con 100 páginas/1000 bloques, incluida la copia previa). Con bases grandes habrá que moverla a un worker. Los nombres de copia tienen resolución de 1 s: dos copias en el mismo segundo devuelven un error de «inténtalo de nuevo» y no sobrescriben nada.
+- Papelera (H2.3): borrado lógico por rama. La página y sus subpáginas vivas comparten un `deleted_at` único por operación (siempre posterior al último existente), que identifica el grupo al restaurar. Restaurar devuelve exactamente ese grupo; si el padre sigue en la papelera, la página vuelve a la raíz. No hay borrado definitivo (decisión del producto, 2026-10-18).
 
 ## Rendimiento
 Evitar recrear conexiones cada frame, filtrar SQL para búsqueda y virtualizar páginas/bloques grandes cuando existan benchmarks. Añadir debounce sin sacrificar guardado al cerrar y recuperación ante errores.
@@ -49,3 +51,5 @@ Diseño editorial, navegación lateral, área central legible, estados de carga/
 
 ## ADRs
 Cada decisión irreversible (formato de documento, sincronización, cifrado, editor, arquitectura de concurrencia) tiene su propia `docs/decisions/NNNN-*.md`: problema, alternativas, decisión, consecuencias, migración.
+- `0001-native-rust.md`: egui/eframe + SQLite.
+- `0002-undo-strategy.md`: deshacer de texto por campo con ids estables (Hito 1); deshacer semántico en el Hito 3.

@@ -1,15 +1,28 @@
 //! All SQL lives here. Callers never construct SQL from user input.
-use std::{path::Path, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use directories::ProjectDirs;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::model::{Block, Page};
+use crate::model::{Block, Page, TrashItem};
+
+pub mod backup;
 
 const LATEST_SCHEMA_VERSION: i64 = 1;
 const SCHEMA_V1: &str = include_str!("db/migrations/0001_init.sql");
+
+/// Direction for [`Database::reorder_page`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shift {
+    Up,
+    Down,
+}
 
 pub struct Database {
     conn: Connection,
@@ -35,6 +48,61 @@ impl Database {
         db.configure()?;
         db.migrate()?;
         Ok(db)
+    }
+
+    /// File backing this database; `None` for in-memory databases.
+    pub fn path(&self) -> Option<PathBuf> {
+        self.conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+    }
+
+    /// True when the newest backup in `dir` is missing or older than
+    /// [`backup::MAX_AGE_HOURS`]. Uses SQLite's UTC clock, like backup names.
+    pub fn backup_due(&self, dir: &Path) -> Result<bool> {
+        let threshold: String = self.conn.query_row(
+            "SELECT strftime('%Y%m%d-%H%M%S', 'now', ?1)",
+            [format!("-{} hours", backup::MAX_AGE_HOURS)],
+            |r| r.get(0),
+        )?;
+        Ok(backup::newest_stamp(dir)?.is_none_or(|newest| newest < threshold))
+    }
+
+    /// Replaces the whole database with `backup_file`.
+    ///
+    /// Order matters for safety: the chosen copy is verified first, then the
+    /// current state is saved as a new verified backup, and only then is the
+    /// live database overwritten. SQLite's backup API rolls back the
+    /// destination if the copy does not finish, so a failure leaves the
+    /// current data as it was. Returns the path of the pre-restore backup.
+    pub fn restore_from_backup(&mut self, backup_file: &Path) -> Result<PathBuf> {
+        let source = self
+            .path()
+            .context("No se puede restaurar sobre una base en memoria")?;
+        backup::verify_backup(backup_file)
+            .context("La copia elegida no es válida; no se ha cambiado nada")?;
+        let safety = backup::create_backup(&source, &backup::backups_dir(&source)).context(
+            "No se pudo guardar el estado actual antes de restaurar; no se ha cambiado nada",
+        )?;
+        self.conn
+            .restore(MAIN_DB, backup_file, None::<fn(rusqlite::backup::Progress)>)
+            .with_context(|| {
+                format!(
+                    "La restauración falló; el estado anterior está en {}",
+                    safety.display()
+                )
+            })?;
+        // The copy is a single-file (DELETE journal) database; restore WAL and pragmas.
+        self.configure()?;
+        let version: i64 = self
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))?;
+        ensure!(
+            version == LATEST_SCHEMA_VERSION,
+            "La base restaurada tiene un esquema inesperado ({version})"
+        );
+        Ok(safety)
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -91,6 +159,92 @@ impl Database {
             params![id, title, parent_id],
         )?;
         Ok(id)
+    }
+
+    /// Moves a page under `new_parent` (or to the root) as its last child.
+    /// Rejects missing/trashed pages and any move that would create a cycle.
+    pub fn move_page(&mut self, id: &str, new_parent: Option<&str>) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let live = |page: &str| -> rusqlite::Result<bool> {
+            tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND deleted_at IS NULL)",
+                [page],
+                |r| r.get(0),
+            )
+        };
+        ensure!(live(id)?, "La página no existe o está en la papelera");
+        if let Some(parent) = new_parent {
+            ensure!(live(parent)?, "El destino no existe o está en la papelera");
+            // Walk up from the destination; UNION deduplicates, so it ends even on bad data.
+            let creates_cycle: bool = tx.query_row(
+                "WITH RECURSIVE chain(id) AS (
+                     SELECT ?1
+                     UNION
+                     SELECT p.parent_id FROM pages p JOIN chain c ON p.id = c.id
+                     WHERE p.parent_id IS NOT NULL
+                 )
+                 SELECT EXISTS (SELECT 1 FROM chain WHERE id = ?2)",
+                params![parent, id],
+                |r| r.get(0),
+            )?;
+            ensure!(
+                !creates_cycle,
+                "No se puede mover una página dentro de sí misma ni de sus subpáginas"
+            );
+        }
+        tx.execute(
+            "UPDATE pages SET parent_id = ?2,
+                 sort_order = (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages
+                               WHERE parent_id IS ?2 AND id <> ?1),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+            params![id, new_parent],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Moves a page one place up or down among its siblings (same parent).
+    /// Returns `false` when it is already first/last. Siblings are renumbered
+    /// 0..n in the same transaction, which also repairs duplicate `sort_order`s.
+    pub fn reorder_page(&mut self, id: &str, shift: Shift) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let parent: Option<String> = tx
+            .query_row(
+                "SELECT parent_id FROM pages WHERE id = ?1 AND deleted_at IS NULL",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La página no existe o está en la papelera")?;
+        // Same order as list_pages, restricted to live siblings.
+        let mut siblings: Vec<String> = tx
+            .prepare(
+                "SELECT id FROM pages WHERE parent_id IS ?1 AND deleted_at IS NULL
+                 ORDER BY sort_order, created_at, id",
+            )?
+            .query_map([&parent], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let index = siblings
+            .iter()
+            .position(|s| s == id)
+            .context("La página no aparece entre sus hermanas")?;
+        let target = match shift {
+            Shift::Up => index.checked_sub(1),
+            Shift::Down => Some(index + 1).filter(|&i| i < siblings.len()),
+        };
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        siblings.swap(index, target);
+        for (position, sibling) in siblings.iter().enumerate() {
+            tx.execute(
+                "UPDATE pages SET sort_order = ?2 WHERE id = ?1",
+                params![sibling, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn get_page(&self, id: &str) -> Result<Option<Page>> {
@@ -164,13 +318,132 @@ impl Database {
         Ok(())
     }
 
-    pub fn trash_page(&self, id: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE pages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1 AND deleted_at IS NULL",
-            [id],
+    /// Sends a page and all its live subpages to the trash as one branch.
+    /// The branch shares a `deleted_at` that is unique to this operation, so
+    /// restoring brings back exactly what was trashed together. Returns the
+    /// number of pages trashed (0 if the page was not live).
+    pub fn trash_page(&self, id: &str) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        // Strictly later than any existing deleted_at (millisecond resolution),
+        // so two trash operations never merge into one branch.
+        let stamp: String = tx.query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', MAX(
+                 julianday('now'),
+                 COALESCE((SELECT julianday(MAX(deleted_at)) FROM pages), 0) + 1.5 / 86400000.0
+             ))",
+            [],
+            |r| r.get(0),
         )?;
+        let trashed = tx.execute(
+            "WITH RECURSIVE branch(id) AS (
+                 SELECT id FROM pages WHERE id = ?1 AND deleted_at IS NULL
+                 UNION
+                 SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
+                 WHERE p.deleted_at IS NULL
+             )
+             UPDATE pages SET deleted_at = ?2 WHERE id IN (SELECT id FROM branch)",
+            params![id, stamp],
+        )?;
+        tx.commit()?;
+        Ok(trashed)
+    }
+
+    /// Trash entries, newest first: each page the user trashed, with the
+    /// number of subpages that went with it. Pages trashed as part of a
+    /// branch are not listed separately.
+    pub fn list_trash(&self) -> Result<Vec<TrashItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_id, title, deleted_at FROM pages
+             WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, title",
+        )?;
+        let trashed: Vec<(Page, String)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    Page {
+                        id: r.get(0)?,
+                        parent_id: r.get(1)?,
+                        title: r.get(2)?,
+                    },
+                    r.get(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let stamp_of: HashMap<&str, &str> = trashed
+            .iter()
+            .map(|(p, at)| (p.id.as_str(), at.as_str()))
+            .collect();
+        // A page heads its branch unless its parent was trashed in the same operation.
+        let heads_branch = |page: &Page, at: &str| {
+            page.parent_id
+                .as_deref()
+                .and_then(|parent| stamp_of.get(parent))
+                .is_none_or(|parent_at| *parent_at != at)
+        };
+        let mut items: Vec<TrashItem> = trashed
+            .iter()
+            .filter(|(page, at)| heads_branch(page, at))
+            .map(|(page, at)| TrashItem {
+                page: page.clone(),
+                deleted_at: at.clone(),
+                subpages: 0,
+            })
+            .collect();
+        for item in &mut items {
+            let branch: Vec<Page> = trashed
+                .iter()
+                .filter(|(_, at)| *at == item.deleted_at)
+                .map(|(p, _)| p.clone())
+                .collect();
+            item.subpages = crate::model::descendants(&branch, &item.page.id).len();
+        }
+        Ok(items)
+    }
+
+    /// Restores a trashed page together with the subpages trashed with it.
+    /// If its parent is no longer live, the page comes back at the root.
+    pub fn restore_page(&mut self, id: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let (parent, stamp): (Option<String>, String) = tx
+            .query_row(
+                "SELECT parent_id, deleted_at FROM pages WHERE id = ?1 AND deleted_at IS NOT NULL",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .context("La página no está en la papelera")?;
+        tx.execute(
+            "WITH RECURSIVE branch(id) AS (
+                 SELECT ?1
+                 UNION
+                 SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
+                 WHERE p.deleted_at = ?2
+             )
+             UPDATE pages SET deleted_at = NULL WHERE id IN (SELECT id FROM branch)",
+            params![id, stamp],
+        )?;
+        let parent_is_live = match &parent {
+            Some(parent) => tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND deleted_at IS NULL)",
+                [parent],
+                |r| r.get(0),
+            )?,
+            None => true,
+        };
+        if !parent_is_live {
+            tx.execute(
+                "UPDATE pages SET parent_id = NULL,
+                     sort_order = (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages
+                                   WHERE parent_id IS NULL AND id <> ?1)
+                 WHERE id = ?1",
+                [id],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
+    }
+
+    pub fn trash_count(&self) -> Result<usize> {
+        Ok(self.list_trash()?.len())
     }
 
     /// Escape arbitrary input into quoted alphanumeric tokens for safe FTS queries.

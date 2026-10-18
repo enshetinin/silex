@@ -261,5 +261,21 @@ fn scale_smoke() -> anyhow::Result<()> {
     let t = Instant::now();
     assert_eq!(db.search_pages("buscable")?.len(), 1);
     println!("search_pages: {:?}", t.elapsed());
+
+    let backups = std::env::temp_dir().join(format!("silex-scale-{}", uuid::Uuid::new_v4()));
+    let t = Instant::now();
+    let copy = silex_desktop::db::backup::create_backup(tmp.path(), &backups)?;
+    println!("create_backup (verificada): {:?}", t.elapsed());
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let t = Instant::now();
+    let safety = db.restore_from_backup(&copy)?;
+    println!(
+        "restore_from_backup (incluye copia previa): {:?}",
+        t.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(&backups);
+    // The pre-restore copy lands in backups/ next to the temp database.
+    let _ = std::fs::remove_file(&safety);
+    let _ = safety.parent().map(std::fs::remove_dir); // only if empty
     Ok(())
 }

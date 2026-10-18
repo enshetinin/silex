@@ -1,22 +1,56 @@
-use std::time::{Duration, Instant};
+use std::{collections::HashSet, path::PathBuf, time::Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use eframe::egui::{self, TextEdit};
 use silex_desktop::{
-    db::Database,
-    model::{Block, Page},
+    db::{
+        Database, Shift,
+        backup::{self, BackupJob},
+    },
+    model::{Block, Page, TrashItem, TreeRow, ancestors, build_tree, descendants},
+    save_state::{SaveState, SaveStatus},
 };
 
 pub struct SilexApp {
     db: Database,
     pages: Vec<Page>,
+    /// Visible sidebar rows, rebuilt when pages or `expanded` change (not every frame).
+    tree: Vec<TreeRow>,
+    /// Pages whose children are shown; kept for the session only.
+    expanded: HashSet<String>,
+    trash_count: usize,
+    trash_dialog: Option<TrashDialog>,
     selected: Option<String>,
     title: String,
     blocks: Vec<Block>,
     new_page_title: String,
     query: String,
-    status: String,
-    modified_at: Option<Instant>,
+    save: SaveState,
+    /// Errors from actions other than saving (search, create, open).
+    notice: Option<String>,
+    close_dialog: bool,
+    /// Set once the user may leave: everything saved or changes discarded.
+    allow_close: bool,
+    backup_job: Option<BackupJob>,
+    backup_label: String,
+    /// The startup backup check needs an egui context, so it runs on the first frame.
+    startup_backup_pending: bool,
+    restore_dialog: Option<RestoreDialog>,
+    /// Bumped when the whole document set is replaced (restore), so text
+    /// fields start with a fresh undo history instead of pre-restore text.
+    doc_generation: u64,
+}
+
+struct TrashDialog {
+    items: Vec<TrashItem>,
+    error: Option<String>,
+}
+
+/// Backup picker; restoring needs an explicit second click on a selected copy.
+struct RestoreDialog {
+    backups: Vec<PathBuf>,
+    selected: Option<usize>,
+    error: Option<String>,
 }
 
 impl SilexApp {
@@ -29,58 +63,508 @@ impl SilexApp {
         let mut app = Self {
             db,
             pages,
+            tree: Vec::new(),
+            expanded: HashSet::new(),
+            trash_count: 0,
+            trash_dialog: None,
             selected: None,
             title: String::new(),
             blocks: Vec::new(),
             new_page_title: String::new(),
             query: String::new(),
-            status: "Guardado localmente".into(),
-            modified_at: None,
+            save: SaveState::default(),
+            notice: None,
+            close_dialog: false,
+            allow_close: false,
+            backup_job: None,
+            backup_label: String::new(),
+            startup_backup_pending: true,
+            restore_dialog: None,
+            doc_generation: 0,
         };
-        if let Some(page) = app.pages.first() {
-            app.open_page(page.id.clone())?;
+        app.backup_label = app.describe_last_backup();
+        app.trash_count = app.db.trash_count()?;
+        app.rebuild_tree();
+        if let Some(row) = app.tree.first() {
+            app.open_page(row.page.id.clone())?;
         }
         Ok(app)
     }
 
     fn open_page(&mut self, id: String) -> Result<()> {
-        self.save_if_dirty()?;
+        self.save_now()?;
         let page = self.db.get_page(&id)?;
         if let Some(page) = page {
             self.blocks = self.db.list_blocks(&id)?;
             self.title = page.title;
+            // Make the open page visible in the tree.
+            self.expanded.extend(ancestors(&self.pages, &id));
             self.selected = Some(id);
-            self.status = "Guardado localmente".into();
+            self.rebuild_tree();
         }
         Ok(())
     }
 
     fn reload_pages(&mut self) -> Result<()> {
         self.pages = self.db.list_pages()?;
+        self.trash_count = self.db.trash_count()?;
+        self.rebuild_tree();
         Ok(())
+    }
+
+    /// Opens the first page in the tree, or shows the empty state.
+    fn open_first_page(&mut self) -> Result<()> {
+        match self.tree.first().map(|r| r.page.id.clone()) {
+            Some(id) => self.open_page(id),
+            None => {
+                self.selected = None;
+                self.title.clear();
+                self.blocks.clear();
+                Ok(())
+            }
+        }
+    }
+
+    fn trash_page(&mut self, id: &str) -> Result<()> {
+        self.save_now()?;
+        let title = display_title(&self.title).to_owned();
+        let trashed = self.db.trash_page(id)?;
+        self.reload_pages()?;
+        self.open_first_page()?;
+        self.notice = Some(match trashed.saturating_sub(1) {
+            0 => format!("«{title}» se movió a la papelera."),
+            n => format!("«{title}» y {n} subpágina(s) se movieron a la papelera."),
+        });
+        Ok(())
+    }
+
+    fn open_trash_dialog(&mut self) {
+        match self.db.list_trash() {
+            Ok(items) => self.trash_dialog = Some(TrashDialog { items, error: None }),
+            Err(err) => self.notice = Some(format!("No se puede abrir la papelera: {err:#}")),
+        }
+    }
+
+    fn restore_from_trash(&mut self, id: &str) -> Result<()> {
+        self.save_now()?;
+        self.db.restore_page(id)?;
+        self.reload_pages()?;
+        self.open_page(id.to_owned())
+    }
+
+    fn trash_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.trash_dialog.as_ref() else {
+            return;
+        };
+        let mut restore = None;
+        let mut close = false;
+        let response = egui::Modal::new(egui::Id::unique("silex_trash")).show(ctx, |ui| {
+            ui.heading("Papelera");
+            if dialog.items.is_empty() {
+                ui.label("La papelera está vacía.");
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("silex_trash_list")
+                .max_height(300.0)
+                .show(ui, |ui| {
+                    for item in &dialog.items {
+                        ui.horizontal(|ui| {
+                            ui.label(display_title(&item.page.title));
+                            if item.subpages > 0 {
+                                ui.weak(format!("+{} subpágina(s)", item.subpages));
+                            }
+                            ui.weak(describe_timestamp(&item.deleted_at));
+                            if ui.button("Restaurar").clicked() {
+                                restore = Some(item.page.id.clone());
+                            }
+                        });
+                    }
+                });
+            if let Some(error) = &dialog.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            ui.add_space(8.0);
+            close = ui.button("Cerrar").clicked();
+        });
+        if close || (restore.is_none() && response.should_close()) {
+            self.trash_dialog = None;
+            return;
+        }
+        let Some(id) = restore else {
+            return;
+        };
+        match self.restore_from_trash(&id) {
+            Ok(()) => self.open_trash_dialog(),
+            Err(err) => {
+                if let Some(dialog) = self.trash_dialog.as_mut() {
+                    dialog.error = Some(format!("{err:#}"));
+                }
+            }
+        }
+    }
+
+    fn rebuild_tree(&mut self) {
+        self.tree = build_tree(&self.pages, &self.expanded);
+    }
+
+    fn toggle_expanded(&mut self, id: &str) {
+        if !self.expanded.remove(id) {
+            self.expanded.insert(id.to_owned());
+        }
+        self.rebuild_tree();
+    }
+
+    fn create_subpage(&mut self, parent: &str) -> Result<()> {
+        self.save_now()?;
+        let id = self.db.create_page("Sin título", Some(parent))?;
+        self.expanded.insert(parent.to_owned());
+        self.reload_pages()?;
+        self.open_page(id)
+    }
+
+    fn move_page(&mut self, id: &str, new_parent: Option<&str>) -> Result<()> {
+        self.save_now()?;
+        self.db.move_page(id, new_parent)?;
+        if let Some(parent) = new_parent {
+            self.expanded.insert(parent.to_owned());
+            self.expanded.extend(ancestors(&self.pages, parent));
+        }
+        self.reload_pages()
+    }
+
+    fn reorder_page(&mut self, id: &str, shift: Shift) -> Result<()> {
+        self.save_now()?;
+        if self.db.reorder_page(id, shift)? {
+            self.reload_pages()?;
+        }
+        Ok(())
+    }
+
+    /// Sidebar tree: indentation, expand/collapse arrow and page title.
+    fn tree_rows(&mut self, ui: &mut egui::Ui) {
+        let mut open = None;
+        let mut toggle = None;
+        for row in &self.tree {
+            ui.horizontal(|ui| {
+                ui.add_space(row.depth as f32 * 14.0);
+                let (_, response) =
+                    ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+                if row.has_children {
+                    let openness = if self.expanded.contains(&row.page.id) {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    let response = response
+                        .on_hover_text("Mostrar u ocultar subpáginas")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    egui::collapsing_header::paint_default_icon(ui, openness, &response);
+                    if response.clicked() {
+                        toggle = Some(row.page.id.clone());
+                    }
+                }
+                let selected = self.selected.as_deref() == Some(row.page.id.as_str());
+                if ui
+                    .selectable_label(selected, display_title(&row.page.title))
+                    .clicked()
+                {
+                    open = Some(row.page.id.clone());
+                }
+            });
+        }
+        if let Some(id) = toggle {
+            self.toggle_expanded(&id);
+        }
+        if let Some(id) = open {
+            let result = self.open_page(id);
+            self.report(result);
+        }
+    }
+
+    /// Subpage and move controls for the open page.
+    fn page_actions(&mut self, ui: &mut egui::Ui, page_id: &str) {
+        let mut action: Option<Option<String>> = None;
+        let mut subpage = false;
+        let current_parent = self
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .and_then(|p| p.parent_id.clone());
+        let blocked = descendants(&self.pages, page_id);
+        // Live siblings in display order (same parent as stored in the database).
+        let siblings: Vec<&str> = self
+            .pages
+            .iter()
+            .filter(|p| p.parent_id == current_parent)
+            .map(|p| p.id.as_str())
+            .collect();
+        let index = siblings.iter().position(|id| *id == page_id);
+        let can_up = index.is_some_and(|i| i > 0);
+        let can_down = index.is_some_and(|i| i + 1 < siblings.len());
+        let mut shift = None;
+        let mut trash = false;
+        ui.horizontal(|ui| {
+            subpage = ui.button("+ Subpágina").clicked();
+            if ui
+                .add_enabled(can_up, egui::Button::new("Subir"))
+                .on_hover_text("Subir entre sus hermanas")
+                .clicked()
+            {
+                shift = Some(Shift::Up);
+            }
+            if ui
+                .add_enabled(can_down, egui::Button::new("Bajar"))
+                .on_hover_text("Bajar entre sus hermanas")
+                .clicked()
+            {
+                shift = Some(Shift::Down);
+            }
+            egui::ComboBox::from_id_salt("silex_move_target")
+                .selected_text("Mover a…")
+                .show_ui(ui, |ui| {
+                    if current_parent.is_some() && ui.selectable_label(false, "Raíz").clicked() {
+                        action = Some(None);
+                    }
+                    // Only destinations that cannot create a cycle.
+                    for page in &self.pages {
+                        let valid = page.id != page_id
+                            && !blocked.contains(&page.id)
+                            && current_parent.as_deref() != Some(page.id.as_str());
+                        if valid
+                            && ui
+                                .selectable_label(false, display_title(&page.title))
+                                .clicked()
+                        {
+                            action = Some(Some(page.id.clone()));
+                        }
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            trash = ui
+                .button("Enviar a la papelera")
+                .on_hover_text("Se mueve con sus subpáginas; se puede restaurar")
+                .clicked();
+        });
+        if subpage {
+            let result = self.create_subpage(page_id);
+            self.report(result);
+        }
+        if trash {
+            let result = self.trash_page(page_id);
+            self.report(result);
+            return;
+        }
+        if let Some(shift) = shift {
+            let result = self.reorder_page(page_id, shift);
+            self.report(result);
+        }
+        if let Some(target) = action {
+            let result = self.move_page(page_id, target.as_deref());
+            self.report(result);
+        }
     }
 
     fn mark_dirty(&mut self) {
-        self.modified_at = Some(Instant::now());
-        self.status = "Cambios sin guardar…".into();
+        self.save.mark_dirty(Instant::now());
     }
 
-    fn save_if_dirty(&mut self) -> Result<()> {
-        if self.modified_at.is_none() {
+    /// Saves pending edits now. On failure the edits stay in memory, the
+    /// error is shown in the status bar and a retry is scheduled.
+    fn save_now(&mut self) -> Result<()> {
+        if !self.save.is_dirty() {
             return Ok(());
         }
-        if let Some(ref id) = self.selected {
-            self.db.save_document(id, &self.title, &self.blocks)?;
-            self.reload_pages()?;
+        let Some(id) = self.selected.clone() else {
+            self.save.record_success();
+            return Ok(());
+        };
+        match self.db.save_document(&id, &self.title, &self.blocks) {
+            Ok(()) => {
+                self.save.record_success();
+                // The save already succeeded; a failed list refresh is only a notice.
+                let refreshed = self.reload_pages();
+                self.report(refreshed);
+                Ok(())
+            }
+            Err(err) => {
+                self.save.record_failure(Instant::now(), format!("{err:#}"));
+                Err(err)
+            }
         }
-        self.modified_at = None;
-        self.status = "Guardado localmente".into();
-        Ok(())
+    }
+
+    fn describe_last_backup(&self) -> String {
+        let Some(path) = self.db.path() else {
+            return "Copias no disponibles (base en memoria)".into();
+        };
+        match backup::newest_stamp(&backup::backups_dir(&path)) {
+            Ok(Some(stamp)) => format!("Última copia: {}", backup::describe_stamp(&stamp)),
+            Ok(None) => "Aún no hay copias".into(),
+            Err(err) => format!("Copias: {err:#}"),
+        }
+    }
+
+    fn start_backup(&mut self, ctx: &egui::Context) {
+        if self.backup_job.is_some() {
+            return;
+        }
+        let Some(source) = self.db.path() else {
+            return;
+        };
+        let dir = backup::backups_dir(&source);
+        let ctx = ctx.clone();
+        match BackupJob::spawn(source, dir, move || ctx.request_repaint()) {
+            Ok(job) => {
+                self.backup_job = Some(job);
+                self.backup_label = "Creando copia…".into();
+            }
+            Err(err) => self.notice = Some(format!("Copia de seguridad: {err:#}")),
+        }
+    }
+
+    /// Automatic backup at startup when the newest one is too old, then
+    /// collects results from the worker without blocking the UI.
+    fn tick_backups(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.startup_backup_pending)
+            && let Some(path) = self.db.path()
+        {
+            match self.db.backup_due(&backup::backups_dir(&path)) {
+                Ok(true) => self.start_backup(ctx),
+                Ok(false) => {}
+                Err(err) => self.notice = Some(format!("Copia de seguridad: {err:#}")),
+            }
+        }
+        let Some(result) = self.backup_job.as_ref().and_then(BackupJob::poll) else {
+            return;
+        };
+        self.backup_job = None;
+        match result {
+            Ok(_) => self.backup_label = self.describe_last_backup(),
+            Err(err) => {
+                self.backup_label = "La última copia falló".into();
+                self.notice = Some(format!("Copia de seguridad fallida: {err:#}"));
+            }
+        }
+    }
+
+    fn open_restore_dialog(&mut self) {
+        let Some(path) = self.db.path() else {
+            return;
+        };
+        match backup::list_backups(&backup::backups_dir(&path)) {
+            Ok(backups) => {
+                self.restore_dialog = Some(RestoreDialog {
+                    backups,
+                    selected: None,
+                    error: None,
+                })
+            }
+            Err(err) => self.notice = Some(format!("No se pueden listar las copias: {err:#}")),
+        }
+    }
+
+    /// Saves pending edits (so they are part of the pre-restore copy), restores
+    /// and reloads the UI. Reopens the same page if it exists in the copy.
+    fn restore(&mut self, backup_file: &std::path::Path) -> Result<PathBuf> {
+        self.save_now()
+            .context("Hay cambios sin guardar; guárdalos antes de restaurar")?;
+        let safety = self.db.restore_from_backup(backup_file)?;
+        self.doc_generation += 1;
+        let previous = self.selected.take();
+        self.title.clear();
+        self.blocks.clear();
+        self.reload_pages()?;
+        let reopen = previous
+            .filter(|id| self.pages.iter().any(|p| &p.id == id))
+            .or_else(|| self.pages.first().map(|p| p.id.clone()));
+        if let Some(id) = reopen {
+            self.open_page(id)?;
+        }
+        self.backup_label = self.describe_last_backup();
+        Ok(safety)
+    }
+
+    fn restore_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.restore_dialog.as_mut() else {
+            return;
+        };
+        let mut confirm = None;
+        let mut cancel = false;
+        let response = egui::Modal::new(egui::Id::unique("silex_restore")).show(ctx, |ui| {
+            ui.heading("Restaurar una copia");
+            if dialog.backups.is_empty() {
+                ui.label("Aún no hay copias de seguridad.");
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("silex_restore_list")
+                .max_height(260.0)
+                .show(ui, |ui| {
+                    for (i, path) in dialog.backups.iter().enumerate() {
+                        let label = backup::stamp_of(path)
+                            .map(backup::describe_stamp)
+                            .unwrap_or_else(|| path.display().to_string());
+                        if ui
+                            .selectable_label(dialog.selected == Some(i), label)
+                            .clicked()
+                        {
+                            dialog.selected = Some(i);
+                            dialog.error = None;
+                        }
+                    }
+                });
+            if let Some(path) = dialog.selected.and_then(|i| dialog.backups.get(i)) {
+                ui.add_space(8.0);
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Todo el contenido actual se reemplazará por esta copia. \
+                     Antes se guardará una copia del estado actual, \
+                     que podrás restaurar si cambias de opinión.",
+                );
+                if ui.button("Restaurar esta copia").clicked() {
+                    confirm = Some(path.clone());
+                }
+            }
+            if let Some(error) = &dialog.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            ui.add_space(8.0);
+            if ui.button("Cancelar").clicked() {
+                cancel = true;
+            }
+        });
+        if cancel || (confirm.is_none() && response.should_close()) {
+            self.restore_dialog = None;
+            return;
+        }
+        let Some(path) = confirm else {
+            return;
+        };
+        match self.restore(&path) {
+            Ok(safety) => {
+                self.restore_dialog = None;
+                let describe = |p: &std::path::Path| {
+                    backup::stamp_of(p)
+                        .map(backup::describe_stamp)
+                        .unwrap_or_else(|| p.display().to_string())
+                };
+                self.notice = Some(format!(
+                    "Copia del {} restaurada. El estado anterior se guardó como copia del {}.",
+                    describe(&path),
+                    describe(&safety)
+                ));
+            }
+            Err(err) => {
+                if let Some(dialog) = self.restore_dialog.as_mut() {
+                    dialog.error = Some(format!("{err:#}"));
+                }
+            }
+        }
     }
 
     fn report<T>(&mut self, result: Result<T>) {
         if let Err(err) = result {
-            self.status = format!("Error: {err:#}");
+            self.notice = Some(format!("{err:#}"));
         }
     }
 
@@ -92,15 +576,63 @@ impl SilexApp {
         ui.add(TextEdit::singleline(&mut self.query).hint_text("Buscar…"));
         ui.separator();
         ui.label("Páginas");
-        let found = if self.query.is_empty() {
-            Ok(self.pages.clone())
+        if self.query.is_empty() {
+            egui::ScrollArea::vertical()
+                .id_salt("silex_sidebar_tree")
+                .max_height(400.0)
+                .show(ui, |ui| self.tree_rows(ui));
         } else {
-            self.db.search_pages(&self.query)
-        };
+            self.search_results(ui);
+        }
+        ui.separator();
+        ui.add(TextEdit::singleline(&mut self.new_page_title).hint_text("Nombre de página"));
+        if ui.button("+ Crear página").clicked() {
+            let result = (|| -> Result<()> {
+                self.save_now()?;
+                let title = self.new_page_title.trim();
+                let title = if title.is_empty() {
+                    "Sin título"
+                } else {
+                    title
+                };
+                let id = self.db.create_page(title, None)?;
+                self.new_page_title.clear();
+                self.reload_pages()?;
+                self.open_page(id)
+            })();
+            self.report(result);
+        }
+        if ui
+            .button(format!("Papelera ({})", self.trash_count))
+            .clicked()
+        {
+            self.open_trash_dialog();
+        }
+        ui.separator();
+        ui.small(&self.backup_label);
+        let can_backup = self.backup_job.is_none() && self.db.path().is_some();
+        if ui
+            .add_enabled(can_backup, egui::Button::new("Crear copia ahora"))
+            .clicked()
+        {
+            self.start_backup(ui.ctx());
+        }
+        if ui
+            .add_enabled(can_backup, egui::Button::new("Restaurar una copia…"))
+            .clicked()
+        {
+            self.open_restore_dialog();
+        }
+    }
+
+    /// Flat list of search matches (title and content).
+    fn search_results(&mut self, ui: &mut egui::Ui) {
+        let found = self.db.search_pages(&self.query);
         match found {
             Ok(pages) => {
                 let mut open = None;
                 egui::ScrollArea::vertical()
+                    .id_salt("silex_sidebar_pages")
                     .max_height(400.0)
                     .show(ui, |ui| {
                         for page in &pages {
@@ -115,25 +647,7 @@ impl SilexApp {
                     self.report(result);
                 }
             }
-            Err(err) => self.status = format!("Error de búsqueda: {err}"),
-        }
-        ui.separator();
-        ui.add(TextEdit::singleline(&mut self.new_page_title).hint_text("Nombre de página"));
-        if ui.button("+ Crear página").clicked() {
-            let result = (|| -> Result<()> {
-                self.save_if_dirty()?;
-                let title = self.new_page_title.trim();
-                let title = if title.is_empty() {
-                    "Sin título"
-                } else {
-                    title
-                };
-                let id = self.db.create_page(title, None)?;
-                self.new_page_title.clear();
-                self.reload_pages()?;
-                self.open_page(id)
-            })();
-            self.report(result);
+            Err(err) => self.notice = Some(format!("Error de búsqueda: {err:#}")),
         }
     }
 
@@ -145,14 +659,22 @@ impl SilexApp {
         ui.horizontal(|ui| {
             ui.heading("Documento");
             if ui.button("Guardar").clicked() {
-                let result = self.save_if_dirty();
-                self.report(result);
+                // A save error is already shown by the status bar.
+                let _ = self.save_now();
             }
+            self.status_bar(ui);
         });
+        self.notice_bar(ui);
+        self.page_actions(ui, &page_id);
+        if self.selected.as_deref() != Some(page_id.as_str()) {
+            // The page was trashed (or another opened) this frame.
+            return;
+        }
         ui.separator();
         let changed = ui
             .add(
                 TextEdit::singleline(&mut self.title)
+                    .id(field_id(self.doc_generation, "title", &page_id))
                     .font(egui::TextStyle::Heading)
                     .desired_width(f32::INFINITY),
             )
@@ -162,33 +684,14 @@ impl SilexApp {
         }
         ui.add_space(14.0);
         let mut modified = false;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for block in &mut self.blocks {
-                ui.horizontal(|ui| {
-                    if block.is_todo() {
-                        modified |= ui.checkbox(&mut block.checked, "").changed();
-                    }
-                    if block.kind == "heading" {
-                        modified |= ui
-                            .add(
-                                TextEdit::singleline(&mut block.content)
-                                    .font(egui::TextStyle::Heading)
-                                    .desired_width(f32::INFINITY),
-                            )
-                            .changed();
-                    } else {
-                        modified |= ui
-                            .add(
-                                TextEdit::multiline(&mut block.content)
-                                    .desired_rows(2)
-                                    .desired_width(f32::INFINITY),
-                            )
-                            .changed();
-                    }
-                });
-                ui.add_space(8.0);
-            }
-        });
+        egui::ScrollArea::vertical()
+            .id_salt("silex_editor_blocks")
+            .show(ui, |ui| {
+                for block in &mut self.blocks {
+                    modified |= block_field(ui, self.doc_generation, block);
+                    ui.add_space(8.0);
+                }
+            });
         if modified {
             self.mark_dirty();
         }
@@ -201,7 +704,7 @@ impl SilexApp {
             ] {
                 if ui.button(label).clicked() {
                     let result = (|| -> Result<()> {
-                        self.save_if_dirty()?;
+                        self.save_now()?;
                         self.db.add_block(&page_id, kind)?;
                         self.blocks = self.db.list_blocks(&page_id)?;
                         Ok(())
@@ -210,13 +713,10 @@ impl SilexApp {
                 }
             }
         });
-        ui.add_space(16.0);
-        ui.small(&self.status);
     }
-}
 
-impl eframe::App for SilexApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    /// Sidebar and editor columns.
+    fn layout(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(230.0);
@@ -228,26 +728,136 @@ impl eframe::App for SilexApp {
                 self.editor(ui);
             });
         });
-        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
-            let result = self.save_if_dirty();
-            self.report(result);
-        }
-        if self
-            .modified_at
-            .is_some_and(|t| t.elapsed() >= Duration::from_millis(650))
-        {
-            let result = self.save_if_dirty();
-            self.report(result);
-        }
-        // UI may be idle between edits; schedule a repaint for the autosave timer.
-        if self.modified_at.is_some() {
-            ui.ctx().request_repaint_after(Duration::from_millis(100));
+    }
+
+    /// Always-visible save state; an error offers an immediate retry.
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let failed = match self.save.status() {
+            SaveStatus::Saved => {
+                ui.label("Guardado");
+                None
+            }
+            SaveStatus::Dirty => {
+                ui.label("Cambios sin guardar…");
+                None
+            }
+            SaveStatus::Failed { message } => Some(message.to_owned()),
+        };
+        if let Some(message) = failed {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("Error al guardar: {message}"),
+            );
+            if ui.button("Reintentar").clicked() {
+                let _ = self.save_now();
+            }
         }
     }
 
-    /// Explicit shutdown hook: flush pending edits before the window closes.
+    fn notice_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(notice) = self.notice.clone() else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.colored_label(ui.visuals().warn_fg_color, notice);
+            if ui.small_button("Cerrar aviso").clicked() {
+                self.notice = None;
+            }
+        });
+    }
+
+    /// Intercepts window close: save first; if that fails, keep the window
+    /// open and let the user retry or explicitly discard.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if self.allow_close || !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        let _ = self.save_now();
+        if !self.save.can_close() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_dialog = true;
+        }
+    }
+
+    fn close_dialog(&mut self, ctx: &egui::Context) {
+        if !self.close_dialog {
+            return;
+        }
+        let error = match self.save.status() {
+            SaveStatus::Failed { message } => message.to_owned(),
+            _ => "Hay cambios pendientes de guardar.".to_owned(),
+        };
+        let mut action = None;
+        let response = egui::Modal::new(egui::Id::unique("silex_close_unsaved")).show(ctx, |ui| {
+            ui.heading("No se pudieron guardar los cambios");
+            ui.label(format!("Error: {error}"));
+            ui.label("Si sales ahora, se perderán los cambios no guardados de esta página.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Reintentar").clicked() {
+                    action = Some(CloseAction::Retry);
+                }
+                if ui.button("Salir sin guardar").clicked() {
+                    action = Some(CloseAction::Discard);
+                }
+                if ui.button("Cancelar").clicked() {
+                    action = Some(CloseAction::Cancel);
+                }
+            });
+        });
+        if action.is_none() && response.should_close() {
+            action = Some(CloseAction::Cancel);
+        }
+        match action {
+            Some(CloseAction::Retry) => {
+                if self.save_now().is_ok() {
+                    self.allow_close = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            Some(CloseAction::Discard) => {
+                self.save.discard();
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Some(CloseAction::Cancel) => self.close_dialog = false,
+            None => {}
+        }
+    }
+}
+
+enum CloseAction {
+    Retry,
+    Discard,
+    Cancel,
+}
+
+impl eframe::App for SilexApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.layout(ui);
+        let ctx = ui.ctx().clone();
+        // Save errors are shown by the status bar, so results are not reported twice.
+        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+            let _ = self.save_now();
+        }
+        self.tick_backups(&ctx);
+        let now = Instant::now();
+        if self.save.is_due(now) {
+            let _ = self.save_now();
+        }
+        self.handle_close_request(&ctx);
+        self.close_dialog(&ctx);
+        self.restore_dialog(&ctx);
+        self.trash_dialog(&ctx);
+        // The UI may be idle between edits; wake up for the next autosave or retry.
+        if let Some(at) = self.save.next_attempt() {
+            ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
+        }
+    }
+
+    /// Last-chance save when the app shuts down without a close request.
     fn on_exit(&mut self) {
-        if let Err(err) = self.save_if_dirty() {
+        if let Err(err) = self.save_now() {
             eprintln!("Silex: no se guardaron cambios al cerrar: {err:#}");
         }
     }
@@ -256,8 +866,233 @@ impl eframe::App for SilexApp {
 /// Safety net in case `on_exit` did not run; a second save is a no-op.
 impl Drop for SilexApp {
     fn drop(&mut self) {
-        if let Err(err) = self.save_if_dirty() {
+        if let Err(err) = self.save_now() {
             eprintln!("Silex: no se guardaron cambios al cerrar: {err:#}");
         }
+    }
+}
+
+/// Text field ids follow the page/block id, not the position on screen, so
+/// each field keeps its own undo history (egui: Cmd/Ctrl+Z, Shift+Cmd+Z or
+/// Ctrl+Y) when blocks are added or pages switched. See ADR 0002.
+fn field_id(generation: u64, kind: &str, id: &str) -> egui::Id {
+    egui::Id::unique(("silex-field", generation, kind, id))
+}
+
+/// Renders one block; returns true when its content or checkbox changed.
+fn block_field(ui: &mut egui::Ui, generation: u64, block: &mut Block) -> bool {
+    let id = field_id(generation, "block", &block.id);
+    ui.horizontal(|ui| {
+        let mut changed = false;
+        if block.is_todo() {
+            changed |= ui.checkbox(&mut block.checked, "").changed();
+        }
+        let edit = if block.kind == "heading" {
+            TextEdit::singleline(&mut block.content).font(egui::TextStyle::Heading)
+        } else {
+            TextEdit::multiline(&mut block.content).desired_rows(2)
+        };
+        changed |= ui.add(edit.id(id).desired_width(f32::INFINITY)).changed();
+        changed
+    })
+    .inner
+}
+
+/// `2026-10-18T09:30:05.123Z` → `2026-10-18 09:30 UTC`.
+fn describe_timestamp(at: &str) -> String {
+    match (at.get(0..10), at.get(11..16)) {
+        (Some(day), Some(time)) => format!("{day} {time} UTC"),
+        _ => at.to_owned(),
+    }
+}
+
+fn display_title(title: &str) -> &str {
+    if title.trim().is_empty() {
+        "Sin título"
+    } else {
+        title
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block(id: &str) -> Block {
+        Block {
+            id: id.into(),
+            page_id: "p".into(),
+            kind: "paragraph".into(),
+            content: String::new(),
+            checked: false,
+            position: 0,
+        }
+    }
+
+    /// Headless egui: runs one frame with the given events at `time` seconds.
+    fn frame(
+        ctx: &egui::Context,
+        time: f64,
+        events: Vec<egui::Event>,
+        blocks: &mut [Block],
+        focus: Option<egui::Id>,
+    ) -> bool {
+        let input = egui::RawInput {
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let mut changed = false;
+        let mut output = ctx.run_ui(input, |ui| {
+            if let Some(id) = focus {
+                ui.memory_mut(|m| m.request_focus(id));
+            }
+            for block in blocks.iter_mut() {
+                changed |= block_field(ui, 0, block);
+            }
+        });
+        // Headless: nothing renders the font texture, so drop it explicitly.
+        output.textures_delta.clear();
+        changed
+    }
+
+    fn type_text(text: &str) -> Vec<egui::Event> {
+        vec![egui::Event::Text(text.into())]
+    }
+
+    fn undo() -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }]
+    }
+
+    /// Collects all text painted in a frame (egui paints ID-clash warnings as text).
+    fn painted_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(inner) => inner.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    #[test]
+    fn main_layout_has_no_id_clashes() -> anyhow::Result<()> {
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let page = app.selected.clone().expect("first page is open");
+        for kind in ["heading", "paragraph", "todo"] {
+            app.db.add_block(&page, kind)?;
+        }
+        app.blocks = app.db.list_blocks(&page)?;
+        // A nested, expanded tree: page ─ child ─ grandchild, plus a second child.
+        let child = app.db.create_page("Hija", Some(&page))?;
+        app.db.create_page("Nieta", Some(&child))?;
+        app.db.create_page("Hija 2", Some(&page))?;
+        app.expanded.extend([page.clone(), child]);
+        app.reload_pages()?;
+        let depths: Vec<usize> = app.tree.iter().map(|r| r.depth).collect();
+        assert_eq!(depths, vec![0, 1, 2, 1]);
+
+        let ctx = egui::Context::default();
+        let mut warnings = Vec::new();
+        // Two frames: egui reports clashes against the previous frame's widgets too.
+        for time in [0.0, 0.1] {
+            let input = egui::RawInput {
+                time: Some(time),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.layout(ui));
+            output.textures_delta.clear();
+            warnings = painted_text(&output.shapes)
+                .into_iter()
+                .filter(|t| t.contains(" use of ") && t.contains(" ID "))
+                .collect();
+        }
+        assert!(warnings.is_empty(), "egui ID clashes: {warnings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn trash_and_restore_from_the_app() -> anyhow::Result<()> {
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let first = app.selected.clone().expect("first page is open");
+        app.create_subpage(&first)?;
+        let child = app.selected.clone().expect("subpage is open");
+        app.db.create_page("Otra", None)?;
+        app.reload_pages()?;
+        app.open_page(first.clone())?;
+
+        // Unsaved edits are saved before trashing.
+        app.title = "Primera editada".into();
+        app.mark_dirty();
+        app.trash_page(&first)?;
+        assert_eq!(app.trash_count, 1);
+        assert!(app.pages.iter().all(|p| p.id != first && p.id != child));
+        assert_ne!(app.selected.as_deref(), Some(first.as_str()));
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("1 subpágina"))
+        );
+
+        app.restore_from_trash(&first)?;
+        assert_eq!(app.trash_count, 0);
+        assert_eq!(app.selected.as_deref(), Some(first.as_str()));
+        assert_eq!(app.title, "Primera editada");
+        assert!(app.pages.iter().any(|p| p.id == child));
+        Ok(())
+    }
+
+    #[test]
+    fn trashing_the_last_page_shows_the_empty_state() -> anyhow::Result<()> {
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let only = app.selected.clone().expect("first page is open");
+        app.trash_page(&only)?;
+        assert_eq!(app.selected, None);
+        assert!(app.tree.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn field_ids_follow_block_and_generation() {
+        assert_eq!(field_id(0, "block", "a"), field_id(0, "block", "a"));
+        assert_ne!(field_id(0, "block", "a"), field_id(0, "block", "b"));
+        assert_ne!(field_id(0, "block", "a"), field_id(1, "block", "a"));
+        assert_ne!(field_id(0, "block", "a"), field_id(0, "title", "a"));
+    }
+
+    #[test]
+    fn undo_stays_with_its_block_when_blocks_move() {
+        let ctx = egui::Context::default();
+        let a = field_id(0, "block", "a");
+        let mut blocks = vec![block("a"), block("b")];
+
+        frame(&ctx, 0.0, vec![], &mut blocks, Some(a));
+        frame(&ctx, 0.1, vec![], &mut blocks, None);
+        assert!(frame(&ctx, 0.2, type_text("hola"), &mut blocks, None));
+        // Let egui's undoer record the new state.
+        frame(&ctx, 2.0, vec![], &mut blocks, None);
+        frame(&ctx, 4.0, vec![], &mut blocks, None);
+        assert_eq!(blocks[0].content, "hola");
+
+        // A new block appears before "a": positions shift by one.
+        blocks.insert(0, block("nuevo"));
+        frame(&ctx, 4.1, vec![], &mut blocks, Some(a));
+        frame(&ctx, 4.2, vec![], &mut blocks, None);
+        let changed = frame(&ctx, 4.3, undo(), &mut blocks, None);
+
+        assert!(changed, "undo must mark the document dirty");
+        assert_eq!(blocks[1].id, "a");
+        assert_eq!(blocks[1].content, "", "undo reverts block a");
+        assert_eq!(blocks[0].content, "", "the new block is untouched");
+        assert_eq!(blocks[2].content, "", "block b is untouched");
     }
 }
