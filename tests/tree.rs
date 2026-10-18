@@ -285,21 +285,29 @@ mod reorder {
         let path =
             std::env::temp_dir().join(format!("silex-order-{}.sqlite3", uuid::Uuid::new_v4()));
         let result = (|| -> anyhow::Result<()> {
-            let c = {
+            let ids: std::collections::HashMap<String, String> = {
                 let db = Database::open(&path)?;
-                db.create_page("A", None)?;
-                db.create_page("B", None)?;
-                db.create_page("C", None)?
+                ["A", "B", "C"]
+                    .into_iter()
+                    .map(|t| Ok((t.to_owned(), db.create_page(t, None)?)))
+                    .collect::<anyhow::Result<_>>()?
             };
-            // Simulate old/bad data: every page with the same sort_order.
-            Connection::open(&path)?.execute("UPDATE pages SET sort_order = 0", [])?;
+            // Simulate old/bad data: same sort_order and same created_at (as when
+            // pages are created within one millisecond, which CI hit). Order then
+            // falls back to the random UUID, so it is arbitrary: move whichever is last.
+            Connection::open(&path)?.execute(
+                "UPDATE pages SET sort_order = 0, created_at = '2026-01-01T00:00:00.000Z'",
+                [],
+            )?;
 
             let mut db = Database::open(&path)?;
             let before = titles_under(&db, None)?;
-            assert!(db.reorder_page(&c, Shift::Up)?);
+            let last = before.last().cloned().unwrap_or_default();
+            assert!(db.reorder_page(&ids[&last], Shift::Up)?);
             let after = titles_under(&db, None)?;
-            let c_index = before.iter().position(|t| t == "C").unwrap_or_default();
-            assert_eq!(after.iter().position(|t| t == "C"), Some(c_index - 1));
+            let mut expected = before.clone();
+            expected.swap(1, 2);
+            assert_eq!(after, expected);
             drop(db);
 
             let reopened = Database::open(&path)?;
