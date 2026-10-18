@@ -5,13 +5,26 @@ Aplicación **nativa renderizada en Rust** usando egui/eframe, persistencia loca
 
 ## Módulos actuales
 ```
-src/main.rs                 # Bootstrap del proceso, DB y ventana
-src/app.rs                  # Estado y composición de interfaz egui
-src/lib.rs                  # Biblioteca reutilizable
-src/model.rs                # Page, Block sin dependencia GUI
-src/db.rs                   # Persistencia y consultas parametrizadas
-src/db/migrations/          # SQL versionado embebido en binario
-tests/database.rs           # Persistencia, búsqueda y migraciones
+src/main.rs                 # Arranque: base de datos y ventana
+src/app/                    # Aplicación egui (binario); todos extienden SilexApp
+  mod.rs                    #   Estado, frame, atajos y operaciones de página
+  sidebar.rs                #   Árbol, favoritos, búsqueda, menú de página, renombrar
+  blocks.rs                 #   Página: barra superior, columna, bloques con asa; teclas, selección, menú /, pegar
+  document.rs               #   Guardado y deshacer del documento
+  dialogs.rs                #   Papelera, restaurar, cierre; barras de estado y aviso
+  jobs.rs                   #   Copias, importación y exportación en segundo plano
+  tests.rs                  #   Tests de la app sin ventana
+src/lib.rs                  # Biblioteca sin egui:
+src/model.rs                #   Page, Block, BlockKind, árbol y numeración
+src/db.rs, src/db/          #   SQLite: consultas, migraciones, copias (backup.rs)
+src/editor.rs               #   Operaciones puras del editor de bloques
+src/history.rs              #   Instantáneas para deshacer/rehacer
+src/save_state.rs           #   Cuándo guardar y reintentar
+src/settings.rs             #   Preferencias (tema, tamaño) y su validación
+src/markdown/               #   Markdown ↔ bloques
+src/import.rs, src/export.rs#   Lectura y escritura de archivos
+src/safe_path.rs            #   Nombres de archivo seguros
+tests/                      # Tests de integración y archivos golden
 ```
 
 ## Arquitectura destino (crear solo cuando crezca)
@@ -47,6 +60,8 @@ Evitar recrear conexiones cada frame, filtrar SQL para búsqueda y virtualizar p
 Archivos en rutas estándar del OS; sin red, cookies, login o telemetría. No hay cifrado at-rest; documentarlo claramente. Atajos SQL y rutas de adjuntos requieren pruebas de escaping y traversal. Revisión de dependencias mediante Dependabot y auditoría futura.
 
 ## UI/UX
+Sistema de diseño (H5.2): todos los colores salen de `theme::Palette` (`LIGHT`/`DARK`), y cada par texto/fondo tiene un test de contraste WCAG AA. Los espacios, radios y tamaños de texto son tokens (`theme::space`, `radius`, `text`). Las fuentes Inter (Regular y SemiBold) y los iconos Phosphor van incrustadas desde `assets/fonts/` (origen, licencias y SHA-256 en su README); los iconos son texto en el área de uso privado (`src/app/icons.rs`) y **siempre se dibujan con la familia `icons`** (`icons::icon`, `icons::font`). No pueden compartir cadena de respaldo con el texto: Inter tiene 745 glifos en esa misma área y Phosphor tiene glifos ASCII vacíos. Un test comprueba que cada icono existe en esa familia y que ninguna familia de texto incluye Phosphor. `SilexApp` instala el tema en su primer frame (y lo aplica a la `Ui` raíz de ese frame), así que la app, los tests y las capturas pasan por el mismo camino. El tema sigue al sistema (`ThemePreference::System`) y `theme::install` registra los estilos de ambos. Las capturas de `src/app/snapshots.rs` dibujan la app real con `egui_kittest` + wgpu: solo se ejecutan con `SILEX_SNAPSHOTS=1` (dependen del sistema y la GPU), y las de referencia son de macOS. Para aceptar cambios: `SILEX_SNAPSHOTS=1 UPDATE_SNAPSHOTS=1 cargo test --bin silex-desktop snapshots`.
+
 Diseño editorial, navegación lateral, área central legible, estados de carga/guardado/error, accesibilidad por teclado. Atajos (H2.5) se leen al inicio de cada frame con `consume_shortcut`, antes de los widgets, comprobando primero los más específicos (Cmd+Mayús+N antes que Cmd+N). Las acciones sobre páginas (clic, menú contextual, teclado) pasan por un único `RowAction` → `SilexApp::apply`.
 
 Teclado del editor (H3.2): las operaciones son funciones puras sobre `Vec<Block>` en `src/editor.rs`, con posiciones en caracteres (como egui). En cada frame:

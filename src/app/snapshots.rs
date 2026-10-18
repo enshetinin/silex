@@ -1,0 +1,381 @@
+//! UI snapshots with `egui_kittest`: the real app rendered headless to PNG
+//! (`tests/snapshots/*.png`). They are for reviewing the design and catching
+//! unintended visual changes.
+//!
+//! Rendering differs slightly between operating systems and GPUs, and CI
+//! runners may have no GPU adapter, so these only run when asked:
+//!
+//! ```text
+//! SILEX_SNAPSHOTS=1 cargo test --bin silex-desktop snapshots   # compare
+//! SILEX_SNAPSHOTS=1 UPDATE_SNAPSHOTS=1 cargo test --bin silex-desktop snapshots   # accept
+//! ```
+//!
+//! Reference images are produced on macOS.
+use eframe::egui;
+use egui_kittest::Harness;
+use egui_kittest::kittest::{NodeT, Queryable};
+use silex_desktop::db::Database;
+use silex_desktop::model::BlockKind;
+
+use super::{SilexApp, theme};
+
+fn enabled() -> bool {
+    let on = std::env::var_os("SILEX_SNAPSHOTS").is_some();
+    if !on {
+        eprintln!("snapshot tests skipped (set SILEX_SNAPSHOTS=1 to run them)");
+    }
+    on
+}
+
+/// A small workspace with nested pages, a favorite and every block type.
+fn demo_app() -> anyhow::Result<SilexApp> {
+    let mut db = Database::open_in_memory()?;
+    let proyecto = db.create_page("Proyecto Silex", None)?;
+    let diseno = db.create_page("Diseño de la interfaz", Some(&proyecto))?;
+    db.create_page("Ideas sueltas", Some(&diseno))?;
+    db.create_page("Notas de lectura", None)?;
+    db.create_page("Recetas", None)?;
+    db.set_favorite(&diseno, true)?;
+    let blocks = [
+        (BlockKind::Heading1, 0, false, "Objetivo"),
+        (
+            BlockKind::Paragraph,
+            0,
+            false,
+            "Una interfaz limpia, con mucho aire y un único color de acento.",
+        ),
+        (BlockKind::Heading2, 0, false, "Tareas"),
+        (BlockKind::Todo, 0, true, "Elegir tipografía"),
+        (BlockKind::Todo, 0, false, "Diseñar la barra lateral"),
+        (BlockKind::Heading3, 0, false, "Principios"),
+        (BlockKind::Bulleted, 0, false, "Menos bordes, más espacio"),
+        (BlockKind::Bulleted, 1, false, "Acciones al pasar el ratón"),
+        (
+            BlockKind::Numbered,
+            0,
+            false,
+            "Contraste AA en claro y oscuro",
+        ),
+        (BlockKind::Numbered, 0, false, "Todo accesible con teclado"),
+        (
+            BlockKind::Quote,
+            0,
+            false,
+            "La simplicidad es la máxima sofisticación.",
+        ),
+        (BlockKind::Code, 0, false, "theme::install(&ctx);"),
+    ];
+    let new: Vec<_> = blocks
+        .iter()
+        .map(
+            |(kind, indent, checked, content)| silex_desktop::model::NewBlock {
+                kind: *kind,
+                indent: *indent,
+                checked: *checked,
+                content: (*content).to_owned(),
+            },
+        )
+        .collect();
+    // Replace the page with a populated one and open it.
+    let page = db.create_page_with_blocks("Guía de estilo", Some(&proyecto), &new)?;
+    let mut app = SilexApp::new(db)?;
+    app.expanded.insert(proyecto);
+    app.expanded.insert(diseno);
+    app.reload_pages()?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+fn snapshot(name: &str, theme: eframe::egui::Theme) -> anyhow::Result<()> {
+    snapshot_with(name, theme, |_| {})
+}
+
+/// Renders the demo app, lets `interact` act on it (hover, click…), and
+/// compares with the reference image.
+fn snapshot_with(
+    name: &str,
+    theme: eframe::egui::Theme,
+    interact: impl FnOnce(&mut Harness<'_, SilexApp>),
+) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let app = demo_app()?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    interact(&mut harness);
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+#[test]
+fn main_window_light() -> anyhow::Result<()> {
+    snapshot("main_window_light", eframe::egui::Theme::Light)
+}
+
+#[test]
+fn main_window_dark() -> anyhow::Result<()> {
+    snapshot("main_window_dark", eframe::egui::Theme::Dark)
+}
+
+#[test]
+fn sidebar_row_hover_shows_actions() -> anyhow::Result<()> {
+    snapshot_with(
+        "sidebar_hover_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            // The row (a button with the page title as its accessible name).
+            if let Some(row) = harness
+                .get_all_by_label("Notas de lectura")
+                .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+            {
+                row.hover();
+            }
+        },
+    )
+}
+
+#[test]
+fn block_handle_menu() -> anyhow::Result<()> {
+    snapshot_with("block_menu_light", eframe::egui::Theme::Light, |harness| {
+        // Open the handle menu of the paragraph block (its id is stable).
+        let paragraph = harness.state().blocks[1].id.clone();
+        egui::Popup::open_id(&harness.ctx, super::blocks::handle_menu_id(&paragraph));
+    })
+}
+
+// ---- Accessibility: no rendering needed, so these always run (also in CI). ----
+
+/// The demo app in a harness, settled.
+fn a11y_harness(app: SilexApp) -> Harness<'static, SilexApp> {
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness
+}
+
+/// Every control has a name, and no name is only an icon glyph (Private Use
+/// Area characters mean nothing to a screen reader).
+#[track_caller]
+fn assert_accessible(harness: &Harness<'_, SilexApp>, state: &str) {
+    let unnamed = harness.unnamed_widgets();
+    assert!(
+        unnamed.is_empty(),
+        "{state}: unnamed widgets:\n{unnamed:#?}"
+    );
+    let is_icon = |c: char| ('\u{E000}'..='\u{F8FF}').contains(&c);
+    let icon_only: Vec<String> = harness
+        .root()
+        .children_recursive()
+        .map(|node| node.accesskit_node())
+        .filter(|node| !node.is_hidden())
+        .filter_map(|node| {
+            let label = node.label()?;
+            let meaningful = label.chars().any(|c| !c.is_whitespace() && !is_icon(c));
+            (!label.trim().is_empty() && !meaningful)
+                .then(|| format!("{:?} {label:?} at {:?}", node.role(), node.raw_bounds()))
+        })
+        .collect();
+    assert!(
+        icon_only.is_empty(),
+        "{state}: icon-only names:\n{icon_only:#?}"
+    );
+}
+
+fn click_button(harness: &mut Harness<'_, SilexApp>, label: &str) {
+    harness
+        .get_all_by_label(label)
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .unwrap_or_else(|| panic!("button {label:?}"))
+        .click();
+    harness.run();
+}
+
+#[test]
+fn every_control_has_a_name() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    assert_accessible(&harness, "at rest");
+
+    // Row actions appear on hover.
+    harness
+        .get_all_by_label("Notas de lectura")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .expect("row")
+        .hover();
+    harness.run();
+    assert_accessible(&harness, "row hover");
+    assert!(harness.query_by_label("Más acciones").is_some());
+    assert!(harness.query_by_label("Nueva subpágina").is_some());
+
+    let paragraph = harness.state().blocks[1].id.clone();
+    egui::Popup::open_id(&harness.ctx, super::blocks::handle_menu_id(&paragraph));
+    harness.run();
+    assert_accessible(&harness, "block menu");
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+
+    for button in [
+        "Más acciones de la página",
+        "Ajustes",
+        "Copias y exportación",
+        "Atajos de teclado",
+    ] {
+        click_button(&mut harness, button);
+        assert_accessible(&harness, button);
+        egui::Popup::close_all(&harness.ctx);
+        harness.run();
+    }
+
+    harness.state_mut().query = "receta".into();
+    harness.run();
+    assert_accessible(&harness, "search results");
+
+    harness.state_mut().query.clear();
+    harness.state_mut().selected = None;
+    harness.run();
+    assert_accessible(&harness, "no page open");
+    Ok(())
+}
+
+#[test]
+fn settings_menu_changes_and_stores_the_theme_and_size() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    click_button(&mut harness, "Ajustes");
+    harness.get_by_label("Oscuro").click();
+    harness.run();
+    harness.get_by_label("125 %").click();
+    harness.run();
+    assert_eq!(harness.ctx.theme(), egui::Theme::Dark);
+    assert!((harness.ctx.zoom_factor() - 1.25).abs() < 1e-6);
+    let stored = harness.state().db.load_settings()?;
+    assert_eq!(stored.theme, silex_desktop::settings::ThemeMode::Dark);
+    assert_eq!(stored.zoom_percent, 125);
+    Ok(())
+}
+
+#[test]
+fn stored_settings_apply_at_startup_and_keyboard_zoom_is_remembered() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    db.save_settings(&silex_desktop::settings::Settings {
+        theme: silex_desktop::settings::ThemeMode::Dark,
+        zoom_percent: 125,
+    })?;
+    let mut harness = a11y_harness(SilexApp::new(db)?);
+    assert_eq!(harness.ctx.theme(), egui::Theme::Dark);
+    assert!((harness.ctx.zoom_factor() - 1.25).abs() < 1e-6);
+
+    // What egui does on Cmd+− (outside our code), and an out-of-range zoom.
+    harness.ctx.set_zoom_factor(1.1);
+    harness.run();
+    assert_eq!(harness.state().db.load_settings()?.zoom_percent, 110);
+    harness.ctx.set_zoom_factor(4.0);
+    harness.run();
+    assert_eq!(harness.state().db.load_settings()?.zoom_percent, 200);
+    assert!((harness.ctx.zoom_factor() - 2.0).abs() < 1e-6, "clamped");
+    Ok(())
+}
+
+#[test]
+fn settings_menu() -> anyhow::Result<()> {
+    snapshot_with(
+        "settings_menu_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            click_button(harness, "Ajustes");
+        },
+    )
+}
+
+#[test]
+fn keyboard_focus_is_visible() -> anyhow::Result<()> {
+    snapshot_with(
+        "keyboard_focus_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            // Tab from the search field to the first tree rows.
+            harness
+                .ctx
+                .memory_mut(|m| m.request_focus(super::sidebar::search_id()));
+            harness.run();
+            for _ in 0..3 {
+                harness.key_press(egui::Key::Tab);
+                harness.run();
+            }
+        },
+    )
+}
+
+#[test]
+fn row_menu_stays_open_while_the_pointer_moves_into_it() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    let row = |h: &Harness<'_, SilexApp>| {
+        h.get_all_by_label("Notas de lectura")
+            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+            .expect("row")
+            .rect()
+    };
+    let row_rect = row(&harness);
+    harness.hover_at(row_rect.center());
+    harness.run();
+    click_button(&mut harness, "Más acciones");
+    assert!(harness.query_by_label("Abrir").is_some(), "menu opened");
+
+    // Leave the row and go over a menu item, as a user does.
+    let item = harness.get_by_label("Abrir").rect();
+    assert!(!row_rect.contains(item.center()));
+    harness.hover_at(item.center());
+    harness.run();
+    assert!(
+        harness.query_by_label("Abrir").is_some(),
+        "menu closed on hover"
+    );
+    harness.get_by_label("Abrir").click();
+    harness.run();
+    assert_eq!(
+        harness.state().title,
+        "Notas de lectura",
+        "the menu action ran"
+    );
+    Ok(())
+}
+
+#[test]
+fn slash_menu_lists_options_in_a_column() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    click_button(&mut harness, "Añadir bloque");
+    harness.event(egui::Event::Text("/".into()));
+    harness.run();
+    assert!(harness.state().slash.is_some(), "slash menu opened");
+    assert_accessible(&harness, "slash menu");
+    let option = |label: &str| {
+        harness
+            .get_all_by_label_contains(label)
+            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+            .unwrap_or_else(|| panic!("option {label:?}"))
+            .rect()
+    };
+    let (first, second) = (option("Título 1"), option("Título 2"));
+    assert!(
+        second.top() >= first.bottom() - 0.5,
+        "{first:?} / {second:?}"
+    );
+    assert!((second.left() - first.left()).abs() < 0.5, "same column");
+    Ok(())
+}
+
+#[test]
+fn slash_menu() -> anyhow::Result<()> {
+    snapshot_with("slash_menu_light", eframe::egui::Theme::Light, |harness| {
+        click_button(harness, "Añadir bloque");
+        harness.event(egui::Event::Text("/".into()));
+    })
+}

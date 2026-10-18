@@ -20,3 +20,7 @@ Thumbs.db
 *.sqlite-shm
 *.sqlite3-wal
 *.sqlite3-shm
+# egui_kittest snapshot artefacts (only the reference *.png are committed)
+tests/snapshots/*.new.png
+tests/snapshots/*.diff.png
+tests/snapshots/*.old.png
