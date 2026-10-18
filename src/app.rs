@@ -7,6 +7,7 @@ use silex_desktop::{
         Database, Shift,
         backup::{self, BackupJob},
     },
+    editor,
     model::{
         Block, BlockKind, Page, TrashItem, TreeRow, ancestors, build_tree, descendants,
         filter_tree, list_numbers,
@@ -48,6 +49,36 @@ pub struct SilexApp {
     /// Bumped when the whole document set is replaced (restore), so text
     /// fields start with a fresh undo history instead of pre-restore text.
     doc_generation: u64,
+    /// Cursor of the focused block as of the last frame.
+    caret: Option<CaretInfo>,
+    /// An IME composition is in progress: editor keys are left alone.
+    ime_composing: bool,
+    /// Editor key taken this frame, run after layout.
+    pending_key: Option<(EditorKey, String)>,
+    /// Block to focus (and cursor position) on the next frame.
+    pending_focus: Option<(String, usize)>,
+}
+
+/// Cursor state of the focused block text field.
+#[derive(Debug, Clone)]
+struct CaretInfo {
+    block_id: String,
+    char: usize,
+    selection: bool,
+    first_row: bool,
+    last_row: bool,
+}
+
+/// Structural keys handled by the block editor (see `src/editor.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorKey {
+    Enter,
+    Backspace,
+    Delete,
+    Indent,
+    Outdent,
+    Up,
+    Down,
 }
 
 /// Inline rename in the sidebar.
@@ -117,6 +148,10 @@ impl SilexApp {
             startup_backup_pending: true,
             restore_dialog: None,
             doc_generation: 0,
+            caret: None,
+            ime_composing: false,
+            pending_key: None,
+            pending_focus: None,
         };
         app.backup_label = app.describe_last_backup();
         app.trash_count = app.db.trash_count()?;
@@ -583,6 +618,155 @@ impl SilexApp {
         let id = self.db.create_page(title, None)?;
         self.reload_pages()?;
         self.open_page(id)
+    }
+
+    fn block_field_id(&self, block_id: &str) -> egui::Id {
+        field_id(self.doc_generation, "block", block_id)
+    }
+
+    /// Decides, before any widget runs, whether a key is a block-editor
+    /// command for the focused block, and if so takes it away from the text
+    /// field. Nothing is intercepted during an IME composition, with a text
+    /// selection, or when the cursor is not where the command applies.
+    fn take_editor_key(&mut self, ctx: &egui::Context) {
+        self.ime_composing = ime_composing_after(ctx, self.ime_composing);
+        if self.ime_composing {
+            return;
+        }
+        let Some(caret) = self.caret.clone() else {
+            return;
+        };
+        let Some(block) = self.blocks.iter().find(|b| b.id == caret.block_id) else {
+            return;
+        };
+        if !ctx.memory(|m| m.has_focus(self.block_field_id(&block.id))) || caret.selection {
+            return;
+        }
+        let code = block.kind == BlockKind::Code;
+        let at_start = caret.char == 0;
+        let at_end = caret.char >= editor::block_char_len(block);
+        use egui::{Key, Modifiers as M};
+        let candidates = [
+            (
+                EditorKey::Enter,
+                Key::Enter,
+                M::NONE,
+                !editor::enter_inserts_newline(block.kind),
+            ),
+            (EditorKey::Backspace, Key::Backspace, M::NONE, at_start),
+            (EditorKey::Delete, Key::Delete, M::NONE, at_end),
+            (EditorKey::Indent, Key::Tab, M::NONE, !code),
+            (EditorKey::Outdent, Key::Tab, M::SHIFT, !code),
+            (EditorKey::Up, Key::ArrowUp, M::NONE, caret.first_row),
+            (EditorKey::Down, Key::ArrowDown, M::NONE, caret.last_row),
+        ];
+        for (command, key, modifiers, applies) in candidates {
+            if applies && take_exact_key(ctx, key, modifiers) {
+                self.pending_key = Some((command, block.id.clone()));
+                return;
+            }
+        }
+    }
+
+    /// Runs the key taken this frame, after the text field processed any text
+    /// typed earlier in the same frame (so the cursor position is current).
+    fn run_editor_key(&mut self, ctx: &egui::Context) {
+        let Some((command, block_id)) = self.pending_key.take() else {
+            return;
+        };
+        let Some(index) = self.blocks.iter().position(|b| b.id == block_id) else {
+            return;
+        };
+        let field = self.block_field_id(&block_id);
+        let cursor = egui::text_edit::TextEditState::load(ctx, field)
+            .and_then(|s| s.cursor.char_range())
+            .map_or(0, |r| r.primary.index.0);
+        let before: Vec<(String, String)> = self
+            .blocks
+            .iter()
+            .map(|b| (b.id.clone(), b.content.clone()))
+            .collect();
+        let caret = match command {
+            EditorKey::Enter => editor::enter(&mut self.blocks, index, cursor, || {
+                uuid::Uuid::new_v4().to_string()
+            }),
+            EditorKey::Backspace if cursor > 0 => {
+                // Text was typed before Backspace in the same frame: plain delete.
+                delete_char(&mut self.blocks[index].content, cursor - 1);
+                Some(editor::Caret {
+                    block: index,
+                    char: cursor - 1,
+                })
+            }
+            EditorKey::Backspace => editor::backspace_at_start(&mut self.blocks, index),
+            EditorKey::Delete if cursor < editor::block_char_len(&self.blocks[index]) => {
+                delete_char(&mut self.blocks[index].content, cursor);
+                Some(editor::Caret {
+                    block: index,
+                    char: cursor,
+                })
+            }
+            EditorKey::Delete => editor::delete_at_end(&mut self.blocks, index),
+            EditorKey::Indent | EditorKey::Outdent => {
+                let delta = if command == EditorKey::Indent { 1 } else { -1 };
+                editor::change_indent(&mut self.blocks, index, delta);
+                Some(editor::Caret {
+                    block: index,
+                    char: cursor,
+                })
+            }
+            EditorKey::Up => index.checked_sub(1).map(|i| editor::Caret {
+                block: i,
+                char: editor::block_char_len(&self.blocks[i]),
+            }),
+            EditorKey::Down => (index + 1 < self.blocks.len()).then(|| editor::Caret {
+                block: index + 1,
+                char: 0,
+            }),
+        };
+        let structural = !matches!(command, EditorKey::Up | EditorKey::Down);
+        if structural {
+            // Text undo must not resurrect text that moved to another block.
+            for block in &self.blocks {
+                let same = before
+                    .iter()
+                    .any(|(id, content)| *id == block.id && *content == block.content);
+                if !same {
+                    let id = self.block_field_id(&block.id);
+                    if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, id) {
+                        state.clear_undoer();
+                        state.store(ctx, id);
+                    }
+                }
+            }
+            self.mark_dirty();
+        }
+        if let Some(caret) = caret
+            && let Some(target) = self.blocks.get(caret.block)
+        {
+            self.pending_focus = Some((target.id.clone(), caret.char));
+            ctx.request_repaint();
+        }
+    }
+
+    /// Focuses the block chosen by the last editor command, with its cursor.
+    fn apply_pending_focus(&mut self, ctx: &egui::Context) {
+        let Some((block_id, char)) = self.pending_focus.clone() else {
+            return;
+        };
+        let id = self.block_field_id(&block_id);
+        let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(char),
+            )));
+        state.store(ctx, id);
+        ctx.memory_mut(|m| m.request_focus(id));
+        // Keep it until the target block has focus, so it can scroll into view.
+        if self.caret.as_ref().is_some_and(|c| c.block_id == block_id) {
+            self.pending_focus = None;
+        }
     }
 
     /// Keyboard shortcuts, read before any widget so text fields do not see them.
@@ -1077,8 +1261,15 @@ impl SilexApp {
             .id_salt("silex_editor_blocks")
             .show(ui, |ui| {
                 let numbers = list_numbers(&self.blocks);
+                let scroll_to = self.pending_focus.as_ref().map(|(id, _)| id.clone());
+                self.caret = None;
                 for (block, number) in self.blocks.iter_mut().zip(numbers) {
-                    modified |= block_field(ui, self.doc_generation, block, number);
+                    let scroll = scroll_to.as_deref() == Some(block.id.as_str());
+                    let out = block_field(ui, self.doc_generation, block, number, scroll);
+                    modified |= out.changed;
+                    if out.caret.is_some() {
+                        self.caret = out.caret;
+                    }
                     ui.add_space(6.0);
                 }
             });
@@ -1227,7 +1418,10 @@ impl SilexApp {
     fn update_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
+        self.take_editor_key(&ctx);
+        self.apply_pending_focus(&ctx);
         self.layout(ui);
+        self.run_editor_key(&ctx);
         // Save errors are shown by the status bar, so results are not reported twice.
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             let _ = self.save_now();
@@ -1283,12 +1477,20 @@ const INDENT_WIDTH: f32 = 24.0;
 /// Renders one block: type selector, indent, marker (checkbox, bullet,
 /// number or quote bar) and its text field. `number` is the list number for
 /// numbered blocks. Returns true when anything in the block changed.
+/// What a block reported while being drawn.
+struct BlockOutput {
+    changed: bool,
+    /// Present when this block's text field has focus.
+    caret: Option<CaretInfo>,
+}
+
 fn block_field(
     ui: &mut egui::Ui,
     generation: u64,
     block: &mut Block,
     number: Option<usize>,
-) -> bool {
+    scroll_into_view: bool,
+) -> BlockOutput {
     let id = field_id(generation, "block", &block.id);
     ui.horizontal(|ui| {
         let mut changed = kind_selector(ui, block);
@@ -1318,10 +1520,66 @@ fn block_field(
                 .desired_rows(1),
             _ => TextEdit::multiline(&mut block.content).desired_rows(1),
         };
-        changed |= ui.add(edit.id(id).desired_width(f32::INFINITY)).changed();
-        changed
+        let output = edit.id(id).desired_width(f32::INFINITY).show(ui);
+        changed |= output.response.changed();
+        if scroll_into_view {
+            output.response.scroll_to_me(None);
+        }
+        let caret = output
+            .cursor_range
+            .filter(|_| output.response.has_focus())
+            .map(|range| {
+                let row = output.galley.layout_from_cursor(range.primary).row;
+                CaretInfo {
+                    block_id: block.id.clone(),
+                    char: range.primary.index.0,
+                    selection: range.primary.index != range.secondary.index,
+                    first_row: row == 0,
+                    last_row: row + 1 >= output.galley.rows.len(),
+                }
+            });
+        BlockOutput { changed, caret }
     })
     .inner
+}
+
+/// Takes a key press with exactly these modifiers (egui's `consume_key`
+/// ignores extra Shift/Alt, which would swallow Shift+Enter).
+fn take_exact_key(ctx: &egui::Context, key: egui::Key, modifiers: egui::Modifiers) -> bool {
+    ctx.input_mut(|input| {
+        let mut taken = false;
+        input.events.retain(|event| {
+            let matches = !taken
+                && matches!(event, egui::Event::Key { key: k, pressed: true, modifiers: m, .. }
+                    if *k == key && *m == modifiers);
+            taken |= matches;
+            !matches
+        });
+        taken
+    })
+}
+
+/// Tracks IME composition from this frame's events: a non-empty preedit
+/// starts it; a commit or an empty preedit ends it.
+fn ime_composing_after(ctx: &egui::Context, mut composing: bool) -> bool {
+    ctx.input(|input| {
+        for event in &input.events {
+            if let egui::Event::Ime(ime) = event {
+                composing = match ime {
+                    egui::ImeEvent::Preedit { text, .. } => !text.is_empty(),
+                    _ => false,
+                };
+            }
+        }
+    });
+    composing
+}
+
+/// Removes the character at `char_index` (if any).
+fn delete_char(text: &mut String, char_index: usize) {
+    if let Some((byte, _)) = text.char_indices().nth(char_index) {
+        text.remove(byte);
+    }
 }
 
 fn heading_size(kind: BlockKind) -> f32 {
@@ -1416,7 +1674,7 @@ mod tests {
                 ui.memory_mut(|m| m.request_focus(id));
             }
             for block in blocks.iter_mut() {
-                changed |= block_field(ui, 0, block, None);
+                changed |= block_field(ui, 0, block, None, false).changed;
             }
         });
         // Headless: nothing renders the font texture, so drop it explicitly.
@@ -1735,6 +1993,194 @@ mod tests {
                 assert!(warnings.is_empty(), "query {query:?}: {warnings:?}");
             }
         }
+        Ok(())
+    }
+
+    /// App with one page whose blocks are `(kind, indent, text)`, the given
+    /// block focused at `char`, after a frame so the caret is known.
+    fn editor_app(
+        specs: &[(BlockKind, u8, &str)],
+        focus: usize,
+        char: usize,
+    ) -> anyhow::Result<(SilexApp, egui::Context)> {
+        let mut app = SilexApp::new(Database::open_in_memory()?)?;
+        let page = app.selected.clone().expect("page");
+        for (kind, _, _) in specs {
+            app.db.add_block(&page, *kind)?;
+        }
+        let mut blocks = app.db.list_blocks(&page)?;
+        for (block, (_, indent, text)) in blocks.iter_mut().zip(specs) {
+            block.indent = *indent;
+            block.content = (*text).to_owned();
+        }
+        let title = app.title.clone();
+        app.db.save_document(&page, &title, &blocks)?;
+        app.blocks = blocks;
+        let ctx = egui::Context::default();
+        app.pending_focus = Some((app.blocks[focus].id.clone(), char));
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![]);
+        Ok((app, ctx))
+    }
+
+    fn contents(app: &SilexApp) -> Vec<(BlockKind, u8, String)> {
+        app.blocks
+            .iter()
+            .map(|b| (b.kind, b.indent, b.content.clone()))
+            .collect()
+    }
+
+    fn focused_block(app: &SilexApp, ctx: &egui::Context) -> Option<usize> {
+        app.blocks
+            .iter()
+            .position(|b| ctx.memory(|m| m.has_focus(app.block_field_id(&b.id))))
+    }
+
+    fn caret_char(app: &SilexApp) -> Option<usize> {
+        app.caret.as_ref().map(|c| c.char)
+    }
+
+    use BlockKind::{Bulleted as Bul, Code as Cod, Paragraph as Par};
+    use egui::{Key, Modifiers as M};
+
+    #[test]
+    fn enter_splits_and_focuses_the_new_block() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "hola🙂mundo")], 0, 5)?;
+        assert_eq!(caret_char(&app), Some(5));
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        assert_eq!(
+            contents(&app),
+            [(Par, 0, "hola🙂".into()), (Par, 0, "mundo".into())]
+        );
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(focused_block(&app, &ctx), Some(1));
+        assert_eq!(caret_char(&app), Some(0));
+
+        // The split is persisted by the normal save path.
+        assert!(!app.save.can_close());
+        app.save_now()?;
+        let page = app.selected.clone().expect("page");
+        assert_eq!(app.db.list_blocks(&page)?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn shift_enter_is_a_newline_inside_the_block() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "ab")], 0, 1)?;
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::SHIFT)]);
+        assert_eq!(contents(&app), [(Par, 0, "a\nb".into())]);
+        Ok(())
+    }
+
+    #[test]
+    fn enter_in_code_block_is_a_newline() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Cod, 0, "fn x()")], 0, 6)?;
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        assert_eq!(app.blocks.len(), 1);
+        assert!(app.blocks[0].content.contains('\n'));
+        Ok(())
+    }
+
+    #[test]
+    fn text_typed_before_enter_in_the_same_frame_is_kept_in_order() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "ab")], 0, 2)?;
+        app_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Text("X".into()), key(Key::Enter, M::NONE)],
+        );
+        assert_eq!(
+            contents(&app),
+            [(Par, 0, "abX".into()), (Par, 0, "".into())]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn backspace_at_start_merges_and_mid_text_deletes() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "Café"), (Par, 0, " ☕")], 1, 0)?;
+        app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+        assert_eq!(contents(&app), [(Par, 0, "Café ☕".into())]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(focused_block(&app, &ctx), Some(0));
+        assert_eq!(caret_char(&app), Some(4), "cursor at the seam");
+
+        // Not at the start: a normal character delete by the text field.
+        app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+        assert_eq!(contents(&app), [(Par, 0, "Caf ☕".into())]);
+        Ok(())
+    }
+
+    #[test]
+    fn tab_and_shift_tab_change_indent_and_keep_focus() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Bul, 0, "uno"), (Bul, 0, "dos")], 1, 1)?;
+        app_frame(&mut app, &ctx, vec![key(Key::Tab, M::NONE)]);
+        assert_eq!(app.blocks[1].indent, 1);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(focused_block(&app, &ctx), Some(1));
+        app_frame(&mut app, &ctx, vec![key(Key::Tab, M::SHIFT)]);
+        assert_eq!(app.blocks[1].indent, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn arrows_move_between_blocks_at_the_edges() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "arriba"), (Par, 0, "abajo")], 1, 2)?;
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(focused_block(&app, &ctx), Some(0));
+        assert_eq!(caret_char(&app), Some(6), "end of the block above");
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(focused_block(&app, &ctx), Some(1));
+        assert_eq!(caret_char(&app), Some(0));
+        assert_eq!(app.blocks.len(), 2, "navigation changes nothing");
+        assert!(app.save.can_close());
+        Ok(())
+    }
+
+    #[test]
+    fn keys_are_left_alone_during_ime_composition() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "ab")], 0, 2)?;
+        let preedit = |text: &str| {
+            egui::Event::Ime(egui::ImeEvent::Preedit {
+                text: text.into(),
+                active_range_chars: None,
+            })
+        };
+        app_frame(&mut app, &ctx, vec![preedit("に")]);
+        assert!(app.ime_composing);
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        assert_eq!(
+            app.blocks.len(),
+            1,
+            "Enter confirms the composition, no split"
+        );
+        // Composition ends (empty preedit): Enter splits again.
+        app_frame(&mut app, &ctx, vec![preedit("")]);
+        assert!(!app.ime_composing);
+        Ok(())
+    }
+
+    /// egui selects the preedit text, so the selection rule alone already
+    /// blocks Enter above. This isolates the IME guard itself: a composition
+    /// in progress with no selection must still not be intercepted.
+    #[test]
+    fn ime_guard_blocks_editor_keys_even_without_selection() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "ab"), (Par, 0, "cd")], 1, 0)?;
+        assert!(app.caret.as_ref().is_some_and(|c| !c.selection));
+        app.ime_composing = true;
+        // Keys reach the text field as usual; only block structure must not change.
+        let ids = |app: &SilexApp| app.blocks.iter().map(|b| b.id.clone()).collect::<Vec<_>>();
+        let before = ids(&app);
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        assert_eq!(ids(&app), before, "no split while composing");
+        app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+        assert_eq!(ids(&app), before, "no merge while composing");
+        let commit = egui::Event::Ime(egui::ImeEvent::Commit("に".into()));
+        app_frame(&mut app, &ctx, vec![commit]);
+        assert!(!app.ime_composing, "a commit ends the composition");
         Ok(())
     }
 
