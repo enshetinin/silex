@@ -1,0 +1,21 @@
+[package]
+name = "silex-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+authors = []
+description = "Local-first native knowledge workspace built with Rust and SQLite"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+directories = "6"
+# Default features: wgpu, clipboard, accesskit, x11/wayland (with client-side decorations and dlopen).
+eframe = "0.37"
+rusqlite = { version = "0.40", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

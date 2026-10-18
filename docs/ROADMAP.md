@@ -1,0 +1,51 @@
+# Roadmap — historias verticales
+
+> Marcadores: `[x]` significa *incluido en el starter*, no verificado por cargo en el paquete; `[ ]` pendiente. La compilación y los tests reales son el **hito 0**.
+
+## Hito 0 — entorno reproducible
+- [x] Repositorio Rust, UI inicial, esquema SQLite, CI y documentación.
+- [x] Generar y versionar `Cargo.lock` con `cargo generate-lockfile`.
+- [x] Ejecutar `cargo fmt --all` y después `cargo fmt --all -- --check`.
+- [ ] Ejecutar `cargo clippy --workspace --all-targets -- -D warnings`. *(Verde en macOS local 2026-10-18; CI pendiente.)*
+- [ ] Ejecutar `cargo test --workspace`. *(12 tests verdes en macOS local 2026-10-18; CI pendiente.)*
+- [ ] Ejecutar `cargo check --workspace` en Windows, Linux y macOS. *(macOS verde; Windows/Linux pendientes de CI.)*
+- [ ] Arrancar GUI y comprobar creación/edición/guardado/cierre/reapertura. *(Arranca sin errores en macOS; checklist manual pendiente.)*
+- [ ] Inspección de UX y respuesta de la interfaz con 100 páginas/1000 bloques. *(Capa SQLite medida: todas las consultas < 1 ms; inspección visual pendiente.)*
+
+**Aceptación:** todos los comandos verdes; app visible, sin pérdida de un documento tras reiniciar. **No** marcar antes de verificar.
+
+## Hito 1 — documentos seguros
+- [ ] Crear backups automáticos verificables y restauración.
+- [ ] Recuperación de errores de escritura, señal clara de documento sin guardar.
+- [ ] Tests de edición/cierre/apertura y manejo de fallos.
+- [ ] Acciones deshacer/rehacer de texto con estrategia documentada.
+
+## Hito 2 — páginas navegables
+- [ ] Anidación visual y reordenación de páginas; evitar ciclos.
+- [ ] Favoritos, renombrado contextual, papelera, restauración.
+- [ ] Atajos de navegación y lista filtrable.
+
+## Hito 3 — editor tipo Notion (primer valor diferencial)
+- [ ] Comandos de edición por bloque: Enter/Backspace/Tab/Shift-Tab.
+- [ ] Más tipos de bloque: H1/2/3, listas, cita y código.
+- [ ] Menú `/`, teclado y selección de bloques.
+- [ ] Reordenación y borrado de bloques; undo/redo semánticos.
+- [ ] Pruebas de cursor/foco, copy-paste y Unicode/IME.
+
+## Hito 4 — importación y exportación
+- [ ] Markdown → bloques con pruebas golden.
+- [ ] Bloques → Markdown estable.
+- [ ] Exportación de espacio de trabajo; adjuntos con rutas seguras.
+
+## Hito 5 — UX de producto
+- [ ] Diseño coherente oscuro/claro, accesibilidad y navegación completa teclado.
+- [ ] Búsqueda global con snippets/ranking y paleta de comandos.
+- [ ] Empaquetado e iconos multiplataforma.
+
+## Hito 6 — bases de datos tipo Notion
+- [ ] Diseño separado de propiedades tipadas y vistas; ADR específica.
+- [ ] Vista tabla editable, filtros y ordenación, después Kanban.
+
+## Hito 7 — funcionalidades opcionales
+- [ ] Historial/versionado, enlaces bidireccionales, plantillas.
+- [ ] Evaluar cifrado y sincronización únicamente con ADR, threat model y pruebas.
