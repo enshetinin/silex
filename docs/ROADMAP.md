@@ -15,7 +15,7 @@
 **Aceptación:** todos los comandos verdes; app visible, sin pérdida de un documento tras reiniciar. **No** marcar antes de verificar.
 
 ## Hito 1 — documentos seguros
-- [ ] Crear backups automáticos verificables y restauración. *(H1.2 hecha: copia con la API de backup en un hilo aparte, verificada antes de darla por buena, al arrancar si la última tiene > 24 h y con botón manual; se conservan 10. Falta la restauración, H1.3.)*
+- [ ] Crear backups automáticos verificables y restauración. *(H1.2 hecha y verificada a mano: copia con la API de backup en un hilo aparte, verificada antes de darla por buena, al arrancar si la última tiene > 24 h y con botón manual; se conservan 10. H1.3 implementada: restauración con confirmación y copia previa del estado actual; tests verdes en macOS, verificación manual pendiente.)*
 - [x] Recuperación de errores de escritura, señal clara de documento sin guardar. *(H1.1: estado visible, reintento con backoff 1–30 s, cierre bloqueado con «Reintentar / Salir sin guardar». Tests verdes y verificación manual en macOS.)*
 - [ ] Tests de edición/cierre/apertura y manejo de fallos.
 - [ ] Acciones deshacer/rehacer de texto con estrategia documentada.

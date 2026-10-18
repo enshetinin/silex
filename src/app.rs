@@ -1,6 +1,6 @@
-use std::time::Instant;
+use std::{path::PathBuf, time::Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use eframe::egui::{self, TextEdit};
 use silex_desktop::{
     db::{
@@ -29,6 +29,14 @@ pub struct SilexApp {
     backup_label: String,
     /// The startup backup check needs an egui context, so it runs on the first frame.
     startup_backup_pending: bool,
+    restore_dialog: Option<RestoreDialog>,
+}
+
+/// Backup picker; restoring needs an explicit second click on a selected copy.
+struct RestoreDialog {
+    backups: Vec<PathBuf>,
+    selected: Option<usize>,
+    error: Option<String>,
 }
 
 impl SilexApp {
@@ -53,6 +61,7 @@ impl SilexApp {
             backup_job: None,
             backup_label: String::new(),
             startup_backup_pending: true,
+            restore_dialog: None,
         };
         app.backup_label = app.describe_last_backup();
         if let Some(page) = app.pages.first() {
@@ -160,6 +169,118 @@ impl SilexApp {
         }
     }
 
+    fn open_restore_dialog(&mut self) {
+        let Some(path) = self.db.path() else {
+            return;
+        };
+        match backup::list_backups(&backup::backups_dir(&path)) {
+            Ok(backups) => {
+                self.restore_dialog = Some(RestoreDialog {
+                    backups,
+                    selected: None,
+                    error: None,
+                })
+            }
+            Err(err) => self.notice = Some(format!("No se pueden listar las copias: {err:#}")),
+        }
+    }
+
+    /// Saves pending edits (so they are part of the pre-restore copy), restores
+    /// and reloads the UI. Reopens the same page if it exists in the copy.
+    fn restore(&mut self, backup_file: &std::path::Path) -> Result<PathBuf> {
+        self.save_now()
+            .context("Hay cambios sin guardar; guárdalos antes de restaurar")?;
+        let safety = self.db.restore_from_backup(backup_file)?;
+        let previous = self.selected.take();
+        self.title.clear();
+        self.blocks.clear();
+        self.reload_pages()?;
+        let reopen = previous
+            .filter(|id| self.pages.iter().any(|p| &p.id == id))
+            .or_else(|| self.pages.first().map(|p| p.id.clone()));
+        if let Some(id) = reopen {
+            self.open_page(id)?;
+        }
+        self.backup_label = self.describe_last_backup();
+        Ok(safety)
+    }
+
+    fn restore_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.restore_dialog.as_mut() else {
+            return;
+        };
+        let mut confirm = None;
+        let mut cancel = false;
+        let response = egui::Modal::new(egui::Id::unique("silex_restore")).show(ctx, |ui| {
+            ui.heading("Restaurar una copia");
+            if dialog.backups.is_empty() {
+                ui.label("Aún no hay copias de seguridad.");
+            }
+            egui::ScrollArea::vertical()
+                .max_height(260.0)
+                .show(ui, |ui| {
+                    for (i, path) in dialog.backups.iter().enumerate() {
+                        let label = backup::stamp_of(path)
+                            .map(backup::describe_stamp)
+                            .unwrap_or_else(|| path.display().to_string());
+                        if ui
+                            .selectable_label(dialog.selected == Some(i), label)
+                            .clicked()
+                        {
+                            dialog.selected = Some(i);
+                            dialog.error = None;
+                        }
+                    }
+                });
+            if let Some(path) = dialog.selected.and_then(|i| dialog.backups.get(i)) {
+                ui.add_space(8.0);
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Todo el contenido actual se reemplazará por esta copia. \
+                     Antes se guardará una copia del estado actual, \
+                     que podrás restaurar si cambias de opinión.",
+                );
+                if ui.button("Restaurar esta copia").clicked() {
+                    confirm = Some(path.clone());
+                }
+            }
+            if let Some(error) = &dialog.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            ui.add_space(8.0);
+            if ui.button("Cancelar").clicked() {
+                cancel = true;
+            }
+        });
+        if cancel || (confirm.is_none() && response.should_close()) {
+            self.restore_dialog = None;
+            return;
+        }
+        let Some(path) = confirm else {
+            return;
+        };
+        match self.restore(&path) {
+            Ok(safety) => {
+                self.restore_dialog = None;
+                let describe = |p: &std::path::Path| {
+                    backup::stamp_of(p)
+                        .map(backup::describe_stamp)
+                        .unwrap_or_else(|| p.display().to_string())
+                };
+                self.notice = Some(format!(
+                    "Copia del {} restaurada. El estado anterior se guardó como copia del {}.",
+                    describe(&path),
+                    describe(&safety)
+                ));
+            }
+            Err(err) => {
+                if let Some(dialog) = self.restore_dialog.as_mut() {
+                    dialog.error = Some(format!("{err:#}"));
+                }
+            }
+        }
+    }
+
     fn report<T>(&mut self, result: Result<T>) {
         if let Err(err) = result {
             self.notice = Some(format!("{err:#}"));
@@ -225,6 +346,12 @@ impl SilexApp {
             .clicked()
         {
             self.start_backup(ui.ctx());
+        }
+        if ui
+            .add_enabled(can_backup, egui::Button::new("Restaurar una copia…"))
+            .clicked()
+        {
+            self.open_restore_dialog();
         }
     }
 
@@ -432,6 +559,7 @@ impl eframe::App for SilexApp {
         }
         self.handle_close_request(&ctx);
         self.close_dialog(&ctx);
+        self.restore_dialog(&ctx);
         // The UI may be idle between edits; wake up for the next autosave or retry.
         if let Some(at) = self.save.next_attempt() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));

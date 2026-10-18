@@ -4,9 +4,9 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use directories::ProjectDirs;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::model::{Block, Page};
@@ -59,6 +59,42 @@ impl Database {
             |r| r.get(0),
         )?;
         Ok(backup::newest_stamp(dir)?.is_none_or(|newest| newest < threshold))
+    }
+
+    /// Replaces the whole database with `backup_file`.
+    ///
+    /// Order matters for safety: the chosen copy is verified first, then the
+    /// current state is saved as a new verified backup, and only then is the
+    /// live database overwritten. SQLite's backup API rolls back the
+    /// destination if the copy does not finish, so a failure leaves the
+    /// current data as it was. Returns the path of the pre-restore backup.
+    pub fn restore_from_backup(&mut self, backup_file: &Path) -> Result<PathBuf> {
+        let source = self
+            .path()
+            .context("No se puede restaurar sobre una base en memoria")?;
+        backup::verify_backup(backup_file)
+            .context("La copia elegida no es válida; no se ha cambiado nada")?;
+        let safety = backup::create_backup(&source, &backup::backups_dir(&source)).context(
+            "No se pudo guardar el estado actual antes de restaurar; no se ha cambiado nada",
+        )?;
+        self.conn
+            .restore(MAIN_DB, backup_file, None::<fn(rusqlite::backup::Progress)>)
+            .with_context(|| {
+                format!(
+                    "La restauración falló; el estado anterior está en {}",
+                    safety.display()
+                )
+            })?;
+        // The copy is a single-file (DELETE journal) database; restore WAL and pragmas.
+        self.configure()?;
+        let version: i64 = self
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))?;
+        ensure!(
+            version == LATEST_SCHEMA_VERSION,
+            "La base restaurada tiene un esquema inesperado ({version})"
+        );
+        Ok(safety)
     }
 
     pub fn open_in_memory() -> Result<Self> {
