@@ -396,6 +396,124 @@ fn enter_never_opens_a_result_of_an_older_query() -> anyhow::Result<()> {
 }
 
 #[test]
+fn empty_palette_lists_commands_and_enter_runs_the_first() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    use silex_desktop::palette::Command;
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    let ctx = egui::Context::default();
+    let pages = app.pages.len();
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Acciones"));
+    assert!(painted.iter().any(|t| t == "Nueva página"));
+    assert!(
+        painted.iter().any(|t| t == "Cmd+N" || t == "Ctrl+N"),
+        "shortcut shown"
+    );
+    let commands = app
+        .search
+        .as_ref()
+        .map(|w| w.commands.clone())
+        .unwrap_or_default();
+    assert_eq!(commands.first(), Some(&Command::NewPage));
+    // In-memory database: no backups or workspace export offered.
+    assert!(!commands.contains(&Command::BackupNow));
+    assert!(!commands.contains(&Command::ExportWorkspace));
+
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.search.is_none());
+    assert_eq!(app.pages.len(), pages + 1, "a new page was created");
+    assert!(app.focus_title, "with its title ready to type");
+    Ok(())
+}
+
+#[test]
+fn commands_come_before_pages_and_run_from_the_keyboard() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    use silex_desktop::palette::Command;
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    let viaje = app.db.create_page("Favoritos del viaje", None)?;
+    app.reload_pages()?;
+    let ctx = egui::Context::default();
+    let search = |app: &mut SilexApp, text: &str| {
+        app_frame(app, &ctx, vec![key(Key::K, M::COMMAND)]);
+        app_frame(app, &ctx, vec![egui::Event::Text(text.into())]);
+    };
+
+    // "favorit": the command first, then the page; ↓ Enter opens the page.
+    search(&mut app, "favorit");
+    let window = app.search.as_ref().expect("open");
+    assert_eq!(window.commands, [Command::AddFavorite]);
+    assert_eq!(window.results.len(), 1);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(app.selected.as_deref(), Some(viaje.as_str()));
+
+    // Enter on the command marks the open page; then it offers the opposite.
+    search(&mut app, "favorit");
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.favorites.iter().any(|p| p.id == viaje));
+    search(&mut app, "favorit");
+    assert_eq!(
+        app.search.as_ref().map(|w| w.commands.clone()),
+        Some(vec![Command::RemoveFavorite])
+    );
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+
+    // Settings commands apply and are stored.
+    search(&mut app, "oscuro");
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(
+        ctx.options(|o| o.theme_preference),
+        egui::ThemePreference::Dark
+    );
+    assert_eq!(app.db.load_settings()?.theme, ThemeMode::Dark);
+    Ok(())
+}
+
+#[test]
+fn palette_commands_reuse_the_app_actions() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    use silex_desktop::palette::Command;
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![]);
+    let first = app.selected.clone().expect("first page");
+
+    app.run_command(&ctx, Command::ZoomIn)?;
+    assert_eq!(app.settings.zoom_percent, 110);
+    app.run_command(&ctx, Command::ZoomOut)?;
+    app.run_command(&ctx, Command::ZoomOut)?;
+    assert_eq!(app.db.load_settings()?.zoom_percent, 90);
+    app.run_command(&ctx, Command::ZoomReset)?;
+    assert_eq!(app.settings.zoom_percent, 100);
+
+    app.run_command(&ctx, Command::RenamePage)?;
+    assert!(app.focus_title);
+    app.run_command(&ctx, Command::NewSubpage)?;
+    let child = app.selected.clone().expect("subpage open");
+    let parent = app
+        .pages
+        .iter()
+        .find(|p| p.id == child)
+        .and_then(|p| p.parent_id.clone());
+    assert_eq!(parent.as_deref(), Some(first.as_str()));
+
+    app.run_command(&ctx, Command::TrashPage)?;
+    assert!(app.pages.iter().all(|p| p.id != child), "in the trash");
+    app.run_command(&ctx, Command::OpenTrash)?;
+    assert!(app.trash_dialog.is_some());
+    app.trash_dialog = None;
+
+    app.run_command(&ctx, Command::ShowShortcuts)?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Atajos de teclado"));
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(!app.shortcuts_dialog, "Escape closes it");
+    Ok(())
+}
+
+#[test]
 fn search_window_has_the_keyboard_until_it_closes() -> anyhow::Result<()> {
     use egui::{Key, Modifiers as M};
     let mut app = SilexApp::new(Database::open_in_memory()?)?;
@@ -507,6 +625,14 @@ fn search_runs_on_a_worker_with_a_file_database() -> anyhow::Result<()> {
     app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
     wait_for(&mut app, &|app| app.search.is_none());
     assert_eq!(app.selected.as_deref(), Some(notas.as_str()));
+
+    // Enter on a command runs it at once, even while pages are searched.
+    let pages = app.pages.len();
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("nueva".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.search.is_none());
+    assert_eq!(app.pages.len(), pages + 1);
     drop(app);
     Ok(())
 }

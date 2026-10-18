@@ -53,3 +53,4 @@ Con la semilla (`cargo run --example seed -- /tmp/silex-qa.sqlite3`) y una pági
 - Escribe algo sin guardar, abre la búsqueda y busca esa palabra: aparece (se guarda al abrir).
 - Con un IME (japonés): componer en el campo y confirmar con Intro no abre ningún resultado.
 - Con VoiceOver/NVDA/Orca: el campo y cada resultado se anuncian (título, ruta y fragmento).
+- Acciones (H5.8): con el campo vacío aparece la lista de acciones con sus atajos. Prueba al menos «Nueva página», «oscuro» (cambia el tema y se recuerda al reiniciar), «favorit» (añadir y, la segunda vez, quitar), «papelera» (abre la papelera, no borra), «aumentar» y «Ver los atajos de teclado». Con una base en archivo aparecen también las copias y «Exportar todo a Markdown».

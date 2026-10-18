@@ -1,0 +1,109 @@
+//! Command palette (H5.8): what each command does, its icon and shortcut.
+//! Which commands are listed is decided in `silex_desktop::palette`.
+use anyhow::Result;
+use eframe::egui::{self};
+use silex_desktop::{
+    palette::{Command, PaletteContext},
+    settings::{Settings, ThemeMode, zoom_step},
+};
+
+use super::icons;
+use super::*;
+
+/// Icon shown before a command.
+pub(super) fn command_icon(command: Command) -> &'static str {
+    match command {
+        Command::NewPage | Command::NewSubpage => icons::PLUS,
+        Command::RenamePage => icons::TEXT,
+        Command::AddFavorite | Command::RemoveFavorite => icons::STAR,
+        Command::ExportPage | Command::ExportWorkspace => icons::EXPORT,
+        Command::SaveNow => icons::SAVE,
+        Command::TrashPage | Command::OpenTrash => icons::TRASH,
+        Command::BackupNow | Command::RestoreBackup => icons::BACKUP,
+        Command::ThemeSystem => icons::SETTINGS,
+        Command::ThemeLight => icons::SUN,
+        Command::ThemeDark => icons::MOON,
+        Command::ZoomIn => icons::ARROW_UP,
+        Command::ZoomOut => icons::ARROW_DOWN,
+        Command::ZoomReset => icons::TEXT,
+        Command::ShowShortcuts => icons::KEYBOARD,
+    }
+}
+
+/// The keyboard shortcut that does the same, if any (`cmd` is "Cmd" or "Ctrl").
+pub(super) fn command_shortcut(command: Command, cmd: &str) -> Option<String> {
+    Some(match command {
+        Command::NewPage => format!("{cmd}+N"),
+        Command::NewSubpage => format!("{cmd}+Mayús+N"),
+        Command::RenamePage => "F2".to_owned(),
+        Command::SaveNow => format!("{cmd}+S"),
+        Command::ZoomIn => format!("{cmd}++"),
+        Command::ZoomOut => format!("{cmd}+−"),
+        Command::ZoomReset => format!("{cmd}+0"),
+        _ => return None,
+    })
+}
+
+impl SilexApp {
+    /// What decides which commands are offered right now.
+    pub(super) fn palette_context(&self) -> PaletteContext {
+        PaletteContext {
+            page_open: self.selected.is_some(),
+            favorite: self
+                .selected
+                .as_ref()
+                .is_some_and(|id| self.favorites.iter().any(|p| &p.id == id)),
+            file_database: self.db.path().is_some(),
+            backup_running: self.backup_job.is_some(),
+            export_running: self.export_job.is_some(),
+            settings: self.settings,
+        }
+    }
+
+    /// Runs a command chosen in the search window (already closed). Each
+    /// one goes through the same code as its button, menu or shortcut.
+    pub(super) fn run_command(&mut self, ctx: &egui::Context, command: Command) -> Result<()> {
+        let page = self.selected.clone();
+        let with_settings = |app: &mut Self, change: &dyn Fn(&mut Settings)| {
+            let mut settings = app.settings;
+            change(&mut settings);
+            app.set_settings(ctx, settings);
+        };
+        match (command, page) {
+            (Command::NewPage, _) => self.create_root_page("Sin título")?,
+            (Command::NewSubpage, Some(id)) => self.create_subpage(&id)?,
+            // The open page is renamed in its title, as from its "…" menu.
+            (Command::RenamePage, Some(_)) => self.focus_title = true,
+            (Command::AddFavorite, Some(id)) => self.set_favorite(&id, true)?,
+            (Command::RemoveFavorite, Some(id)) => self.set_favorite(&id, false)?,
+            (Command::ExportPage, Some(_)) => self.export_current_page()?,
+            // A save error is already shown by the status bar.
+            (Command::SaveNow, _) => {
+                let _ = self.save_now();
+            }
+            (Command::TrashPage, Some(id)) => self.trash_page(&id)?,
+            (Command::OpenTrash, _) => self.open_trash_dialog(),
+            (Command::BackupNow, _) => self.start_backup(ctx),
+            (Command::RestoreBackup, _) => self.open_restore_dialog(),
+            (Command::ExportWorkspace, _) => {
+                let root = silex_desktop::export::export_root()?;
+                self.start_workspace_export(ctx, root)?;
+            }
+            (Command::ThemeSystem, _) => with_settings(self, &|s| s.theme = ThemeMode::System),
+            (Command::ThemeLight, _) => with_settings(self, &|s| s.theme = ThemeMode::Light),
+            (Command::ThemeDark, _) => with_settings(self, &|s| s.theme = ThemeMode::Dark),
+            (Command::ZoomIn | Command::ZoomOut, _) => {
+                if let Some(zoom) =
+                    zoom_step(self.settings.zoom_percent, command == Command::ZoomIn)
+                {
+                    with_settings(self, &|s| s.zoom_percent = zoom);
+                }
+            }
+            (Command::ZoomReset, _) => with_settings(self, &|s| s.zoom_percent = 100),
+            (Command::ShowShortcuts, _) => self.shortcuts_dialog = true,
+            // A page command with no page open (not offered then).
+            (_, None) => {}
+        }
+        Ok(())
+    }
+}

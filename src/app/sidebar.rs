@@ -779,7 +779,7 @@ impl SilexApp {
                 for (keys, what) in [
                     (format!("{cmd}+N"), "Nueva página"),
                     (format!("{cmd}+Mayús+N"), "Nueva subpágina"),
-                    (format!("{cmd}+K"), "Buscar en títulos y contenido"),
+                    (format!("{cmd}+K"), "Buscar páginas y acciones"),
                     ("Alt+↑ / Alt+↓".to_owned(), "Página anterior / siguiente"),
                     ("F2".to_owned(), "Renombrar la página abierta"),
                     (format!("{cmd}+S"), "Guardar ahora"),

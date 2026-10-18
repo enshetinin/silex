@@ -1,13 +1,16 @@
-//! Search window (Cmd+K, H5.7): ranked results with the path of each page
-//! and a snippet of the matching block. Searches run on a worker thread
-//! (`SearchWorker`) so typing never waits for SQLite.
+//! Search window (Cmd+K): commands (H5.8) and pages (H5.7). Pages come
+//! ranked, with their path and a snippet of the matching block; searches
+//! run on a worker thread (`SearchWorker`) so typing never waits for
+//! SQLite. Commands are matched inline (`palette::matching_commands`).
 use eframe::egui::{self, TextEdit, text::LayoutJob};
 use silex_desktop::{
     editor,
     model::ancestors,
+    palette::{Command, matching_commands},
     search::{SearchHit, SearchWorker, TextPart},
 };
 
+use super::palette::{command_icon, command_shortcut};
 use super::*;
 use super::{icons, theme};
 
@@ -21,13 +24,17 @@ const WIDTH: f32 = 640.0;
 const TOP: f32 = 72.0;
 /// Space above and below the text of a result row.
 const ROW_PADDING: f32 = 6.0;
+/// Height of a command row.
+const COMMAND_ROW: f32 = 32.0;
 
 pub(super) struct SearchWindow {
     pub(super) query: String,
     /// The query last sent to the search (its results may still be coming).
     requested: String,
+    /// Commands matching the query, listed before the pages.
+    pub(super) commands: Vec<Command>,
     pub(super) results: Vec<SearchHit>,
-    /// Highlighted result (↑/↓); Enter opens it.
+    /// Highlighted entry (↑/↓) in commands, then pages; Enter chooses it.
     pub(super) selected: usize,
     pub(super) error: Option<String>,
     /// `None` for an in-memory database (tests): searches run inline.
@@ -38,9 +45,28 @@ pub(super) struct SearchWindow {
     scroll_to_selected: bool,
     /// An IME composition is in progress in the field.
     composing: bool,
-    /// Enter was pressed: open the highlighted result once the results
-    /// for what is in the field have arrived (never an older query's).
+    /// Enter was pressed: choose the highlighted entry once the entries
+    /// for what is in the field are there (never an older query's).
     open_when_ready: bool,
+}
+
+/// What an entry of the window is.
+enum Entry {
+    Command(Command),
+    Page(SearchHit),
+}
+
+impl SearchWindow {
+    fn len(&self) -> usize {
+        self.commands.len() + self.results.len()
+    }
+
+    fn entry(&self, index: usize) -> Option<Entry> {
+        match index.checked_sub(self.commands.len()) {
+            None => self.commands.get(index).copied().map(Entry::Command),
+            Some(page) => self.results.get(page).cloned().map(Entry::Page),
+        }
+    }
 }
 
 impl SilexApp {
@@ -52,6 +78,7 @@ impl SilexApp {
         // Keys go to the window now; a block selection must not see them.
         self.selection = None;
         self.slash = None;
+        let commands = matching_commands("", &self.palette_context());
         let repaint = ctx.clone();
         // Without a file (tests) or a thread, search inline.
         let worker = self
@@ -61,6 +88,7 @@ impl SilexApp {
         self.search = Some(SearchWindow {
             query: String::new(),
             requested: String::new(),
+            commands,
             results: Vec::new(),
             selected: 0,
             error: None,
@@ -74,11 +102,13 @@ impl SilexApp {
 
     /// Sends the query when it changed and collects results.
     fn refresh_search(&mut self) {
+        let palette = self.palette_context();
         let Some(window) = self.search.as_mut() else {
             return;
         };
         if window.query != window.requested {
             window.requested = window.query.clone();
+            window.commands = matching_commands(&window.query, &palette);
             window.selected = 0;
             window.error = None;
             if window.query.trim().is_empty() {
@@ -100,19 +130,22 @@ impl SilexApp {
                 Ok(hits) => window.results = hits,
                 Err(err) => window.error = Some(format!("Error de búsqueda: {err:#}")),
             }
-            window.selected = window.selected.min(window.results.len().saturating_sub(1));
+            window.selected = window.selected.min(window.len().saturating_sub(1));
         }
     }
 
-    /// The result Enter asked for, once the results match the field.
-    fn ready_to_open(window: &mut SearchWindow) -> Option<usize> {
-        let current = window.query == window.requested
-            && !window.worker.as_ref().is_some_and(SearchWorker::is_pending);
-        if !window.open_when_ready || !current {
+    /// The entry Enter asked for, once the entries match the field. Commands
+    /// are matched at once; pages may still be on their way.
+    fn ready_to_choose(window: &mut SearchWindow) -> Option<usize> {
+        if !window.open_when_ready || window.query != window.requested {
+            return None;
+        }
+        let on_page = window.selected >= window.commands.len();
+        if on_page && window.worker.as_ref().is_some_and(SearchWorker::is_pending) {
             return None;
         }
         window.open_when_ready = false;
-        (!window.results.is_empty()).then_some(window.selected)
+        (window.selected < window.len()).then_some(window.selected)
     }
 
     /// "Padre › Hija" for a page (empty at the root).
@@ -156,7 +189,7 @@ impl SilexApp {
             take_exact_key(ctx, Key::Enter, M::NONE);
             return false;
         }
-        let last = window.results.len().saturating_sub(1);
+        let last = window.len().saturating_sub(1);
         if take_exact_key(ctx, Key::ArrowDown, M::NONE) {
             window.selected = (window.selected + 1).min(last);
             window.scroll_to_selected = true;
@@ -219,7 +252,7 @@ impl SilexApp {
                                     .margin(egui::Margin::ZERO)
                                     .font(egui::FontId::proportional(16.0))
                                     .hint_text(
-                                        egui::RichText::new("Buscar en títulos y contenido")
+                                        egui::RichText::new("Buscar páginas o acciones")
                                             .color(p.text_faint),
                                     )
                                     .desired_width(ui.available_width() - esc_width),
@@ -241,23 +274,39 @@ impl SilexApp {
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.add_space(theme::space::XS);
+                        let scroll = std::mem::take(&mut window.scroll_to_selected);
+                        let cmd = cmd_label(ui.ctx());
+                        if !window.commands.is_empty() {
+                            section(ui, p, "Acciones");
+                        }
+                        for (index, command) in window.commands.iter().enumerate() {
+                            let selected = index == window.selected;
+                            let shortcut = command_shortcut(*command, cmd);
+                            let row = command_row(ui, p, *command, shortcut.as_deref(), selected);
+                            if row.clicked() {
+                                open = Some(index);
+                            }
+                            if selected && scroll {
+                                row.scroll_to_me(None);
+                            }
+                        }
                         if let Some(error) = &window.error {
                             message(ui, error, p.danger);
-                        } else if window.query.trim().is_empty() {
-                            message(
-                                ui,
-                                "Escribe para buscar en los títulos y el contenido de tus páginas.",
-                                p.text_muted,
-                            );
-                        } else if window.results.is_empty() && !pending {
+                        } else if !window.results.is_empty() {
+                            section(ui, p, "Páginas");
+                        } else if !window.query.trim().is_empty()
+                            && window.commands.is_empty()
+                            && !pending
+                        {
                             message(
                                 ui,
                                 &format!("Nada coincide con «{}».", window.query.trim()),
                                 p.text_muted,
                             );
                         }
-                        let scroll = std::mem::take(&mut window.scroll_to_selected);
-                        for (index, (hit, path)) in window.results.iter().zip(&paths).enumerate() {
+                        let first_page = window.commands.len();
+                        for (offset, (hit, path)) in window.results.iter().zip(&paths).enumerate() {
+                            let index = first_page + offset;
                             let selected = index == window.selected;
                             let row = result_row(ui, p, hit, path, selected);
                             if row.clicked() {
@@ -277,7 +326,7 @@ impl SilexApp {
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(
-                                    "↑ ↓ para moverte · Intro para abrir · Esc para cerrar",
+                                    "↑ ↓ para moverte · Intro para elegir · Esc para cerrar",
                                 )
                                 .small()
                                 .color(p.text_muted),
@@ -308,19 +357,127 @@ impl SilexApp {
             };
             window = sent;
         }
-        // A click opens what is shown; Enter waits for current results.
-        let open = open.or_else(|| Self::ready_to_open(&mut window));
-        let chosen = open.and_then(|i| window.results.get(i).cloned());
+        // A click chooses what is shown; Enter waits for current entries.
+        let open = open.or_else(|| Self::ready_to_choose(&mut window));
+        let chosen = open.and_then(|i| window.entry(i));
         if chosen.is_none() && !modal.should_close() {
             self.search = Some(window);
             return;
         }
         // Closing: the worker thread ends with the window.
-        if let Some(hit) = chosen {
-            let result = self.open_search_hit(&hit);
-            self.report(result);
-        }
+        let result = match chosen {
+            Some(Entry::Page(hit)) => self.open_search_hit(&hit),
+            Some(Entry::Command(command)) => self.run_command(ctx, command),
+            None => Ok(()),
+        };
+        self.report(result);
     }
+}
+
+/// Small muted title above a group of entries.
+fn section(ui: &mut egui::Ui, p: &theme::Palette, title: &str) {
+    egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 14,
+            right: 14,
+            top: 6,
+            bottom: 4,
+        })
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(title).small().color(p.text_muted));
+        });
+}
+
+/// Background, focus outline and accessible name shared by all rows.
+fn row_frame(
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    height: f32,
+    selected: bool,
+    label: &str,
+) -> (egui::Rect, egui::Response) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, label));
+    let row = rect.shrink2(egui::vec2(theme::space::XS + 2.0, 0.0));
+    let fill = if selected {
+        p.accent_soft
+    } else if response.hovered() || response.has_focus() {
+        p.subtle
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    ui.painter()
+        .rect_filled(row, egui::CornerRadius::same(theme::radius::MD), fill);
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            row.shrink(0.5),
+            egui::CornerRadius::same(theme::radius::MD),
+            egui::Stroke::new(1.5, p.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    (row, response)
+}
+
+/// One command: icon, label and its keyboard shortcut at the right.
+fn command_row(
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    command: Command,
+    shortcut: Option<&str>,
+    selected: bool,
+) -> egui::Response {
+    let label = match shortcut {
+        Some(keys) => format!("{} ({keys})", command.label()),
+        None => command.label().to_owned(),
+    };
+    let (row, response) = row_frame(ui, p, COMMAND_ROW, selected, &label);
+    let painter = ui.painter_at(row);
+    let left = row.left() + theme::space::SM;
+    let cy = row.center().y;
+    painter.text(
+        egui::pos2(left, cy),
+        egui::Align2::LEFT_CENTER,
+        command_icon(command),
+        icons::font(theme::icon::MD),
+        if selected {
+            p.accent_strong
+        } else {
+            p.text_muted
+        },
+    );
+    let mut right = row.right() - theme::space::SM;
+    if let Some(keys) = shortcut {
+        let galley = painter.layout_no_wrap(
+            keys.to_owned(),
+            egui::FontId::proportional(12.0),
+            p.text_muted,
+        );
+        right -= galley.size().x;
+        painter.galley(
+            egui::pos2(right, cy - galley.size().y / 2.0),
+            galley,
+            p.text_muted,
+        );
+        right -= theme::space::MD;
+    }
+    let text_left = left + 26.0;
+    let mut job = LayoutJob::simple_singleline(
+        command.label().to_owned(),
+        egui::FontId::proportional(14.0),
+        p.text,
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width((right - text_left).max(0.0));
+    let galley = painter.layout_job(job);
+    painter.galley(
+        egui::pos2(text_left, cy - galley.size().y / 2.0),
+        galley,
+        p.text,
+    );
+    response
 }
 
 /// Thin line across the window.
@@ -389,10 +546,6 @@ fn result_row(
     let title_line = 20.0;
     let snippet_line = 18.0;
     let height = ROW_PADDING * 2.0 + title_line + snippet.map_or(0.0, |_| snippet_line);
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
-        egui::Sense::click(),
-    );
     let label = {
         let title: String = title_parts.iter().map(|t| t.text.as_str()).collect();
         let mut label = title;
@@ -405,27 +558,7 @@ fn result_row(
         }
         label
     };
-    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, &label));
-
-    let row = rect.shrink2(egui::vec2(theme::space::XS + 2.0, 0.0));
-    let fill = if selected {
-        p.accent_soft
-    } else if response.hovered() || response.has_focus() {
-        p.subtle
-    } else {
-        egui::Color32::TRANSPARENT
-    };
-    ui.painter()
-        .rect_filled(row, egui::CornerRadius::same(theme::radius::MD), fill);
-    if response.has_focus() {
-        ui.painter().rect_stroke(
-            row.shrink(0.5),
-            egui::CornerRadius::same(theme::radius::MD),
-            egui::Stroke::new(1.5, p.accent),
-            egui::StrokeKind::Inside,
-        );
-    }
-
+    let (row, response) = row_frame(ui, p, height, selected, &label);
     let painter = ui.painter_at(row);
     let left = row.left() + theme::space::SM;
     let top = row.top() + ROW_PADDING;

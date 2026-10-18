@@ -251,6 +251,23 @@ fn every_control_has_a_name() -> anyhow::Result<()> {
         harness.run();
     }
 
+    search_button(&harness).click();
+    harness.run();
+    assert_accessible(&harness, "command palette");
+    let command = harness
+        .get_all_by_label("Nueva página (Cmd+N)")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button);
+    assert!(command.is_some(), "command row is named with its shortcut");
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+
+    harness.state_mut().shortcuts_dialog = true;
+    harness.run();
+    assert_accessible(&harness, "shortcuts dialog");
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    assert!(!harness.state().shortcuts_dialog);
+
     open_search(&mut harness, "dise");
     assert_accessible(&harness, "search results");
     // Each result is a button named with its title, path and snippet.
@@ -417,4 +434,15 @@ fn search_window_dark() -> anyhow::Result<()> {
     snapshot_with("search_window_dark", eframe::egui::Theme::Dark, |harness| {
         open_search(harness, "dise");
     })
+}
+
+#[test]
+fn command_palette() -> anyhow::Result<()> {
+    snapshot_with(
+        "command_palette_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            search_button(harness).click();
+        },
+    )
 }

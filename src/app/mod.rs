@@ -16,6 +16,7 @@ mod dialogs;
 mod document;
 pub mod icons;
 mod jobs;
+mod palette;
 mod search;
 mod sidebar;
 #[cfg(test)]
@@ -38,6 +39,8 @@ pub struct SilexApp {
     favorites: Vec<Page>,
     /// The search window (Cmd+K), while open.
     search: Option<SearchWindow>,
+    /// The keyboard shortcuts window (from the command palette).
+    shortcuts_dialog: bool,
     rename: Option<Rename>,
     selected: Option<String>,
     title: String,
@@ -133,6 +136,7 @@ impl SilexApp {
             trash_dialog: None,
             favorites: Vec::new(),
             search: None,
+            shortcuts_dialog: false,
             rename: None,
             selected: None,
             title: String::new(),
@@ -478,6 +482,7 @@ impl SilexApp {
         }
         self.handle_close_request(&ctx);
         self.search_window(&ctx);
+        self.shortcuts_dialog(&ctx);
         self.close_dialog(&ctx);
         self.restore_dialog(&ctx);
         self.trash_dialog(&ctx);
