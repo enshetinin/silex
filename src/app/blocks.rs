@@ -96,18 +96,76 @@ const GUTTER: f32 = 28.0;
 /// markers line up with the first line of text.
 const TEXT_TOP: f32 = 2.0;
 
+/// Slot for a list marker (checkbox, bullet, number, quote bar). With the
+/// item spacing after it, list text starts one indent level in, so a nested
+/// item's marker sits under its parent's text.
+const MARKER_WIDTH: f32 = INDENT_WIDTH - 8.0;
+
+/// Extra space above a heading that follows another block.
+pub(super) fn heading_space(kind: BlockKind) -> f32 {
+    match kind {
+        BlockKind::Heading1 => theme::space::LG,
+        BlockKind::Heading2 => theme::space::MD,
+        BlockKind::Heading3 => theme::space::SM,
+        _ => 0.0,
+    }
+}
+
 /// Indents a row (title, menus, buttons) to where block text starts.
 fn gutter_space(ui: &mut egui::Ui) {
     ui.add_space(GUTTER + ui.spacing().item_spacing.x);
 }
 
-/// A list marker or checkbox, nudged down to the first line of text.
-fn marker(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> egui::Response) -> egui::Response {
-    ui.vertical(|ui| {
-        ui.add_space(TEXT_TOP);
-        add(ui)
-    })
-    .inner
+/// Reserves the marker slot, as tall as the first line of text. Returns its
+/// rect; markers are painted centered on that line.
+fn marker_slot(ui: &mut egui::Ui, line: f32, sense: egui::Sense) -> (egui::Rect, egui::Response) {
+    ui.allocate_exact_size(egui::vec2(MARKER_WIDTH, line), sense)
+}
+
+/// To-do checkbox: a rounded box, filled with the accent and ticked when
+/// done, centered on the first line of text.
+fn todo_checkbox(ui: &mut egui::Ui, line: f32, checked: &mut bool) -> egui::Response {
+    let p = theme::current(ui.ctx());
+    let (rect, mut response) = marker_slot(ui, line, egui::Sense::click());
+    if response.clicked() {
+        *checked = !*checked;
+        response.mark_changed();
+    }
+    let on = *checked;
+    let enabled = ui.is_enabled();
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, on, ""));
+    let b = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
+    let radius = egui::CornerRadius::same(theme::radius::SM);
+    let painter = ui.painter();
+    if on {
+        painter.rect_filled(b, radius, p.accent);
+        let point = |x: f32, y: f32| b.min + egui::vec2(x, y);
+        painter.line(
+            vec![point(4.0, 8.3), point(6.8, 11.0), point(12.0, 5.3)],
+            egui::Stroke::new(1.8, p.on_accent),
+        );
+    } else {
+        let color = if response.hovered() {
+            p.text_muted
+        } else {
+            p.text_faint
+        };
+        painter.rect_stroke(
+            b,
+            radius,
+            egui::Stroke::new(1.5, color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if response.has_focus() {
+        painter.rect_stroke(
+            b.expand(2.0),
+            egui::CornerRadius::same(theme::radius::MD),
+            egui::Stroke::new(1.5, p.accent),
+            egui::StrokeKind::Outside,
+        );
+    }
+    response
 }
 
 /// Id of a block handle's menu (stable, so the handle can stay visible
@@ -173,37 +231,38 @@ pub(super) fn block_field(
                 None
             };
             ui.add_space(f32::from(block.indent) * INDENT_WIDTH);
+            // Height of the first line of body text (text margin included):
+            // markers center on it, and it is the minimum height of a block
+            // (the theme's 28 px interact height made every block too tall).
+            let body = egui::TextStyle::Body.resolve(ui.style());
+            let line = ui.fonts_mut(|f| f.row_height(&body)) + 2.0 * TEXT_TOP;
+            ui.spacing_mut().interact_size.y = line;
             let mut other_changed = false;
+            let mut quote_slot = None;
             match block.kind {
                 BlockKind::Todo => {
-                    // A checkbox centers its box in the theme's 28 px interact
-                    // height; make that the first line's height (text margin +
-                    // line) and drop the label gap so the box sits on the text.
-                    other_changed |= ui
-                        .scope(|ui| {
-                            ui.spacing_mut().interact_size.y = 18.0 + 2.0 * TEXT_TOP;
-                            ui.spacing_mut().icon_spacing = 0.0;
-                            ui.checkbox(&mut block.checked, "")
-                                .accessible_name("Tarea completada")
-                        })
-                        .inner
+                    other_changed |= todo_checkbox(ui, line, &mut block.checked)
+                        .accessible_name("Tarea completada")
                         .changed();
                 }
                 BlockKind::Bulleted => {
-                    marker(ui, |ui| {
-                        ui.label(egui::RichText::new("•").color(p.text_muted))
-                    });
+                    let (slot, _) = marker_slot(ui, line, egui::Sense::hover());
+                    ui.painter().circle_filled(slot.center(), 2.5, p.text_muted);
                 }
                 BlockKind::Numbered => {
-                    let number = format!("{}.", view.number.unwrap_or(1));
-                    marker(ui, |ui| {
-                        ui.label(egui::RichText::new(number).color(p.text_muted))
-                    });
+                    let (slot, _) = marker_slot(ui, line, egui::Sense::hover());
+                    // Right-aligned, so "9." and "10." end at the same place.
+                    ui.painter().text(
+                        slot.right_center(),
+                        egui::Align2::RIGHT_CENTER,
+                        format!("{}.", view.number.unwrap_or(1)),
+                        body.clone(),
+                        p.text_muted,
+                    );
                 }
                 BlockKind::Quote => {
-                    let (bar, _) =
-                        ui.allocate_exact_size(egui::vec2(3.0, 22.0), egui::Sense::hover());
-                    ui.painter().rect_filled(bar, 1.5, p.border);
+                    // The bar is painted once the text's height is known.
+                    quote_slot = Some(marker_slot(ui, line, egui::Sense::hover()).0);
                 }
                 _ => {}
             }
@@ -218,6 +277,19 @@ pub(super) fn block_field(
                 BlockKind::Heading3 => egui::TextStyle::Name(theme::text::H3.into()),
                 BlockKind::Code => egui::TextStyle::Monospace,
                 _ => egui::TextStyle::Body,
+            };
+            // A done to-do: muted and struck through.
+            let mut strikethrough = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
+                let format = egui::TextFormat {
+                    font_id: egui::TextStyle::Body.resolve(ui.style()),
+                    color: p.text_muted,
+                    strikethrough: egui::Stroke::new(1.0, p.text_muted),
+                    ..Default::default()
+                };
+                let mut job =
+                    egui::text::LayoutJob::single_section(text.as_str().to_owned(), format);
+                job.wrap.max_width = wrap;
+                ui.fonts_mut(|f| f.layout_job(job))
             };
             let mut edit = if block.kind.is_heading() {
                 TextEdit::singleline(&mut block.content)
@@ -237,12 +309,19 @@ pub(super) fn block_field(
                 );
             }
             if block.kind == BlockKind::Todo && block.checked {
-                edit = edit.text_color(p.text_muted);
+                edit = edit.text_color(p.text_muted).layouter(&mut strikethrough);
             }
             if let Some(text) = placeholder {
                 edit = edit.hint_text(egui::RichText::new(text).color(p.text_faint));
             }
             let output = edit.show(ui);
+            if let Some(slot) = quote_slot {
+                let bar = egui::Rect::from_min_max(
+                    slot.left_top() + egui::vec2(2.0, 2.0),
+                    egui::pos2(slot.left() + 5.0, output.response.rect.bottom() - 2.0),
+                );
+                ui.painter().rect_filled(bar, 1.5, p.border);
+            }
             // Screen readers announce the block type ("Tarea", "Título 1"…).
             let response =
                 egui::Response::clone(&output.response).accessible_name(block.kind.label());
@@ -303,7 +382,7 @@ fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<
         rect.center(),
         egui::Align2::CENTER_CENTER,
         icons::DRAG_HANDLE,
-        icons::font(15.0),
+        icons::font(theme::icon::MD),
         p.text_muted,
     );
     let handle = handle.on_hover_text("Acciones del bloque");
@@ -986,6 +1065,9 @@ impl SilexApp {
                                     || egui::Popup::is_id_open(&ctx, handle_menu_id(&block.id)),
                                 focused: focused == Some(field),
                             };
+                            if index > 0 {
+                                ui.add_space(heading_space(block.kind));
+                            }
                             let out = block_field(ui, self.doc_generation, block, &view);
                             if pointer.is_some_and(|p| out.rect.contains(p)) {
                                 hovered = Some(block.id.clone());
@@ -1022,7 +1104,11 @@ impl SilexApp {
 
                         ui.add_space(theme::space::SM);
                         ui.horizontal(|ui| {
-                            gutter_space(ui);
+                            // The "+" lines up with the text, not the button's edge.
+                            ui.add_space(
+                                GUTTER + ui.spacing().item_spacing.x
+                                    - ui.spacing().button_padding.x,
+                            );
                             let add = ui
                                 .add(
                                     egui::Button::new((
@@ -1088,7 +1174,11 @@ impl SilexApp {
                 {
                     action = Some(RowAction::Open(id.clone()));
                 }
-                ui.label(icons::icon(icons::CARET_RIGHT).small().color(p.text_faint));
+                ui.label(
+                    icons::icon(icons::CARET_RIGHT)
+                        .size(14.0)
+                        .color(p.text_faint),
+                );
             }
             ui.label(egui::RichText::new(display_title(&self.title)).color(p.text));
 

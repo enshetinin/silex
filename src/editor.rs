@@ -197,8 +197,9 @@ pub fn slash_query(content: &str, cursor: usize) -> Option<&str> {
     (cursor == word_len + 1 && word_len <= MAX_SLASH_QUERY).then_some(word)
 }
 
-/// Lowercase without Spanish accents, so "codigo" finds "Código".
-fn fold(text: &str) -> String {
+/// Lowercase without Spanish accents, so "codigo" finds "Código" and
+/// "pequeno" finds "pequeño" (slash menu and command palette).
+pub(crate) fn fold(text: &str) -> String {
     text.chars()
         .flat_map(char::to_lowercase)
         .map(|c| match c {
@@ -207,6 +208,7 @@ fn fold(text: &str) -> String {
             'í' | 'ì' | 'ï' => 'i',
             'ó' | 'ò' | 'ö' => 'o',
             'ú' | 'ù' | 'ü' => 'u',
+            'ñ' => 'n',
             other => other,
         })
         .collect()

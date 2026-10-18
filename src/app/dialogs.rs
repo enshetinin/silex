@@ -89,6 +89,24 @@ impl SilexApp {
         }
     }
 
+    /// Keyboard shortcuts in a window (the sidebar shows them in a menu).
+    pub(super) fn shortcuts_dialog(&mut self, ctx: &egui::Context) {
+        if !self.shortcuts_dialog {
+            return;
+        }
+        let response =
+            egui::Modal::new(egui::Id::unique("silex_shortcuts_dialog")).show(ctx, |ui| {
+                ui.heading("Atajos de teclado");
+                ui.add_space(theme::space::SM);
+                Self::shortcuts_help(ui);
+                ui.add_space(theme::space::MD);
+                ui.button("Cerrar").clicked()
+            });
+        if response.inner || response.should_close() {
+            self.shortcuts_dialog = false;
+        }
+    }
+
     /// "Exportada a …" with a button to open the folder.
     pub(super) fn export_bar(&mut self, ui: &mut egui::Ui) {
         let Some(path) = self.last_export.clone() else {
@@ -240,7 +258,7 @@ impl SilexApp {
         match self.save.status() {
             SaveStatus::Saved => {
                 ui.label(egui::RichText::new("Guardado").small().color(p.text_muted));
-                ui.label(icons::icon(icons::CHECK).small().color(p.text_muted));
+                ui.label(icons::icon(icons::CHECK).size(14.0).color(p.text_muted));
             }
             SaveStatus::Dirty => {
                 ui.label(

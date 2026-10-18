@@ -191,6 +191,22 @@ fn assert_accessible(harness: &Harness<'_, SilexApp>, state: &str) {
     );
 }
 
+/// The sidebar's "Buscar" button (its name also holds the shortcut).
+fn search_button<'h>(harness: &'h Harness<'_, SilexApp>) -> egui_kittest::Node<'h> {
+    harness
+        .get_all_by_label_contains("Buscar")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .expect("search button")
+}
+
+/// Opens the search window from the sidebar and types `query`.
+fn open_search(harness: &mut Harness<'_, SilexApp>, query: &str) {
+    search_button(harness).click();
+    harness.run();
+    harness.event(egui::Event::Text(query.into()));
+    harness.run();
+}
+
 fn click_button(harness: &mut Harness<'_, SilexApp>, label: &str) {
     harness
         .get_all_by_label(label)
@@ -235,11 +251,34 @@ fn every_control_has_a_name() -> anyhow::Result<()> {
         harness.run();
     }
 
-    harness.state_mut().query = "receta".into();
+    search_button(&harness).click();
     harness.run();
-    assert_accessible(&harness, "search results");
+    assert_accessible(&harness, "command palette");
+    let command = harness
+        .get_all_by_label("Nueva página (Cmd+N)")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button);
+    assert!(command.is_some(), "command row is named with its shortcut");
+    harness.key_press(egui::Key::Escape);
+    harness.run();
 
-    harness.state_mut().query.clear();
+    harness.state_mut().shortcuts_dialog = true;
+    harness.run();
+    assert_accessible(&harness, "shortcuts dialog");
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    assert!(!harness.state().shortcuts_dialog);
+
+    open_search(&mut harness, "dise");
+    assert_accessible(&harness, "search results");
+    // Each result is a button named with its title, path and snippet.
+    let result = harness
+        .get_all_by_label_contains("Diseño de la interfaz, en Proyecto Silex")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button);
+    assert!(result.is_some(), "result row is named");
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    assert!(harness.state().search.is_none());
+
     harness.state_mut().selected = None;
     harness.run();
     assert_accessible(&harness, "no page open");
@@ -301,10 +340,9 @@ fn keyboard_focus_is_visible() -> anyhow::Result<()> {
         "keyboard_focus_light",
         eframe::egui::Theme::Light,
         |harness| {
-            // Tab from the search field to the first tree rows.
-            harness
-                .ctx
-                .memory_mut(|m| m.request_focus(super::sidebar::search_id()));
+            // Tab from the search button: the footer comes before the tree
+            // (its panel is laid out first).
+            search_button(harness).focus();
             harness.run();
             for _ in 0..3 {
                 harness.key_press(egui::Key::Tab);
@@ -378,4 +416,87 @@ fn slash_menu() -> anyhow::Result<()> {
         click_button(harness, "Añadir bloque");
         harness.event(egui::Event::Text("/".into()));
     })
+}
+
+#[test]
+fn search_window() -> anyhow::Result<()> {
+    snapshot_with(
+        "search_window_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            open_search(harness, "dise");
+        },
+    )
+}
+
+#[test]
+fn search_window_dark() -> anyhow::Result<()> {
+    snapshot_with("search_window_dark", eframe::egui::Theme::Dark, |harness| {
+        open_search(harness, "dise");
+    })
+}
+
+#[test]
+fn command_palette() -> anyhow::Result<()> {
+    snapshot_with(
+        "command_palette_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            search_button(harness).click();
+        },
+    )
+}
+
+// ---- Startup error window (shown when the app cannot open its data). ----
+
+fn startup_error_harness() -> Harness<'static, super::StartupError> {
+    let err = anyhow::anyhow!("La base de datos usa un esquema más reciente (9)");
+    let path = std::path::Path::new(
+        "/Users/ana/Library/Application Support/dev.silex.Silex/silex.sqlite3",
+    );
+    let mut harness = Harness::builder()
+        .with_size([760.0, 420.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .build_ui_state(
+            |ui, window: &mut super::StartupError| window.update_ui(ui),
+            super::StartupError::new(&err, Some(path)),
+        );
+    harness.run();
+    harness
+}
+
+#[test]
+fn startup_error_shows_the_error_and_copies_it() {
+    let mut harness = startup_error_harness();
+    let unnamed = harness.unnamed_widgets();
+    assert!(unnamed.is_empty(), "unnamed widgets:\n{unnamed:#?}");
+    assert!(
+        harness
+            .query_by_label_contains("esquema más reciente")
+            .is_some()
+    );
+    assert!(harness.query_by_label_contains("dev.silex.Silex").is_some());
+    harness.get_by_label("Copiar el error").click();
+    // One frame: its output holds the copy command.
+    harness.step();
+    let copied = harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t.contains("esquema") && t.contains("silex.sqlite3")));
+    assert!(copied, "the error and the file are copied");
+    assert!(harness.query_by_label("Cerrar").is_some());
+}
+
+#[test]
+fn startup_error() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = startup_error_harness();
+    harness.run();
+    harness.snapshot("startup_error_light");
+    Ok(())
 }

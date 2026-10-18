@@ -106,9 +106,33 @@ impl Settings {
     }
 }
 
+/// The next interface size in [`ZOOM_STEPS`] above (`up`) or below the
+/// current one; `None` at the ends. A size between steps (keyboard zoom)
+/// goes to the nearest step in that direction.
+pub fn zoom_step(current: u16, up: bool) -> Option<u16> {
+    if up {
+        ZOOM_STEPS.into_iter().find(|&step| step > current)
+    } else {
+        ZOOM_STEPS.into_iter().rev().find(|&step| step < current)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_steps_up_and_down_and_stop_at_the_ends() {
+        assert_eq!(zoom_step(100, true), Some(110));
+        assert_eq!(zoom_step(100, false), Some(90));
+        assert_eq!(zoom_step(150, true), None);
+        assert_eq!(zoom_step(80, false), None);
+        // Between steps (e.g. 115 % from the keyboard), or outside them.
+        assert_eq!(zoom_step(115, true), Some(125));
+        assert_eq!(zoom_step(115, false), Some(110));
+        assert_eq!(zoom_step(200, false), Some(150));
+        assert_eq!(zoom_step(50, true), Some(80));
+    }
 
     #[test]
     fn roundtrip_through_pairs() {

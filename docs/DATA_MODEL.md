@@ -16,7 +16,7 @@
 - `created_at`, `updated_at`.
 
 ### Búsqueda
-`page_search` y `block_search` son tablas virtuales FTS5 external-content que consultan el `rowid` de tablas normales. Triggers mantienen índices tras inserciones, cambios y eliminaciones. Los resultados filtran páginas con `deleted_at IS NULL`.
+`page_search` y `block_search` son tablas virtuales FTS5 external-content que consultan el `rowid` de tablas normales. Triggers mantienen índices tras inserciones, cambios y eliminaciones. Los resultados filtran páginas con `deleted_at IS NULL`. La búsqueda global (H5.7, `Database::search`) usa prefijos, `bm25`, `snippet()` y `highlight()` sobre estas mismas tablas, sin cambiar el esquema (véase `ARCHITECTURE.md`).
 
 ## Versión 2 — favoritos (`0002_favorites.sql`)
 - `pages.favorite_at TEXT NULL`: `NULL` significa que no es favorita; la fecha ordena la lista de favoritos (de más antigua a más reciente). Índice parcial `pages_favorite_idx`.
@@ -46,7 +46,7 @@
 - Anidación: `Database::move_page` rechaza ciclos con una consulta recursiva dentro de la transacción (comprobación de la app, no un trigger). Con la papelera por ramas (H2.3) ya no se crean páginas huérfanas; si existieran (datos antiguos o borrados desde otra conexión), se muestran en la raíz. Si los datos contuvieran un ciclo, `build_tree` no entra en bucle y muestra esas páginas en la raíz.
 - SQLite no está cifrada.
 - Falta backup/restauración con interfaz de usuario.
-- FTS frase exacta; el UX de búsqueda necesita ranking, snippets, prefijos y normalización.
+- Búsqueda (H5.7): prefijos, orden por `bm25`, fragmentos y sin acentos. Límites: no encuentra texto en mitad de una palabra («tilo» no encuentra «estilo»), ni páginas con unas palabras en el título y otras en un bloque. Las búsquedas con muchas coincidencias tardan ~80 ms con 50 000 bloques (en un hilo aparte, sin bloquear la UI); un índice de prefijos (`prefix='2 3'`) podría acelerarlo (sin medir), pero exige reconstruir las tablas FTS con una migración.
 - Papelera por ramas sin columna nueva: el grupo se identifica por `deleted_at` (resolución de ms, único por operación). Una subpágina borrada antes que su padre es un elemento aparte en la papelera y no vuelve al restaurar al padre. Si en el futuro se necesitan más metadatos del borrado (quién o por qué), hará falta una tabla `trash_batches` con su migración.
 - FTS external-content se enlaza por el `rowid` implícito de `pages`/`blocks` (PK `TEXT`). SQLite documenta que `VACUUM` puede cambiar esos `rowid`. Por eso las copias usan la API de backup (copia páginas y conserva `rowid`), no `VACUUM INTO`, y cada copia pasa el `integrity-check` de FTS5 contra su tabla de contenido (test `verify_detects_search_index_out_of_sync`). No ejecutar `VACUUM` sin un `rebuild` posterior del índice.
 - Si un guardado falla, los cambios siguen en memoria, el error se muestra y se reintenta con backoff (`src/save_state.rs`). Cerrar la ventana con cambios sin guardar se bloquea hasta reintentar con éxito o descartar explícitamente. Si el proceso termina sin petición de cierre (p. ej. lo mata el sistema), solo queda el último guardado automático.

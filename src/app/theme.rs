@@ -39,10 +39,13 @@ pub struct Palette {
     pub danger: Color32,
     pub warning: Color32,
     pub success: Color32,
-    /// Sidebar (dark in both themes, as in Asana-style layouts).
+    /// Sidebar: same family as the canvas; the selected page is tinted
+    /// with the accent and marked with a bar on its left edge.
     pub sidebar_bg: Color32,
     pub sidebar_hover: Color32,
     pub sidebar_selected: Color32,
+    /// Label, icon and left bar of the selected page.
+    pub sidebar_selected_text: Color32,
     pub sidebar_text: Color32,
     pub sidebar_muted: Color32,
     pub code_bg: Color32,
@@ -55,49 +58,51 @@ const fn hex(rgb: u32) -> Color32 {
 pub const LIGHT: Palette = Palette {
     bg: hex(0xFFFFFF),
     surface: hex(0xFFFFFF),
-    subtle: hex(0xF3F3F4),
-    pressed: hex(0xE7E7E9),
-    border: hex(0xE6E6E8),
-    text: hex(0x1E1F21),
-    text_muted: hex(0x636466),
-    text_faint: hex(0x8E8F91),
-    accent: hex(0xE5534B),
-    accent_strong: hex(0xC2332B),
+    subtle: hex(0xF2F4F7),
+    pressed: hex(0xE6E9EE),
+    border: hex(0xE3E6EB),
+    text: hex(0x1A1D22),
+    text_muted: hex(0x5D6470),
+    text_faint: hex(0x8C939E),
+    accent: hex(0x2F8FE0),
+    accent_strong: hex(0x1F6FB8),
     on_accent: hex(0xFFFFFF),
-    accent_soft: hex(0xFCEBEA),
+    accent_soft: hex(0xE6F1FC),
     danger: hex(0xC62828),
     warning: hex(0x9A5800),
     success: hex(0x2E7D32),
-    sidebar_bg: hex(0x1E1F21),
-    sidebar_hover: hex(0x2B2C2E),
-    sidebar_selected: hex(0x37383B),
-    sidebar_text: hex(0xF1F1F1),
-    sidebar_muted: hex(0xA4A5A7),
-    code_bg: hex(0xF5F5F6),
+    sidebar_bg: hex(0xF7F8FA),
+    sidebar_hover: hex(0xECEEF2),
+    sidebar_selected: hex(0xE1EDFB),
+    sidebar_selected_text: hex(0x1A62A8),
+    sidebar_text: hex(0x1A1D22),
+    sidebar_muted: hex(0x5D6470),
+    code_bg: hex(0xF4F5F7),
 };
 
 pub const DARK: Palette = Palette {
-    bg: hex(0x1B1C1E),
-    surface: hex(0x242527),
-    subtle: hex(0x2B2C2F),
-    pressed: hex(0x35363A),
-    border: hex(0x3A3B3E),
-    text: hex(0xECECED),
-    text_muted: hex(0xA6A7AA),
-    text_faint: hex(0x75767A),
-    accent: hex(0xF0786F),
-    accent_strong: hex(0xF0786F),
-    on_accent: hex(0x1B1C1E),
-    accent_soft: hex(0x3B2523),
+    bg: hex(0x0F1114),
+    surface: hex(0x1A1D22),
+    subtle: hex(0x1A1E24),
+    pressed: hex(0x242930),
+    border: hex(0x262B32),
+    text: hex(0xE8EAED),
+    text_muted: hex(0xA0A7B1),
+    text_faint: hex(0x6E7680),
+    accent: hex(0x5AB4F5),
+    accent_strong: hex(0x6BBEF7),
+    on_accent: hex(0x0F1114),
+    accent_soft: hex(0x142536),
     danger: hex(0xEF6B6B),
     warning: hex(0xE0A04B),
-    success: hex(0x6CC07A),
-    sidebar_bg: hex(0x141517),
-    sidebar_hover: hex(0x222326),
-    sidebar_selected: hex(0x2C2D30),
-    sidebar_text: hex(0xECECED),
-    sidebar_muted: hex(0x9C9DA0),
-    code_bg: hex(0x2B2C2F),
+    success: hex(0x5BC583),
+    sidebar_bg: hex(0x0F1114),
+    sidebar_hover: hex(0x1A1E24),
+    sidebar_selected: hex(0x142536),
+    sidebar_selected_text: hex(0x7CC4F8),
+    sidebar_text: hex(0xE8EAED),
+    sidebar_muted: hex(0xA0A7B1),
+    code_bg: hex(0x1A1E24),
 };
 
 /// Spacing scale (px). Use these instead of ad-hoc numbers.
@@ -115,6 +120,12 @@ pub mod radius {
     pub const SM: u8 = 4;
     pub const MD: u8 = 6;
     pub const LG: u8 = 10;
+}
+
+/// Icon sizes (px): 18 in rows, menus and toolbars; 20 in the window frame.
+pub mod icon {
+    pub const MD: f32 = 18.0;
+    pub const LG: f32 = 20.0;
 }
 
 /// Named text styles beyond egui's built-in ones.
@@ -341,6 +352,18 @@ mod tests {
             ("text_muted / bg", p.text_muted, p.bg, TEXT),
             ("text_muted / surface", p.text_muted, p.surface, TEXT),
             ("text_muted / subtle", p.text_muted, p.subtle, TEXT),
+            (
+                "text_muted / accent_soft (selected search result)",
+                p.text_muted,
+                p.accent_soft,
+                TEXT,
+            ),
+            (
+                "accent_strong / accent_soft (selected result icon)",
+                p.accent_strong,
+                p.accent_soft,
+                NON_TEXT,
+            ),
             ("accent_strong / bg (links)", p.accent_strong, p.bg, TEXT),
             (
                 "on_accent / accent_strong",
@@ -369,6 +392,13 @@ mod tests {
                 p.sidebar_selected,
                 TEXT,
             ),
+            (
+                "sidebar_selected_text / sidebar_selected",
+                p.sidebar_selected_text,
+                p.sidebar_selected,
+                TEXT,
+            ),
+            ("accent / bg (checked to-do)", p.accent, p.bg, NON_TEXT),
             (
                 "sidebar_muted / sidebar_bg",
                 p.sidebar_muted,
@@ -425,6 +455,10 @@ mod tests {
         };
         assert!(has('ñ', FontFamily::Proportional));
         assert!(has('ñ', FontFamily::Name(SEMIBOLD.into())));
+        // Used by the search window and breadcrumbs.
+        for c in ['↑', '↓', '›', '…', '«', '»'] {
+            assert!(has(c, FontFamily::Proportional), "{c:?}");
+        }
 
         // The icon family is Phosphor alone, and text families never use it.
         let fonts = fonts();

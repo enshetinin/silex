@@ -16,14 +16,28 @@ mod dialogs;
 mod document;
 pub mod icons;
 mod jobs;
+mod palette;
+mod search;
 mod sidebar;
 #[cfg(test)]
 mod snapshots;
+mod startup;
 #[cfg(test)]
 mod tests;
 pub mod theme;
 
-use self::{blocks::*, dialogs::*, sidebar::*};
+pub use self::startup::StartupError;
+use self::{blocks::*, dialogs::*, search::*, sidebar::*};
+
+/// Window id on Linux (Wayland app id, X11 class). Matches the desktop
+/// entry the Linux packages install (`silex-desktop.desktop`, ADR 0005).
+pub const APP_ID: &str = "silex-desktop";
+
+/// The app icon for the window, taskbar and (unbundled) macOS Dock.
+/// `None` if the embedded image cannot be read: the app starts anyway.
+pub fn window_icon() -> Option<egui::IconData> {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../assets/app-icon/silex-512.png")).ok()
+}
 
 pub struct SilexApp {
     db: Database,
@@ -35,10 +49,10 @@ pub struct SilexApp {
     trash_count: usize,
     trash_dialog: Option<TrashDialog>,
     favorites: Vec<Page>,
-    /// Search results, recomputed only when the query or the pages change.
-    filtered: Vec<TreeRow>,
-    content_matches: Vec<Page>,
-    searched_query: Option<String>,
+    /// The search window (Cmd+K), while open.
+    search: Option<SearchWindow>,
+    /// The keyboard shortcuts window (from the command palette).
+    shortcuts_dialog: bool,
     rename: Option<Rename>,
     selected: Option<String>,
     title: String,
@@ -51,7 +65,6 @@ pub struct SilexApp {
     hovered_block: Option<String>,
     /// Theme and interface size (stored in the database).
     settings: Settings,
-    query: String,
     save: SaveState,
     /// Errors from actions other than saving (search, create, open).
     notice: Option<String>,
@@ -134,9 +147,8 @@ impl SilexApp {
             trash_count: 0,
             trash_dialog: None,
             favorites: Vec::new(),
-            filtered: Vec::new(),
-            content_matches: Vec::new(),
-            searched_query: None,
+            search: None,
+            shortcuts_dialog: false,
             rename: None,
             selected: None,
             title: String::new(),
@@ -145,7 +157,6 @@ impl SilexApp {
             theme_installed: false,
             hovered_block: None,
             settings: Settings::default(),
-            query: String::new(),
             save: SaveState::default(),
             notice: None,
             close_dialog: false,
@@ -211,7 +222,6 @@ impl SilexApp {
         self.trash_count = self.db.trash_count()?;
         self.favorites = self.db.list_favorites()?;
         self.rebuild_tree();
-        self.searched_query = None;
         Ok(())
     }
 
@@ -320,9 +330,19 @@ impl SilexApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut as Sc, Modifiers as M};
         let pressed = |sc: Sc| ctx.input_mut(|i| i.consume_shortcut(&sc));
+        // Cmd+K opens and closes the search window. While it is open no
+        // other shortcut runs: the window has the keyboard.
+        if pressed(Sc::new(M::COMMAND, Key::K)) {
+            if self.search.take().is_none() {
+                self.open_search(ctx);
+            }
+            return;
+        }
+        if self.search.is_some() {
+            return;
+        }
         let new_subpage = pressed(Sc::new(M::COMMAND | M::SHIFT, Key::N));
         let new_page = !new_subpage && pressed(Sc::new(M::COMMAND, Key::N));
-        let search = pressed(Sc::new(M::COMMAND, Key::K));
         // Exact Alt only: Alt+Shift+↑/↓ moves blocks instead.
         let previous = take_exact_key(ctx, Key::ArrowUp, M::ALT);
         let next = take_exact_key(ctx, Key::ArrowDown, M::ALT);
@@ -332,9 +352,6 @@ impl SilexApp {
                 || pressed(Sc::new(M::COMMAND, Key::Y)));
         let undo = document && !redo && pressed(Sc::new(M::COMMAND, Key::Z));
         let rename = pressed(Sc::new(M::NONE, Key::F2));
-        let search_focused = ctx.memory(|m| m.has_focus(search_id()));
-        let clear_search =
-            search_focused && !self.query.is_empty() && pressed(Sc::new(M::NONE, Key::Escape));
 
         let result = (|| -> Result<()> {
             if new_subpage && let Some(id) = self.selected.clone() {
@@ -342,9 +359,6 @@ impl SilexApp {
             }
             if new_page {
                 self.create_root_page("Sin título")?;
-            }
-            if search {
-                ctx.memory_mut(|m| m.request_focus(search_id()));
             }
             if previous {
                 self.open_adjacent(-1)?;
@@ -354,9 +368,6 @@ impl SilexApp {
             }
             if rename && let Some(id) = self.selected.clone() {
                 self.start_rename(&id);
-            }
-            if clear_search {
-                self.query.clear();
             }
             if undo {
                 self.undo();
@@ -459,9 +470,12 @@ impl SilexApp {
             .rect_filled(ctx.content_rect(), 0.0, theme::current(&ctx).bg);
         self.handle_shortcuts(&ctx);
         self.handle_dropped_files(&ctx);
-        self.take_editor_key(&ctx);
-        self.apply_pending_focus(&ctx);
-        self.handle_selection_keys(&ctx);
+        // The search window has the keyboard while it is open.
+        if self.search.is_none() {
+            self.take_editor_key(&ctx);
+            self.apply_pending_focus(&ctx);
+            self.handle_selection_keys(&ctx);
+        }
         self.layout(ui);
         self.run_paste(&ctx);
         self.run_editor_key(&ctx);
@@ -479,6 +493,8 @@ impl SilexApp {
             let _ = self.save_now();
         }
         self.handle_close_request(&ctx);
+        self.search_window(&ctx);
+        self.shortcuts_dialog(&ctx);
         self.close_dialog(&ctx);
         self.restore_dialog(&ctx);
         self.trash_dialog(&ctx);
