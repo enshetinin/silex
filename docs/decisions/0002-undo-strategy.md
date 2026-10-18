@@ -1,6 +1,6 @@
 # ADR-0002 — Estrategia de deshacer/rehacer en el Hito 1
 
-**Estado:** aceptada (2026-10-18).
+**Estado:** sustituida por ADR-0004 (2026-10-18). Se conserva como registro.
 
 ## Contexto
 El Hito 1 pide «deshacer/rehacer de texto con estrategia documentada». Hoy el editor tiene un campo de texto egui por título y por bloque; las operaciones estructurales (añadir bloque, crear página, restaurar) se guardan directamente en SQLite. egui ya trae deshacer por campo (`TextEdit` + `Undoer`), pero su historial está ligado al `Id` del widget, que por defecto depende de la **posición** en pantalla. Al añadir un bloque o cambiar de página, el historial de un bloque podía aplicarse a otro.

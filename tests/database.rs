@@ -368,6 +368,19 @@ fn scale_smoke() -> anyhow::Result<()> {
     assert_eq!(db.search_pages("buscable")?.len(), 1);
     println!("search_pages: {:?}", t.elapsed());
 
+    // Cost of one undo snapshot (clone + compare) for a 1000-block page.
+    let mut big = Vec::new();
+    for id in &page_ids {
+        big.extend(db.list_blocks(id)?);
+    }
+    let t = Instant::now();
+    let copy = big.clone();
+    assert!(copy == big);
+    println!(
+        "instantánea de deshacer (1000 bloques, clonar + comparar): {:?}",
+        t.elapsed()
+    );
+
     let backups = std::env::temp_dir().join(format!("silex-scale-{}", uuid::Uuid::new_v4()));
     let t = Instant::now();
     let copy = silex_desktop::db::backup::create_backup(tmp.path(), &backups)?;

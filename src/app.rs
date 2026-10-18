@@ -8,6 +8,7 @@ use silex_desktop::{
         backup::{self, BackupJob},
     },
     editor,
+    history::{EditKind, History, Snapshot, first_difference},
     model::{
         Block, BlockKind, Page, TrashItem, TreeRow, ancestors, build_tree, descendants,
         filter_tree, list_numbers,
@@ -61,8 +62,10 @@ pub struct SilexApp {
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
     selection: Option<BlockSelection>,
-    /// Last selection delete, offered for undo until the page changes.
-    deleted: Option<editor::DeletedBlocks>,
+    /// Document undo/redo for the open page (ADR 0004).
+    history: History,
+    /// The document as of the last recorded change (the "before" of the next one).
+    shadow: Snapshot,
 }
 
 /// Cursor state of the focused block text field.
@@ -85,6 +88,11 @@ enum EditorKey {
     Outdent,
     Up,
     Down,
+    /// Alt+Shift+↑ / ↓: move the block.
+    MoveUp,
+    MoveDown,
+    /// Cmd/Ctrl+D: duplicate the block.
+    Duplicate,
     /// Escape: leave the text and select the block.
     Select,
     /// Enter in the slash menu: apply this type.
@@ -180,7 +188,11 @@ impl SilexApp {
             slash: None,
             slash_dismissed: None,
             selection: None,
-            deleted: None,
+            history: History::default(),
+            shadow: Snapshot {
+                title: String::new(),
+                blocks: Vec::new(),
+            },
         };
         app.backup_label = app.describe_last_backup();
         app.trash_count = app.db.trash_count()?;
@@ -199,9 +211,9 @@ impl SilexApp {
             self.slash = None;
             self.slash_dismissed = None;
             self.selection = None;
-            self.deleted = None;
             self.blocks = self.db.list_blocks(&id)?;
             self.title = page.title;
+            self.reset_history();
             // Make the open page visible in the tree.
             self.expanded.extend(ancestors(&self.pages, &id));
             self.selected = Some(id);
@@ -252,6 +264,7 @@ impl SilexApp {
                 self.selected = None;
                 self.title.clear();
                 self.blocks.clear();
+                self.reset_history();
                 Ok(())
             }
         }
@@ -709,7 +722,13 @@ impl SilexApp {
             }
             return;
         }
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(M::COMMAND, Key::D))) {
+            self.pending_key = Some((EditorKey::Duplicate, block.id.clone()));
+            return;
+        }
         let candidates = [
+            (EditorKey::MoveUp, Key::ArrowUp, M::ALT | M::SHIFT, true),
+            (EditorKey::MoveDown, Key::ArrowDown, M::ALT | M::SHIFT, true),
             (EditorKey::Select, Key::Escape, M::NONE, true),
             (
                 EditorKey::Enter,
@@ -745,11 +764,6 @@ impl SilexApp {
         let cursor = egui::text_edit::TextEditState::load(ctx, field)
             .and_then(|s| s.cursor.char_range())
             .map_or(0, |r| r.primary.index.0);
-        let before: Vec<(String, String)> = self
-            .blocks
-            .iter()
-            .map(|b| (b.id.clone(), b.content.clone()))
-            .collect();
         let caret = match command {
             EditorKey::Enter => editor::enter(&mut self.blocks, index, cursor, || {
                 uuid::Uuid::new_v4().to_string()
@@ -802,22 +816,23 @@ impl SilexApp {
                 self.slash = None;
                 editor::apply_slash(&mut self.blocks, index, cursor, kind)
             }
-        };
-        let structural = !matches!(command, EditorKey::Up | EditorKey::Down);
-        if structural {
-            // Text undo must not resurrect text that moved to another block.
-            for block in &self.blocks {
-                let same = before
-                    .iter()
-                    .any(|(id, content)| *id == block.id && *content == block.content);
-                if !same {
-                    let id = self.block_field_id(&block.id);
-                    if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, id) {
-                        state.clear_undoer();
-                        state.store(ctx, id);
-                    }
-                }
+            EditorKey::MoveUp | EditorKey::MoveDown => {
+                let up = command == EditorKey::MoveUp;
+                editor::move_range(&mut self.blocks, index, index, up).then(|| editor::Caret {
+                    block: if up { index - 1 } else { index + 1 },
+                    char: cursor,
+                })
             }
+            EditorKey::Duplicate => editor::duplicate_range(&mut self.blocks, index, index, || {
+                uuid::Uuid::new_v4().to_string()
+            })
+            .map(|(copy, _)| editor::Caret {
+                block: copy,
+                char: cursor,
+            }),
+        };
+        if !matches!(command, EditorKey::Up | EditorKey::Down) {
+            // One undo step per command (egui's per-field undo is not used, ADR 0004).
             self.mark_dirty();
         }
         if let Some(caret) = caret
@@ -880,6 +895,26 @@ impl SilexApp {
                     head: id,
                 });
             }
+        } else if step(Key::ArrowUp, M::ALT | M::SHIFT) {
+            if editor::move_range(&mut self.blocks, first, last, true) {
+                self.mark_dirty();
+            }
+        } else if step(Key::ArrowDown, M::ALT | M::SHIFT) {
+            if editor::move_range(&mut self.blocks, first, last, false) {
+                self.mark_dirty();
+            }
+        } else if ctx
+            .input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(M::COMMAND, Key::D)))
+        {
+            if let Some((a, b)) = editor::duplicate_range(&mut self.blocks, first, last, || {
+                uuid::Uuid::new_v4().to_string()
+            }) {
+                self.selection = Some(BlockSelection {
+                    anchor: self.blocks[a].id.clone(),
+                    head: self.blocks[b].id.clone(),
+                });
+                self.mark_dirty();
+            }
         } else if step(Key::Enter, M::NONE) {
             if let Some(block) = self.blocks.get(head) {
                 self.pending_focus = Some((block.id.clone(), editor::block_char_len(block)));
@@ -904,7 +939,15 @@ impl SilexApp {
         if deleted.removed.is_empty() {
             return;
         }
-        self.deleted = Some(deleted);
+        self.notice = Some(format!(
+            "Se eliminaron {} bloque(s). {}+Z para deshacer.",
+            deleted.removed.len(),
+            if cfg!(target_os = "macos") {
+                "Cmd"
+            } else {
+                "Ctrl"
+            }
+        ));
         self.selection = self
             .blocks
             .get(first.min(self.blocks.len().saturating_sub(1)))
@@ -913,14 +956,6 @@ impl SilexApp {
                 head: b.id.clone(),
             });
         self.mark_dirty();
-    }
-
-    fn undo_delete(&mut self) {
-        if let Some(deleted) = self.deleted.take() {
-            editor::restore_deleted(&mut self.blocks, deleted);
-            self.selection = None;
-            self.mark_dirty();
-        }
     }
 
     /// After layout: open, update or close the slash menu from the caret, and
@@ -962,20 +997,29 @@ impl SilexApp {
         });
     }
 
-    /// "N bloques eliminados · Deshacer" after deleting a selection.
-    fn deleted_bar(&mut self, ui: &mut egui::Ui) {
-        let Some(count) = self.deleted.as_ref().map(|d| d.removed.len()) else {
+    /// Runs an action from a block's "…" menu.
+    fn block_action(&mut self, action: BlockAction, id: &str) {
+        let Some(index) = self.blocks.iter().position(|b| b.id == id) else {
             return;
         };
-        ui.horizontal(|ui| {
-            ui.label(format!("Se eliminaron {count} bloque(s)."));
-            if ui.small_button("Deshacer").clicked() {
-                self.undo_delete();
+        let changed = match action {
+            BlockAction::MoveUp => editor::move_range(&mut self.blocks, index, index, true),
+            BlockAction::MoveDown => editor::move_range(&mut self.blocks, index, index, false),
+            BlockAction::Duplicate => {
+                editor::duplicate_range(&mut self.blocks, index, index, || {
+                    uuid::Uuid::new_v4().to_string()
+                })
+                .is_some()
             }
-            if ui.small_button("Cerrar").clicked() {
-                self.deleted = None;
+            BlockAction::Delete => {
+                self.delete_selection(index, index);
+                self.selection = None;
+                return;
             }
-        });
+        };
+        if changed {
+            self.mark_dirty();
+        }
     }
 
     /// Focuses the block chosen by the last editor command, with its cursor.
@@ -1006,8 +1050,14 @@ impl SilexApp {
         let new_subpage = pressed(Sc::new(M::COMMAND | M::SHIFT, Key::N));
         let new_page = !new_subpage && pressed(Sc::new(M::COMMAND, Key::N));
         let search = pressed(Sc::new(M::COMMAND, Key::K));
-        let previous = pressed(Sc::new(M::ALT, Key::ArrowUp));
-        let next = pressed(Sc::new(M::ALT, Key::ArrowDown));
+        // Exact Alt only: Alt+Shift+↑/↓ moves blocks instead.
+        let previous = take_exact_key(ctx, Key::ArrowUp, M::ALT);
+        let next = take_exact_key(ctx, Key::ArrowDown, M::ALT);
+        let document = self.document_has_focus(ctx);
+        let redo = document
+            && (pressed(Sc::new(M::COMMAND | M::SHIFT, Key::Z))
+                || pressed(Sc::new(M::COMMAND, Key::Y)));
+        let undo = document && !redo && pressed(Sc::new(M::COMMAND, Key::Z));
         let rename = pressed(Sc::new(M::NONE, Key::F2));
         let search_focused = ctx.memory(|m| m.has_focus(search_id()));
         let clear_search =
@@ -1034,6 +1084,12 @@ impl SilexApp {
             }
             if clear_search {
                 self.query.clear();
+            }
+            if undo {
+                self.undo();
+            }
+            if redo {
+                self.redo();
             }
             Ok(())
         })();
@@ -1136,8 +1192,79 @@ impl SilexApp {
         }
     }
 
+    /// A structural or non-text change to the open document.
     fn mark_dirty(&mut self) {
+        self.changed(EditKind::Other);
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            title: self.title.clone(),
+            blocks: self.blocks.clone(),
+        }
+    }
+
+    /// Records the change in the undo history (unless nothing actually
+    /// changed) and schedules the autosave.
+    fn changed(&mut self, kind: EditKind) {
+        let now = Instant::now();
+        let current = self.snapshot();
+        if current != self.shadow {
+            let before = std::mem::replace(&mut self.shadow, current);
+            self.history.record(before, kind, now);
+        }
+        self.save.mark_dirty(now);
+    }
+
+    fn reset_history(&mut self) {
+        self.history.clear();
+        self.shadow = self.snapshot();
+    }
+
+    fn undo(&mut self) {
+        let current = self.snapshot();
+        if let Some(previous) = self.history.undo(current.clone()) {
+            self.apply_snapshot(previous, &current);
+        }
+    }
+
+    fn redo(&mut self) {
+        let current = self.snapshot();
+        if let Some(next) = self.history.redo(current.clone()) {
+            self.apply_snapshot(next, &current);
+        }
+    }
+
+    /// Replaces the document with `target` and puts the cursor at the end of
+    /// the first block that changed.
+    fn apply_snapshot(&mut self, target: Snapshot, from: &Snapshot) {
+        let focus = first_difference(&from.blocks, &target.blocks);
+        self.title = target.title;
+        self.blocks = target.blocks;
+        self.shadow = self.snapshot();
+        // New field ids: egui must not keep cursors or text state from before.
+        self.doc_generation += 1;
+        self.selection = None;
+        self.slash = None;
+        self.pending_focus = focus
+            .and_then(|i| self.blocks.get(i.min(self.blocks.len().saturating_sub(1))))
+            .map(|b| (b.id.clone(), editor::block_char_len(b)));
         self.save.mark_dirty(Instant::now());
+    }
+
+    /// True when Cmd+Z should act on the document: no field has focus (e.g.
+    /// blocks are selected) or the title or a block has it. The search and
+    /// rename fields keep their own text undo.
+    fn document_has_focus(&self, ctx: &egui::Context) -> bool {
+        let Some(focused) = ctx.memory(|m| m.focused()) else {
+            return true;
+        };
+        let page = self.selected.as_deref().unwrap_or_default();
+        focused == field_id(self.doc_generation, "title", page)
+            || self
+                .blocks
+                .iter()
+                .any(|b| focused == self.block_field_id(&b.id))
     }
 
     /// Saves pending edits now. On failure the edits stay in memory, the
@@ -1464,10 +1591,21 @@ impl SilexApp {
                 // A save error is already shown by the status bar.
                 let _ = self.save_now();
             }
+            if ui
+                .add_enabled(self.history.can_undo(), egui::Button::new("Deshacer"))
+                .clicked()
+            {
+                self.undo();
+            }
+            if ui
+                .add_enabled(self.history.can_redo(), egui::Button::new("Rehacer"))
+                .clicked()
+            {
+                self.redo();
+            }
             self.status_bar(ui);
         });
         self.notice_bar(ui);
-        self.deleted_bar(ui);
         self.page_actions(ui, &page_id);
         if self.selected.as_deref() != Some(page_id.as_str()) {
             // The page was trashed (or another opened) this frame.
@@ -1483,10 +1621,11 @@ impl SilexApp {
             )
             .changed();
         if changed {
-            self.mark_dirty();
+            self.changed(EditKind::Text("title".into()));
         }
         ui.add_space(14.0);
-        let mut modified = false;
+        let mut edit: Option<EditKind> = None;
+        let mut block_action: Option<(BlockAction, String)> = None;
         egui::ScrollArea::vertical()
             .id_salt("silex_editor_blocks")
             .show(ui, |ui| {
@@ -1500,7 +1639,22 @@ impl SilexApp {
                     let is_selected = selected.is_some_and(|(a, b)| (a..=b).contains(&index));
                     let out =
                         block_field(ui, self.doc_generation, block, number, scroll, is_selected);
-                    modified |= out.changed;
+                    let kind = if out.other_changed {
+                        Some(EditKind::Other)
+                    } else {
+                        out.text_changed.then(|| EditKind::Text(block.id.clone()))
+                    };
+                    if let Some(kind) = kind {
+                        // Two fields changed in one frame (rare): one non-text step.
+                        edit = Some(if edit.is_some() {
+                            EditKind::Other
+                        } else {
+                            kind
+                        });
+                    }
+                    if let Some(action) = out.action {
+                        block_action = Some((action, block.id.clone()));
+                    }
                     if out.caret.is_some() {
                         self.caret = out.caret;
                     }
@@ -1515,8 +1669,11 @@ impl SilexApp {
                     self.pending_key = Some((EditorKey::Slash(kind), id));
                 }
             });
-        if modified {
-            self.mark_dirty();
+        if let Some(kind) = edit {
+            self.changed(kind);
+        }
+        if let Some((action, id)) = block_action {
+            self.block_action(action, &id);
         }
         ui.separator();
         ui.horizontal(|ui| {
@@ -1526,13 +1683,19 @@ impl SilexApp {
                 ("+ Tarea", BlockKind::Todo),
             ] {
                 if ui.button(label).clicked() {
-                    let result = (|| -> Result<()> {
-                        self.save_now()?;
-                        self.db.add_block(&page_id, kind)?;
-                        self.blocks = self.db.list_blocks(&page_id)?;
-                        Ok(())
-                    })();
-                    self.report(result);
+                    // In memory, like every other edit: undoable and saved by the autosave.
+                    let block = Block {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        page_id: page_id.clone(),
+                        kind,
+                        content: String::new(),
+                        checked: false,
+                        position: 0,
+                        indent: 0,
+                    };
+                    self.pending_focus = Some((block.id.clone(), 0));
+                    self.blocks.push(block);
+                    self.mark_dirty();
                 }
             }
         });
@@ -1721,9 +1884,22 @@ const INDENT_WIDTH: f32 = 24.0;
 /// Renders one block: type selector, indent, marker (checkbox, bullet,
 /// number or quote bar) and its text field. `number` is the list number for
 /// numbered blocks. Returns true when anything in the block changed.
+/// Actions in a block's "…" menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockAction {
+    MoveUp,
+    MoveDown,
+    Duplicate,
+    Delete,
+}
+
 /// What a block reported while being drawn.
 struct BlockOutput {
-    changed: bool,
+    /// The text was edited (groups into one undo step while typing).
+    text_changed: bool,
+    /// Type or checkbox changed.
+    other_changed: bool,
+    action: Option<BlockAction>,
     /// Present when this block's text field has focus.
     caret: Option<CaretInfo>,
 }
@@ -1746,10 +1922,13 @@ fn block_field(
     frame
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let mut changed = kind_selector(ui, block);
+                let action = block_menu(ui);
+                let mut other_changed = kind_selector(ui, block);
                 ui.add_space(f32::from(block.indent) * INDENT_WIDTH);
                 match block.kind {
-                    BlockKind::Todo => changed |= ui.checkbox(&mut block.checked, "").changed(),
+                    BlockKind::Todo => {
+                        other_changed |= ui.checkbox(&mut block.checked, "").changed();
+                    }
                     BlockKind::Bulleted => {
                         ui.label("•");
                     }
@@ -1775,7 +1954,7 @@ fn block_field(
                     _ => TextEdit::multiline(&mut block.content).desired_rows(1),
                 };
                 let output = edit.id(id).desired_width(f32::INFINITY).show(ui);
-                changed |= output.response.changed();
+                let text_changed = output.response.changed();
                 if scroll_into_view {
                     output.response.scroll_to_me(None);
                 }
@@ -1792,7 +1971,12 @@ fn block_field(
                             last_row: row + 1 >= output.galley.rows.len(),
                         }
                     });
-                BlockOutput { changed, caret }
+                BlockOutput {
+                    text_changed,
+                    other_changed,
+                    action,
+                    caret,
+                }
             })
             .inner
         })
@@ -1874,6 +2058,27 @@ fn heading_size(kind: BlockKind) -> f32 {
         BlockKind::Heading2 => 20.0,
         _ => 16.0,
     }
+}
+
+/// The "…" menu in front of each block.
+fn block_menu(ui: &mut egui::Ui) -> Option<BlockAction> {
+    let mut action = None;
+    ui.menu_button("…", |ui| {
+        for (label, chosen) in [
+            ("Mover arriba (Alt+Mayús+↑)", BlockAction::MoveUp),
+            ("Mover abajo (Alt+Mayús+↓)", BlockAction::MoveDown),
+            ("Duplicar", BlockAction::Duplicate),
+            ("Eliminar", BlockAction::Delete),
+        ] {
+            if ui.button(label).clicked() {
+                action = Some(chosen);
+                ui.close();
+            }
+        }
+    })
+    .response
+    .on_hover_text("Acciones del bloque");
+    action
 }
 
 /// Small type menu in front of each block; returns true if the type changed.
@@ -1960,7 +2165,7 @@ mod tests {
                 ui.memory_mut(|m| m.request_focus(id));
             }
             for block in blocks.iter_mut() {
-                changed |= block_field(ui, 0, block, None, false, false).changed;
+                changed |= block_field(ui, 0, block, None, false, false).text_changed;
             }
         });
         // Headless: nothing renders the font texture, so drop it explicitly.
@@ -2004,6 +2209,7 @@ mod tests {
             app.db.add_block(&page, kind)?;
         }
         app.blocks = app.db.list_blocks(&page)?;
+        app.reset_history();
         // A nested, expanded tree: page ─ child ─ grandchild, plus a second child.
         let child = app.db.create_page("Hija", Some(&page))?;
         app.db.create_page("Nieta", Some(&child))?;
@@ -2302,6 +2508,8 @@ mod tests {
         let title = app.title.clone();
         app.db.save_document(&page, &title, &blocks)?;
         app.blocks = blocks;
+        // As open_page does: the loaded document is the starting point for undo.
+        app.reset_history();
         let ctx = egui::Context::default();
         app.pending_focus = Some((app.blocks[focus].id.clone(), char));
         app_frame(&mut app, &ctx, vec![]);
@@ -2581,7 +2789,7 @@ mod tests {
         assert_eq!(app.selection_range(), Some((1, 1)), "selection moves on");
         assert!(!app.save.can_close());
 
-        app.undo_delete();
+        app.undo();
         let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
         assert_eq!(texts, ["uno", "dos", "tres", "cuatro"]);
         Ok(())
@@ -2608,11 +2816,133 @@ mod tests {
         let commands = app_frame_commands(&mut app, &ctx, vec![egui::Event::Cut]);
         assert!(commands.contains(&egui::OutputCommand::CopyText("a".into())));
         assert_eq!(app.blocks.len(), 1);
-        assert!(app.deleted.is_some());
+        assert!(app.history.can_undo());
         let other = app.db.create_page("Otra", None)?;
         app.reload_pages()?;
         app.open_page(other)?;
-        assert!(app.deleted.is_none() && app.selection.is_none());
+        assert!(!app.history.can_undo() && app.selection.is_none());
+        Ok(())
+    }
+
+    fn texts(app: &SilexApp) -> Vec<String> {
+        app.blocks.iter().map(|b| b.content.clone()).collect()
+    }
+
+    #[test]
+    fn undo_and_redo_walk_typing_and_structure() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "ab")], 0, 2)?;
+        type_into(&mut app, &ctx, "cd"); // quick typing: one undo step
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        assert_eq!(texts(&app), ["abcd", ""]);
+
+        app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+        assert_eq!(texts(&app), ["abcd"], "undo the split");
+        app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+        assert_eq!(texts(&app), ["ab"], "undo the typing as one step");
+        assert!(!app.history.can_undo());
+
+        app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND | M::SHIFT)]);
+        assert_eq!(texts(&app), ["abcd"]);
+        app_frame(&mut app, &ctx, vec![key(Key::Y, M::COMMAND)]);
+        assert_eq!(texts(&app), ["abcd", ""], "Cmd+Y also redoes");
+
+        // Undo results are saved like any edit.
+        app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+        app.save_now()?;
+        let page = app.selected.clone().expect("page");
+        assert_eq!(app.db.list_blocks(&page)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn undo_focuses_the_changed_block() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "uno"), (Par, 0, "dos")], 1, 3)?;
+        type_into(&mut app, &ctx, "!");
+        app.pending_focus = Some((app.blocks[0].id.clone(), 0));
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(texts(&app), ["uno", "dos"]);
+        assert_eq!(
+            focused_block(&app, &ctx),
+            Some(1),
+            "cursor goes to the undone block"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cmd_z_in_the_search_field_leaves_the_document_alone() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "ab")], 0, 2)?;
+        type_into(&mut app, &ctx, "c");
+        assert!(app.history.can_undo());
+        app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+        assert_eq!(texts(&app), ["abc"]);
+        assert!(app.history.can_undo(), "document history untouched");
+        Ok(())
+    }
+
+    #[test]
+    fn alt_shift_arrows_move_the_block_and_cmd_d_duplicates() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "a"), (Par, 0, "b"), (Par, 0, "c")], 0, 1)?;
+        let page = app.selected.clone();
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::ALT | M::SHIFT)]);
+        assert_eq!(texts(&app), ["b", "a", "c"]);
+        assert_eq!(app.selected, page, "not the Alt+↓ page navigation");
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(
+            focused_block(&app, &ctx),
+            Some(1),
+            "focus follows the block"
+        );
+
+        app_frame(&mut app, &ctx, vec![key(Key::D, M::COMMAND)]);
+        assert_eq!(texts(&app), ["b", "a", "a", "c"]);
+        assert_ne!(app.blocks[1].id, app.blocks[2].id);
+        app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+        app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+        assert_eq!(texts(&app), ["a", "b", "c"]);
+        Ok(())
+    }
+
+    #[test]
+    fn selection_moves_and_duplicates_as_a_group() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(
+            &[(Par, 0, "a"), (Par, 0, "b"), (Par, 0, "c"), (Par, 0, "d")],
+            2,
+            0,
+        )?;
+        app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::SHIFT)]);
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::ALT | M::SHIFT)]);
+        assert_eq!(texts(&app), ["a", "c", "d", "b"]);
+        assert_eq!(app.selection_range(), Some((1, 2)), "selection follows");
+        app_frame(&mut app, &ctx, vec![key(Key::D, M::COMMAND)]);
+        assert_eq!(texts(&app), ["a", "c", "d", "c", "d", "b"]);
+        assert_eq!(
+            app.selection_range(),
+            Some((3, 4)),
+            "the copies are selected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn block_menu_actions_and_add_buttons_are_undoable() -> anyhow::Result<()> {
+        let (mut app, _ctx) = editor_app(&[(Par, 0, "a"), (Par, 0, "b")], 0, 0)?;
+        let first = app.blocks[0].id.clone();
+        app.block_action(BlockAction::MoveDown, &first);
+        assert_eq!(texts(&app), ["b", "a"]);
+        app.block_action(BlockAction::Duplicate, &first);
+        assert_eq!(texts(&app), ["b", "a", "a"]);
+        app.block_action(BlockAction::Delete, &first);
+        assert_eq!(texts(&app), ["b", "a"]);
+        for _ in 0..3 {
+            app.undo();
+        }
+        assert_eq!(texts(&app), ["a", "b"]);
         Ok(())
     }
 

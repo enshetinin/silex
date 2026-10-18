@@ -316,3 +316,56 @@ mod selection {
         );
     }
 }
+
+mod move_and_duplicate {
+    use super::*;
+    use silex_desktop::editor::{duplicate_range, move_range};
+
+    fn ids(blocks: &[Block]) -> Vec<&str> {
+        blocks.iter().map(|b| b.id.as_str()).collect()
+    }
+
+    fn doc() -> Vec<Block> {
+        ["a", "b", "c", "d"]
+            .iter()
+            .map(|id| b(id, Paragraph, 0, id))
+            .collect()
+    }
+
+    #[test]
+    fn single_block_moves_and_stops_at_the_edges() {
+        let mut blocks = doc();
+        assert!(move_range(&mut blocks, 1, 1, true));
+        assert_eq!(ids(&blocks), ["b", "a", "c", "d"]);
+        assert!(!move_range(&mut blocks, 0, 0, true));
+        assert!(move_range(&mut blocks, 0, 0, false));
+        assert_eq!(ids(&blocks), ["a", "b", "c", "d"]);
+        assert!(!move_range(&mut blocks, 3, 3, false));
+    }
+
+    #[test]
+    fn a_range_moves_as_a_unit_keeping_indent() {
+        let mut blocks = doc();
+        blocks[2].indent = 1;
+        assert!(move_range(&mut blocks, 2, 1, false));
+        assert_eq!(ids(&blocks), ["a", "d", "b", "c"]);
+        assert_eq!(blocks[3].indent, 1);
+        assert!(move_range(&mut blocks, 2, 3, true));
+        assert_eq!(ids(&blocks), ["a", "b", "c", "d"]);
+        assert!(!move_range(&mut blocks, 2, 9, true), "out of range");
+    }
+
+    #[test]
+    fn duplicate_inserts_copies_with_new_ids_after_the_range() {
+        let mut blocks = doc();
+        let mut n = 0;
+        let range = duplicate_range(&mut blocks, 1, 2, || {
+            n += 1;
+            format!("copia{n}")
+        });
+        assert_eq!(range, Some((3, 4)));
+        assert_eq!(ids(&blocks), ["a", "b", "c", "copia1", "copia2", "d"]);
+        assert_eq!(blocks[3].content, "b");
+        assert_eq!(duplicate_range(&mut blocks, 9, 9, || "x".into()), None);
+    }
+}

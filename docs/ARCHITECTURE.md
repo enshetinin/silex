@@ -55,12 +55,13 @@ Teclado del editor (H3.2): las operaciones son funciones puras sobre `Vec<Block>
 3. Después del layout se ejecuta la operación con el cursor ya actualizado, por si en el mismo frame llegó texto antes de la tecla.
 4. Se fija el foco y el cursor del bloque destino para el frame siguiente.
 
-Menú `/` y selección (H3.3): el menú se calcula después del layout a partir del cursor (`editor::slash_query`) y, mientras está abierto, se queda con ↑ ↓ Intro y Esc. Esc en un bloque lo selecciona: egui borra el foco con Esc al empezar el frame, así que para esa tecla basta el cursor del frame anterior. Las teclas de selección se leen antes del layout, sin ningún campo de texto con foco; Cmd+C y Cmd+X llegan como `Event::Copy`/`Event::Cut`. Borrar una selección ofrece «Deshacer» (una sola vez) hasta cambiar de página.
+Menú `/` y selección (H3.3): el menú se calcula después del layout a partir del cursor (`editor::slash_query`) y, mientras está abierto, se queda con ↑ ↓ Intro y Esc. Esc en un bloque lo selecciona: egui borra el foco con Esc al empezar el frame, así que para esa tecla basta el cursor del frame anterior. Las teclas de selección se leen antes del layout, sin ningún campo de texto con foco; Cmd+C y Cmd+X llegan como `Event::Copy`/`Event::Cut`. Borrar una selección se deshace con Cmd+Z.
 
-Las operaciones estructurales limpian el historial de deshacer de los bloques cuyo texto cambió, para que Cmd+Z no duplique texto movido. El deshacer de documento llega en H3.4 (ADR 0004). egui no replica automáticamente controles estéticos del OS: planificar esfuerzo visual explícito. UX de editor rich-text de varios bloques es el componente más complejo y requiere prototipos.
+Deshacer (H3.4, ADR 0004): todos los cambios del documento pasan por `SilexApp::changed(kind)`, que guarda en `History` la instantánea anterior (`shadow`) y programa el autoguardado. Cmd+Z, Cmd+Mayús+Z y Cmd+Y se interceptan antes que los campos de texto del documento. Mover (Alt+Mayús+↑/↓), duplicar (Cmd+D) y el menú «…» de cada bloque son operaciones puras de `src/editor.rs`. egui no replica automáticamente controles estéticos del OS: planificar esfuerzo visual explícito. UX de editor rich-text de varios bloques es el componente más complejo y requiere prototipos.
 
 ## ADRs
 Cada decisión irreversible (formato de documento, sincronización, cifrado, editor, arquitectura de concurrencia) tiene su propia `docs/decisions/NNNN-*.md`: problema, alternativas, decisión, consecuencias, migración.
 - `0001-native-rust.md`: egui/eframe + SQLite.
 - `0002-undo-strategy.md`: deshacer de texto por campo con ids estables (Hito 1); deshacer semántico en el Hito 3.
 - `0003-block-model.md`: tipos de bloque ampliados y lista plana con sangría.
+- `0004-document-undo.md`: deshacer/rehacer del documento con instantáneas (sustituye a 0002).

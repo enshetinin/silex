@@ -321,3 +321,52 @@ pub fn selection_text(blocks: &[Block], first: usize, last: usize) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+// ---------------------------------------------------------------------------
+// Moving and duplicating blocks
+// ---------------------------------------------------------------------------
+
+/// Moves blocks `first..=last` one place up or down (keeping their indent).
+/// Returns false at the edges.
+pub fn move_range(blocks: &mut [Block], first: usize, last: usize, up: bool) -> bool {
+    let (first, last) = (first.min(last), first.max(last));
+    if last >= blocks.len() {
+        return false;
+    }
+    if up {
+        if first == 0 {
+            return false;
+        }
+        blocks[first - 1..=last].rotate_left(1);
+    } else {
+        if last + 1 >= blocks.len() {
+            return false;
+        }
+        blocks[first..=last + 1].rotate_right(1);
+    }
+    true
+}
+
+/// Inserts copies of blocks `first..=last` right after them, with new ids.
+/// Returns the index range of the copies.
+pub fn duplicate_range(
+    blocks: &mut Vec<Block>,
+    first: usize,
+    last: usize,
+    mut new_id: impl FnMut() -> String,
+) -> Option<(usize, usize)> {
+    let (first, last) = (first.min(last), first.max(last));
+    if last >= blocks.len() {
+        return None;
+    }
+    let copies: Vec<Block> = blocks[first..=last]
+        .iter()
+        .map(|b| Block {
+            id: new_id(),
+            ..b.clone()
+        })
+        .collect();
+    let count = copies.len();
+    blocks.splice(last + 1..last + 1, copies);
+    Some((last + 1, last + count))
+}
