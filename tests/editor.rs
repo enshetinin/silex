@@ -369,3 +369,155 @@ mod move_and_duplicate {
         assert_eq!(duplicate_range(&mut blocks, 9, 9, || "x".into()), None);
     }
 }
+
+mod paste {
+    use super::*;
+    use silex_desktop::editor::{normalize_pasted, parse_pasted_line, paste_lines, selection_text};
+
+    fn counter() -> impl FnMut() -> String {
+        let mut n = 0;
+        move || {
+            n += 1;
+            format!("p{n}")
+        }
+    }
+
+    #[test]
+    fn multi_line_paste_splits_around_the_cursor() {
+        let mut blocks = vec![b("a", Paragraph, 0, "Hola mundo")];
+        let caret = paste_lines(&mut blocks, 0, 5, "uno\ndos\ntres ", counter());
+        assert_eq!(
+            summary(&blocks),
+            [
+                ("a", Paragraph, 0, "Hola uno"),
+                ("p1", Paragraph, 0, "dos"),
+                ("p2", Paragraph, 0, "tres mundo"),
+            ]
+        );
+        assert_eq!(
+            caret,
+            Some(Caret { block: 2, char: 5 }),
+            "end of pasted text"
+        );
+    }
+
+    #[test]
+    fn line_endings_and_control_characters_are_normalized() {
+        assert_eq!(normalize_pasted("a\r\nb\rc\u{0}d\u{7}\te"), "a\nb\ncd\te");
+        let mut blocks = vec![b("a", Paragraph, 0, "")];
+        paste_lines(&mut blocks, 0, 0, "x\r\ny", counter());
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1].content, "y");
+    }
+
+    #[test]
+    fn silex_copy_format_is_recognized() {
+        assert_eq!(
+            parse_pasted_line("  • Integral"),
+            silex_desktop::editor::PastedLine {
+                kind: Bulleted,
+                indent: 1,
+                checked: false,
+                content: "Integral".into()
+            }
+        );
+        assert_eq!(parse_pasted_line("12. Paso").kind, Numbered);
+        assert!(parse_pasted_line("[x] Hecho").checked);
+        assert_eq!(parse_pasted_line("[ ] Por hacer").kind, Todo);
+        let plain = parse_pasted_line("  sangrado normal");
+        assert_eq!((plain.kind, plain.indent), (Paragraph, 0));
+        assert_eq!(
+            plain.content, "  sangrado normal",
+            "plain text is kept as is"
+        );
+        assert_eq!(parse_pasted_line("1.5 litros").kind, Paragraph);
+    }
+
+    #[test]
+    fn copy_then_paste_rebuilds_the_blocks() {
+        let original = vec![
+            b("a", Bulleted, 0, "Pan"),
+            b("b", Bulleted, 1, "Integral"),
+            b("c", Numbered, 0, "Uno"),
+            b("d", Numbered, 0, "Dos"),
+            b("e", Todo, 0, "Pagar"),
+            b("f", Paragraph, 0, "Fin"),
+        ];
+        let copied = selection_text(&original, 0, 5);
+        let mut blocks = vec![b("x", Paragraph, 0, "")];
+        paste_lines(&mut blocks, 0, 0, &copied, counter());
+        let rebuilt: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.indent, b.checked, b.content.as_str()))
+            .collect();
+        let expected: Vec<_> = original
+            .iter()
+            .map(|b| (b.kind, b.indent, b.checked, b.content.as_str()))
+            .collect();
+        assert_eq!(rebuilt, expected);
+    }
+
+    #[test]
+    fn pasted_structure_is_relative_to_the_block_indent() {
+        let mut blocks = vec![b("a", Bulleted, 2, "x")];
+        paste_lines(&mut blocks, 0, 1, "\n  • hijo", counter());
+        assert_eq!(blocks[1].indent, 3);
+    }
+}
+
+/// Integrity: splitting at ANY character position and merging back returns
+/// the exact original text, for scripts and sequences that are easy to break.
+mod unicode_integrity {
+    use super::*;
+    use silex_desktop::editor::{backspace_at_start, delete_at_end, paste_lines};
+
+    const TRICKY: &[&str] = &[
+        "año ñandú",
+        "e\u{301}cole",     // e + combining acute accent
+        "👨‍👩‍👧‍👦 familia",       // ZWJ sequence
+        "🇪🇸🇯🇵 banderas",    // regional indicator pairs
+        "مرحبا بالعالم",    // Arabic (RTL)
+        "שלום עולם",        // Hebrew (RTL)
+        "日本語のテキスト", // CJK
+        "tab\tbetween",
+        "\u{200B}zero\u{200D}width", // zero-width space / joiner
+        "",
+    ];
+
+    #[test]
+    fn enter_then_backspace_round_trips_at_every_position() {
+        for text in TRICKY {
+            for cursor in 0..=text.chars().count() {
+                let mut blocks = vec![b("a", Paragraph, 0, text)];
+                let caret = enter(&mut blocks, 0, cursor, || "n".into()).expect("split");
+                let joined: String = blocks.iter().map(|b| b.content.as_str()).collect();
+                assert_eq!(joined, *text, "split loses nothing ({text:?} @ {cursor})");
+                backspace_at_start(&mut blocks, caret.block);
+                let back: String = blocks.iter().map(|b| b.content.as_str()).collect();
+                assert_eq!(back, *text, "{text:?} @ {cursor}");
+                assert_eq!(blocks.len(), 1, "{text:?} @ {cursor}");
+            }
+        }
+    }
+
+    #[test]
+    fn delete_at_end_and_paste_preserve_every_character() {
+        for text in TRICKY {
+            let (head, tail): (String, String) = {
+                let mid = text.chars().count() / 2;
+                (
+                    text.chars().take(mid).collect(),
+                    text.chars().skip(mid).collect(),
+                )
+            };
+            let mut blocks = vec![b("a", Paragraph, 0, &head), b("b", Paragraph, 0, &tail)];
+            delete_at_end(&mut blocks, 0);
+            assert_eq!(blocks[0].content, *text);
+
+            let mut blocks = vec![b("a", Paragraph, 0, "[]")];
+            paste_lines(&mut blocks, 0, 1, &format!("{text}\n{text}"), || "n".into());
+            let joined: String = blocks.iter().map(|b| b.content.as_str()).collect();
+            assert_eq!(joined, format!("[{text}{text}]"), "{text:?}");
+        }
+    }
+}

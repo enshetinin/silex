@@ -30,7 +30,7 @@
 - [ ] Más tipos de bloque: H1/2/3, listas, cita y código. *(H3.1 implementada: migración 0003, `BlockKind`, sangría guardada, guardado por sincronización completa y selector de tipo por bloque; tests verdes y actualización real v1/v2→v3 en macOS; verificación manual pendiente.)*
 - [ ] Menú `/`, teclado y selección de bloques. *(H3.3 implementada: «/palabra» al inicio de un bloque abre el menú de tipos (filtra sin acentos y con alias, ↑ ↓ Intro, Esc cierra); Esc selecciona el bloque, Mayús+↑/↓ amplía, Retroceso/Supr borra con «Deshacer», Cmd+C/Cmd+X copia o corta como texto. Tests verdes en macOS; verificación manual pendiente.)*
 - [ ] Reordenación y borrado de bloques; undo/redo semánticos. *(H3.4 implementada: Alt+Mayús+↑/↓ mueve el bloque o la selección, Cmd+D duplica, menú «…» por bloque (mover, duplicar, eliminar); un único deshacer/rehacer de documento con instantáneas, agrupando el tecleo (ADR 0004, sustituye a 0002). Tests verdes en macOS; verificación manual pendiente.)*
-- [ ] Pruebas de cursor/foco, copy-paste y Unicode/IME.
+- [ ] Pruebas de cursor/foco, copy-paste y Unicode/IME. *(H3.5 implementada: pegar varias líneas crea bloques (reconoce el formato de copia de Silex, normaliza saltos de línea y caracteres de control), integridad Unicode en todas las posiciones, IME (Intro de confirmación descartado durante la composición) y `docs/MANUAL_QA.md`. Tests verdes en macOS; pruebas manuales de IME, portapapeles y fuentes pendientes.)*
 
 ## Hito 4 — importación y exportación
 - [ ] Markdown → bloques con pruebas golden.

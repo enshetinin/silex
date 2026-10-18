@@ -370,3 +370,115 @@ pub fn duplicate_range(
     blocks.splice(last + 1..last + 1, copies);
     Some((last + 1, last + count))
 }
+
+// ---------------------------------------------------------------------------
+// Pasting text
+// ---------------------------------------------------------------------------
+
+/// One pasted line, with the structure recognized from Silex's own copy
+/// format (see [`selection_text`]): two spaces per indent level, "• ",
+/// "N. ", "[ ] " / "[x] ". Anything else is plain text. Full Markdown is
+/// milestone 4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PastedLine {
+    pub kind: BlockKind,
+    pub indent: u8,
+    pub checked: bool,
+    pub content: String,
+}
+
+/// Line endings to `\n`, and invisible control characters removed (tabs kept).
+pub fn normalize_pasted(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect()
+}
+
+pub fn parse_pasted_line(line: &str) -> PastedLine {
+    let spaces = line.chars().take_while(|c| *c == ' ').count();
+    let indent = u8::try_from(spaces / 2)
+        .unwrap_or(MAX_INDENT)
+        .min(MAX_INDENT);
+    let rest = &line[spaces / 2 * 2..];
+    let (kind, checked, content) = if let Some(text) = rest.strip_prefix("• ") {
+        (BlockKind::Bulleted, false, text)
+    } else if let Some(text) = rest.strip_prefix("[ ] ") {
+        (BlockKind::Todo, false, text)
+    } else if let Some(text) = rest.strip_prefix("[x] ") {
+        (BlockKind::Todo, true, text)
+    } else if let Some(text) = numbered_text(rest) {
+        (BlockKind::Numbered, false, text)
+    } else {
+        // Plain text keeps its leading spaces only beyond the indent we took.
+        return PastedLine {
+            kind: BlockKind::Paragraph,
+            indent: 0,
+            checked: false,
+            content: line.to_owned(),
+        };
+    };
+    PastedLine {
+        kind,
+        indent,
+        checked,
+        content: content.to_owned(),
+    }
+}
+
+/// "12. texto" → "texto".
+fn numbered_text(line: &str) -> Option<&str> {
+    let digits = line.chars().take_while(char::is_ascii_digit).count();
+    (digits > 0)
+        .then(|| line[digits..].strip_prefix(". "))
+        .flatten()
+}
+
+/// Pastes multi-line `text` at `cursor` in block `index`: the first line
+/// joins the text before the cursor, each further line becomes a block, and
+/// the text after the cursor ends up after the last pasted line. If the
+/// block was empty before the cursor, the first line's structure applies to
+/// it. Returns where the cursor goes (end of the pasted text).
+pub fn paste_lines(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    cursor: usize,
+    text: &str,
+    mut new_id: impl FnMut() -> String,
+) -> Option<Caret> {
+    let text = normalize_pasted(text);
+    let mut lines = text.split('\n').map(parse_pasted_line);
+    let first = lines.next()?;
+    let block = blocks.get_mut(index)?;
+    let split_at = byte_index(&block.content, cursor);
+    let tail = block.content.split_off(split_at);
+    let base_indent = block.indent;
+    if block.content.is_empty() && first.kind != BlockKind::Paragraph {
+        block.kind = first.kind;
+        block.checked = first.checked;
+        block.indent = base_indent.saturating_add(first.indent).min(MAX_INDENT);
+    }
+    block.content.push_str(&first.content);
+
+    let template = block.clone();
+    let mut last = index;
+    for line in lines {
+        last += 1;
+        blocks.insert(
+            last,
+            Block {
+                id: new_id(),
+                kind: line.kind,
+                checked: line.checked,
+                indent: base_indent.saturating_add(line.indent).min(MAX_INDENT),
+                content: line.content,
+                ..template.clone()
+            },
+        );
+    }
+    let target = &mut blocks[last];
+    let char = char_len(&target.content);
+    target.content.push_str(&tail);
+    Some(Caret { block: last, char })
+}

@@ -58,6 +58,8 @@ pub struct SilexApp {
     pending_key: Option<(EditorKey, String)>,
     /// Block to focus (and cursor position) on the next frame.
     pending_focus: Option<(String, usize)>,
+    /// Multi-line paste taken this frame (block id, text), run after layout.
+    pending_paste: Option<(String, String)>,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -185,6 +187,7 @@ impl SilexApp {
             ime_composing: false,
             pending_key: None,
             pending_focus: None,
+            pending_paste: None,
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -675,13 +678,19 @@ impl SilexApp {
     /// field. Nothing is intercepted during an IME composition, with a text
     /// selection, or when the cursor is not where the command applies.
     fn take_editor_key(&mut self, ctx: &egui::Context) {
-        self.ime_composing = ime_composing_after(ctx, self.ime_composing);
-        if self.ime_composing {
-            return;
-        }
         let Some(caret) = self.caret.clone() else {
+            // No block is being edited: a composition elsewhere (e.g. the
+            // search field) is not ours, and a stale flag must not linger.
+            self.ime_composing = false;
             return;
         };
+        self.ime_composing = ime_composing_after(ctx, self.ime_composing);
+        if self.ime_composing {
+            // Enter confirms the composition; the IME sends the text as a
+            // commit, so the key itself must not also insert a newline.
+            take_exact_key(ctx, egui::Key::Enter, egui::Modifiers::NONE);
+            return;
+        }
         let Some(block) = self.blocks.iter().find(|b| b.id == caret.block_id) else {
             return;
         };
@@ -698,6 +707,23 @@ impl SilexApp {
             return;
         }
         let code = block.kind == BlockKind::Code;
+        // Several lines pasted into a (non-code) block become several blocks.
+        // A single line is left to the text field.
+        if !code {
+            let mut pasted = None;
+            take_event(ctx, |event| match event {
+                egui::Event::Paste(text) if text.contains(['\n', '\r']) => {
+                    pasted = Some(text.clone());
+                    true
+                }
+                _ => false,
+            });
+            if let Some(text) = pasted {
+                self.pending_paste = Some((block.id.clone(), text));
+                self.slash = None;
+                return;
+            }
+        }
         let at_start = caret.char == 0;
         let at_end = caret.char >= editor::block_char_len(block);
         use egui::{Key, Modifiers as M};
@@ -753,6 +779,29 @@ impl SilexApp {
 
     /// Runs the key taken this frame, after the text field processed any text
     /// typed earlier in the same frame (so the cursor position is current).
+    /// Runs a multi-line paste taken this frame, at the current cursor.
+    fn run_paste(&mut self, ctx: &egui::Context) {
+        let Some((block_id, text)) = self.pending_paste.take() else {
+            return;
+        };
+        let Some(index) = self.blocks.iter().position(|b| b.id == block_id) else {
+            return;
+        };
+        let cursor = egui::text_edit::TextEditState::load(ctx, self.block_field_id(&block_id))
+            .and_then(|s| s.cursor.char_range())
+            .map_or(0, |r| r.primary.index.0);
+        let caret = editor::paste_lines(&mut self.blocks, index, cursor, &text, || {
+            uuid::Uuid::new_v4().to_string()
+        });
+        self.mark_dirty();
+        if let Some(caret) = caret
+            && let Some(target) = self.blocks.get(caret.block)
+        {
+            self.pending_focus = Some((target.id.clone(), caret.char));
+            ctx.request_repaint();
+        }
+    }
+
     fn run_editor_key(&mut self, ctx: &egui::Context) {
         let Some((command, block_id)) = self.pending_key.take() else {
             return;
@@ -1827,6 +1876,7 @@ impl SilexApp {
         self.apply_pending_focus(&ctx);
         self.handle_selection_keys(&ctx);
         self.layout(ui);
+        self.run_paste(&ctx);
         self.run_editor_key(&ctx);
         self.refresh_slash_and_selection();
         // Save errors are shown by the status bar, so results are not reported twice.
@@ -2001,7 +2051,7 @@ fn slash_menu_ui(ui: &mut egui::Ui, menu: &SlashMenu) -> Option<BlockKind> {
 }
 
 /// Removes the first input event matching `wanted`; returns whether found.
-fn take_event(ctx: &egui::Context, wanted: impl Fn(&egui::Event) -> bool) -> bool {
+fn take_event(ctx: &egui::Context, mut wanted: impl FnMut(&egui::Event) -> bool) -> bool {
     ctx.input_mut(|input| {
         let mut taken = false;
         input.events.retain(|event| {
@@ -2943,6 +2993,144 @@ mod tests {
             app.undo();
         }
         assert_eq!(texts(&app), ["a", "b"]);
+        Ok(())
+    }
+
+    fn paste(text: &str) -> egui::Event {
+        egui::Event::Paste(text.into())
+    }
+
+    #[test]
+    fn multi_line_paste_becomes_blocks_and_undoes_in_one_step() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "Hola mundo")], 0, 5)?;
+        app_frame(&mut app, &ctx, vec![paste("uno\r\ndos\ntres ")]);
+        assert_eq!(texts(&app), ["Hola uno", "dos", "tres mundo"]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(focused_block(&app, &ctx), Some(2));
+        assert_eq!(
+            caret_char(&app),
+            Some(5),
+            "cursor at the end of the pasted text"
+        );
+        app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+        assert_eq!(texts(&app), ["Hola mundo"]);
+        Ok(())
+    }
+
+    #[test]
+    fn single_line_paste_and_code_blocks_are_left_to_the_text_field() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "ab")], 0, 1)?;
+        app_frame(&mut app, &ctx, vec![paste("XY")]);
+        assert_eq!(texts(&app), ["aXYb"]);
+
+        let (mut app, ctx) = editor_app(&[(Cod, 0, "")], 0, 0)?;
+        app_frame(&mut app, &ctx, vec![paste("fn a() {\n}\n")]);
+        assert_eq!(app.blocks.len(), 1);
+        assert_eq!(app.blocks[0].content, "fn a() {\n}\n");
+        Ok(())
+    }
+
+    #[test]
+    fn copied_blocks_paste_back_with_their_structure() -> anyhow::Result<()> {
+        let (mut app, ctx) =
+            editor_app(&[(Bul, 0, "Pan"), (Bul, 1, "Integral"), (Par, 0, "")], 0, 0)?;
+        app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::SHIFT)]);
+        let commands = app_frame_commands(&mut app, &ctx, vec![egui::Event::Copy]);
+        let Some(egui::OutputCommand::CopyText(copied)) = commands.into_iter().next() else {
+            anyhow::bail!("nothing copied");
+        };
+        // Back to editing the empty last block, then paste.
+        app.selection = None;
+        app.pending_focus = Some((app.blocks[2].id.clone(), 0));
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![paste(&copied)]);
+        assert_eq!(
+            contents(&app)[2..],
+            [(Bul, 0, "Pan".into()), (Bul, 1, "Integral".into())]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ime_composition_commits_text_without_splitting() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "Texto: ")], 0, 7)?;
+        let preedit = |t: &str| {
+            egui::Event::Ime(egui::ImeEvent::Preedit {
+                text: t.into(),
+                active_range_chars: None,
+            })
+        };
+        for step in ["n", "に", "にほ", "にほn"] {
+            app_frame(&mut app, &ctx, vec![preedit(step)]);
+        }
+        // The user confirms with Enter: the IME turns it into a commit.
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        app_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Ime(egui::ImeEvent::Commit("日本".into()))],
+        );
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.blocks.len(), 1, "no split during the composition");
+        assert_eq!(
+            app.blocks[0].content, "Texto: 日本",
+            "no stray newline, no preedit left"
+        );
+        assert!(!app.ime_composing);
+        // After the commit, Enter splits again as usual.
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        assert_eq!(app.blocks.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn a_stale_ime_flag_is_cleared_when_leaving_the_block() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "ab")], 0, 2)?;
+        app.ime_composing = true; // e.g. the IME never sent its end event
+        app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert!(!app.ime_composing, "no block focused: flag reset");
+        app.selection = None;
+        app.pending_focus = Some((app.blocks[0].id.clone(), 2));
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        assert_eq!(app.blocks.len(), 2, "Enter works again");
+        Ok(())
+    }
+
+    #[test]
+    fn arrow_up_moves_inside_a_multi_line_block_first() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "arriba"), (Par, 0, "uno\ndos")], 1, 6)?;
+        assert!(
+            app.caret.as_ref().is_some_and(|c| !c.first_row),
+            "on the second line"
+        );
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(
+            focused_block(&app, &ctx),
+            Some(1),
+            "still in the same block"
+        );
+        assert!(app.caret.as_ref().is_some_and(|c| c.first_row));
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(focused_block(&app, &ctx), Some(0), "now it jumps");
+        Ok(())
+    }
+
+    #[test]
+    fn tricky_unicode_typed_in_the_app_is_saved_exactly() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+        let text = "e\u{301} 👨‍👩‍👧 🇪🇸 مرحبا שלום 日本語";
+        app_frame(&mut app, &ctx, vec![egui::Event::Text(text.into())]);
+        app.save_now()?;
+        let page = app.selected.clone().expect("page");
+        assert_eq!(app.db.list_blocks(&page)?[0].content, text);
+        assert_eq!(app.db.search_pages("日本語")?.len(), 1);
         Ok(())
     }
 
