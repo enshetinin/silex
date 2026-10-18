@@ -212,3 +212,115 @@ mod moves {
         result
     }
 }
+
+mod reorder {
+    use rusqlite::Connection;
+    use silex_desktop::db::{Database, Shift};
+
+    fn titles_under(db: &Database, parent: Option<&str>) -> anyhow::Result<Vec<String>> {
+        Ok(db
+            .list_pages()?
+            .into_iter()
+            .filter(|p| p.parent_id.as_deref() == parent)
+            .map(|p| p.title)
+            .collect())
+    }
+
+    #[test]
+    fn up_and_down_swap_neighbours() -> anyhow::Result<()> {
+        let mut db = Database::open_in_memory()?;
+        let a = db.create_page("A", None)?;
+        db.create_page("B", None)?;
+        let c = db.create_page("C", None)?;
+
+        assert!(db.reorder_page(&c, Shift::Up)?);
+        assert_eq!(titles_under(&db, None)?, ["A", "C", "B"]);
+        assert!(db.reorder_page(&a, Shift::Down)?);
+        assert_eq!(titles_under(&db, None)?, ["C", "A", "B"]);
+        Ok(())
+    }
+
+    #[test]
+    fn edges_are_a_no_op() -> anyhow::Result<()> {
+        let mut db = Database::open_in_memory()?;
+        let a = db.create_page("A", None)?;
+        let b = db.create_page("B", None)?;
+        assert!(!db.reorder_page(&a, Shift::Up)?);
+        assert!(!db.reorder_page(&b, Shift::Down)?);
+        assert_eq!(titles_under(&db, None)?, ["A", "B"]);
+        Ok(())
+    }
+
+    #[test]
+    fn only_siblings_of_the_same_parent_move() -> anyhow::Result<()> {
+        let mut db = Database::open_in_memory()?;
+        let root = db.create_page("Raíz", None)?;
+        db.create_page("Otra raíz", None)?;
+        db.create_page("H1", Some(&root))?;
+        let h2 = db.create_page("H2", Some(&root))?;
+
+        assert!(db.reorder_page(&h2, Shift::Up)?);
+        assert_eq!(titles_under(&db, Some(&root))?, ["H2", "H1"]);
+        assert_eq!(titles_under(&db, None)?, ["Raíz", "Otra raíz"]);
+        Ok(())
+    }
+
+    #[test]
+    fn trashed_siblings_are_skipped() -> anyhow::Result<()> {
+        let mut db = Database::open_in_memory()?;
+        db.create_page("A", None)?;
+        let hidden = db.create_page("Oculta", None)?;
+        let c = db.create_page("C", None)?;
+        db.trash_page(&hidden)?;
+
+        // One step up passes over the trashed page.
+        assert!(db.reorder_page(&c, Shift::Up)?);
+        assert_eq!(titles_under(&db, None)?, ["C", "A"]);
+        assert!(db.reorder_page(&hidden, Shift::Up).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_sort_orders_are_repaired_and_order_persists() -> anyhow::Result<()> {
+        let path =
+            std::env::temp_dir().join(format!("silex-order-{}.sqlite3", uuid::Uuid::new_v4()));
+        let result = (|| -> anyhow::Result<()> {
+            let c = {
+                let db = Database::open(&path)?;
+                db.create_page("A", None)?;
+                db.create_page("B", None)?;
+                db.create_page("C", None)?
+            };
+            // Simulate old/bad data: every page with the same sort_order.
+            Connection::open(&path)?.execute("UPDATE pages SET sort_order = 0", [])?;
+
+            let mut db = Database::open(&path)?;
+            let before = titles_under(&db, None)?;
+            assert!(db.reorder_page(&c, Shift::Up)?);
+            let after = titles_under(&db, None)?;
+            let c_index = before.iter().position(|t| t == "C").unwrap_or_default();
+            assert_eq!(after.iter().position(|t| t == "C"), Some(c_index - 1));
+            drop(db);
+
+            let reopened = Database::open(&path)?;
+            assert_eq!(titles_under(&reopened, None)?, after);
+            let orders: Vec<i64> = Connection::open(&path)?
+                .prepare("SELECT sort_order FROM pages ORDER BY sort_order")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert_eq!(orders, vec![0, 1, 2]);
+            Ok(())
+        })();
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        result
+    }
+
+    #[test]
+    fn missing_page_is_an_error() -> anyhow::Result<()> {
+        let mut db = Database::open_in_memory()?;
+        assert!(db.reorder_page("no-existe", Shift::Up).is_err());
+        Ok(())
+    }
+}

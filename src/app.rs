@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use eframe::egui::{self, TextEdit};
 use silex_desktop::{
     db::{
-        Database,
+        Database, Shift,
         backup::{self, BackupJob},
     },
     model::{Block, Page, TreeRow, ancestors, build_tree, descendants},
@@ -130,6 +130,14 @@ impl SilexApp {
         self.reload_pages()
     }
 
+    fn reorder_page(&mut self, id: &str, shift: Shift) -> Result<()> {
+        self.save_now()?;
+        if self.db.reorder_page(id, shift)? {
+            self.reload_pages()?;
+        }
+        Ok(())
+    }
+
     /// Sidebar tree: indentation, expand/collapse arrow and page title.
     fn tree_rows(&mut self, ui: &mut egui::Ui) {
         let mut open = None;
@@ -181,8 +189,33 @@ impl SilexApp {
             .find(|p| p.id == page_id)
             .and_then(|p| p.parent_id.clone());
         let blocked = descendants(&self.pages, page_id);
+        // Live siblings in display order (same parent as stored in the database).
+        let siblings: Vec<&str> = self
+            .pages
+            .iter()
+            .filter(|p| p.parent_id == current_parent)
+            .map(|p| p.id.as_str())
+            .collect();
+        let index = siblings.iter().position(|id| *id == page_id);
+        let can_up = index.is_some_and(|i| i > 0);
+        let can_down = index.is_some_and(|i| i + 1 < siblings.len());
+        let mut shift = None;
         ui.horizontal(|ui| {
             subpage = ui.button("+ Subpágina").clicked();
+            if ui
+                .add_enabled(can_up, egui::Button::new("Subir"))
+                .on_hover_text("Subir entre sus hermanas")
+                .clicked()
+            {
+                shift = Some(Shift::Up);
+            }
+            if ui
+                .add_enabled(can_down, egui::Button::new("Bajar"))
+                .on_hover_text("Bajar entre sus hermanas")
+                .clicked()
+            {
+                shift = Some(Shift::Down);
+            }
             egui::ComboBox::from_id_salt("silex_move_target")
                 .selected_text("Mover a…")
                 .show_ui(ui, |ui| {
@@ -206,6 +239,10 @@ impl SilexApp {
         });
         if subpage {
             let result = self.create_subpage(page_id);
+            self.report(result);
+        }
+        if let Some(shift) = shift {
+            let result = self.reorder_page(page_id, shift);
             self.report(result);
         }
         if let Some(target) = action {

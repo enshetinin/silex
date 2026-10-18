@@ -16,6 +16,13 @@ pub mod backup;
 const LATEST_SCHEMA_VERSION: i64 = 1;
 const SCHEMA_V1: &str = include_str!("db/migrations/0001_init.sql");
 
+/// Direction for [`Database::reorder_page`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shift {
+    Up,
+    Down,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -194,6 +201,49 @@ impl Database {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Moves a page one place up or down among its siblings (same parent).
+    /// Returns `false` when it is already first/last. Siblings are renumbered
+    /// 0..n in the same transaction, which also repairs duplicate `sort_order`s.
+    pub fn reorder_page(&mut self, id: &str, shift: Shift) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let parent: Option<String> = tx
+            .query_row(
+                "SELECT parent_id FROM pages WHERE id = ?1 AND deleted_at IS NULL",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La página no existe o está en la papelera")?;
+        // Same order as list_pages, restricted to live siblings.
+        let mut siblings: Vec<String> = tx
+            .prepare(
+                "SELECT id FROM pages WHERE parent_id IS ?1 AND deleted_at IS NULL
+                 ORDER BY sort_order, created_at, id",
+            )?
+            .query_map([&parent], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let index = siblings
+            .iter()
+            .position(|s| s == id)
+            .context("La página no aparece entre sus hermanas")?;
+        let target = match shift {
+            Shift::Up => index.checked_sub(1),
+            Shift::Down => Some(index + 1).filter(|&i| i < siblings.len()),
+        };
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        siblings.swap(index, target);
+        for (position, sibling) in siblings.iter().enumerate() {
+            tx.execute(
+                "UPDATE pages SET sort_order = ?2 WHERE id = ?1",
+                params![sibling, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn get_page(&self, id: &str) -> Result<Option<Page>> {
