@@ -178,3 +178,146 @@ pub fn change_indent(blocks: &mut [Block], index: usize, delta: i8) -> bool {
 pub fn block_char_len(block: &Block) -> usize {
     char_len(&block.content)
 }
+
+// ---------------------------------------------------------------------------
+// Slash menu
+// ---------------------------------------------------------------------------
+
+/// Longest query after "/" that still counts as a command being typed.
+const MAX_SLASH_QUERY: usize = 24;
+
+/// If the block starts with "/" and the cursor is in the word right after it,
+/// returns that word (the menu filter). A space ends the command.
+pub fn slash_query(content: &str, cursor: usize) -> Option<&str> {
+    let rest = content.strip_prefix('/')?;
+    // The command word runs from after "/" to the first whitespace.
+    let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let word = &rest[..word_end];
+    let word_len = char_len(word);
+    (cursor == word_len + 1 && word_len <= MAX_SLASH_QUERY).then_some(word)
+}
+
+/// Lowercase without Spanish accents, so "codigo" finds "Código".
+fn fold(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'á' | 'à' | 'ä' => 'a',
+            'é' | 'è' | 'ë' => 'e',
+            'í' | 'ì' | 'ï' => 'i',
+            'ó' | 'ò' | 'ö' => 'o',
+            'ú' | 'ù' | 'ü' => 'u',
+            other => other,
+        })
+        .collect()
+}
+
+/// Extra words each type answers to in the slash menu.
+fn aliases(kind: BlockKind) -> &'static [&'static str] {
+    match kind {
+        BlockKind::Paragraph => &["texto", "parrafo", "p", "text"],
+        BlockKind::Heading1 => &["h1", "titulo1", "heading1"],
+        BlockKind::Heading2 => &["h2", "titulo2", "heading2"],
+        BlockKind::Heading3 => &["h3", "titulo3", "heading3"],
+        BlockKind::Todo => &["tarea", "todo", "check", "casilla"],
+        BlockKind::Bulleted => &["lista", "vinetas", "ul", "bullet", "-"],
+        BlockKind::Numbered => &["numerada", "ol", "1.", "numero"],
+        BlockKind::Quote => &["cita", "quote", ">"],
+        BlockKind::Code => &["codigo", "code", "```"],
+    }
+}
+
+/// Types matching the slash query, in menu order. Empty query: all types.
+pub fn slash_matches(query: &str) -> Vec<BlockKind> {
+    let query = fold(query);
+    BlockKind::ALL
+        .into_iter()
+        .filter(|kind| {
+            let label = fold(kind.label()).replace(' ', "");
+            label.contains(&query) || aliases(*kind).iter().any(|a| a.starts_with(&query))
+        })
+        .collect()
+}
+
+/// Applies a slash command: removes "/query" (everything before the cursor)
+/// and changes the block type. Returns where the cursor goes.
+pub fn apply_slash(
+    blocks: &mut [Block],
+    index: usize,
+    cursor: usize,
+    kind: BlockKind,
+) -> Option<Caret> {
+    let block = blocks.get_mut(index)?;
+    let cut = byte_index(&block.content, cursor);
+    block.content.replace_range(..cut, "");
+    block.kind = kind;
+    if kind != BlockKind::Todo {
+        block.checked = false;
+    }
+    Some(Caret {
+        block: index,
+        char: 0,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Block selection
+// ---------------------------------------------------------------------------
+
+/// Blocks removed by a selection delete, with their original positions, so
+/// the deletion can be undone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletedBlocks {
+    pub removed: Vec<(usize, Block)>,
+}
+
+/// Deletes blocks `first..=last` (clamped). Returns what was removed.
+pub fn delete_range(blocks: &mut Vec<Block>, first: usize, last: usize) -> DeletedBlocks {
+    let (first, last) = (first.min(last), first.max(last));
+    if first >= blocks.len() {
+        return DeletedBlocks {
+            removed: Vec::new(),
+        };
+    }
+    let last = last.min(blocks.len() - 1);
+    let removed = blocks
+        .drain(first..=last)
+        .enumerate()
+        .map(|(offset, block)| (first + offset, block))
+        .collect();
+    DeletedBlocks { removed }
+}
+
+/// Puts deleted blocks back at their original positions (clamped if the
+/// document got shorter meanwhile).
+pub fn restore_deleted(blocks: &mut Vec<Block>, deleted: DeletedBlocks) {
+    for (index, block) in deleted.removed {
+        let at = index.min(blocks.len());
+        blocks.insert(at, block);
+    }
+}
+
+/// Plain text of blocks `first..=last`: one line per block, two spaces per
+/// indent level, list markers and task boxes. (Markdown is milestone 4.)
+pub fn selection_text(blocks: &[Block], first: usize, last: usize) -> String {
+    let (first, last) = (first.min(last), first.max(last));
+    let numbers = crate::model::list_numbers(blocks);
+    blocks
+        .iter()
+        .zip(numbers)
+        .enumerate()
+        .filter(|(i, _)| (first..=last).contains(i))
+        .map(|(_, (block, number))| {
+            let indent = "  ".repeat(usize::from(block.indent));
+            let marker = match block.kind {
+                BlockKind::Bulleted => "• ".to_owned(),
+                BlockKind::Numbered => format!("{}. ", number.unwrap_or(1)),
+                BlockKind::Todo if block.checked => "[x] ".to_owned(),
+                BlockKind::Todo => "[ ] ".to_owned(),
+                _ => String::new(),
+            };
+            format!("{indent}{marker}{}", block.content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}

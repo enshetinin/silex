@@ -218,3 +218,101 @@ mod tab_key {
         assert_eq!(blocks[1].indent, MAX_INDENT);
     }
 }
+
+mod slash {
+    use super::*;
+    use silex_desktop::editor::{apply_slash, slash_matches, slash_query};
+
+    #[test]
+    fn query_is_the_word_after_a_leading_slash_up_to_the_cursor() {
+        assert_eq!(slash_query("/", 1), Some(""));
+        assert_eq!(slash_query("/tit", 4), Some("tit"));
+        assert_eq!(slash_query("/código", 7), Some("código"), "char cursor");
+        assert_eq!(slash_query("/tit", 2), None, "cursor inside the word");
+        assert_eq!(slash_query("/h1 hola", 8), None, "a space ends it");
+        assert_eq!(slash_query("hola /h1", 8), None, "only at the start");
+        assert_eq!(slash_query("/x", 0), None);
+        assert_eq!(slash_query("", 0), None);
+    }
+
+    #[test]
+    fn matches_by_label_alias_and_without_accents() {
+        assert_eq!(slash_matches(""), BlockKind::ALL.to_vec());
+        assert_eq!(slash_matches("h2"), [BlockKind::Heading2]);
+        assert_eq!(slash_matches("codigo"), [BlockKind::Code]);
+        assert_eq!(slash_matches("CÓDIGO"), [BlockKind::Code]);
+        assert_eq!(slash_matches("tarea"), [BlockKind::Todo]);
+        assert_eq!(
+            slash_matches("titulo"),
+            [
+                BlockKind::Heading1,
+                BlockKind::Heading2,
+                BlockKind::Heading3
+            ]
+        );
+        assert!(slash_matches("zzz").is_empty());
+    }
+
+    #[test]
+    fn applying_removes_the_command_and_changes_the_type() {
+        let mut blocks = vec![b("a", Todo, 1, "/h1resto")];
+        let caret = apply_slash(&mut blocks, 0, 3, Heading1);
+        assert_eq!(caret, Some(Caret { block: 0, char: 0 }));
+        assert_eq!(summary(&blocks), [("a", Heading1, 1, "resto")]);
+        assert!(!blocks[0].checked);
+    }
+}
+
+mod selection {
+    use super::*;
+    use silex_desktop::editor::{delete_range, restore_deleted, selection_text};
+
+    fn doc() -> Vec<Block> {
+        vec![
+            b("a", Heading1, 0, "Compras"),
+            b("b", Bulleted, 0, "Pan"),
+            b("c", Bulleted, 1, "Integral"),
+            b("d", Numbered, 0, "Uno"),
+            b("e", Numbered, 0, "Dos"),
+            b("f", Todo, 0, "Pagar"),
+        ]
+    }
+
+    #[test]
+    fn delete_and_restore_round_trip() {
+        let original = doc();
+        let mut blocks = original.clone();
+        let deleted = delete_range(&mut blocks, 3, 1); // reversed order is fine
+        assert_eq!(
+            summary(&blocks)
+                .iter()
+                .map(|(id, ..)| *id)
+                .collect::<Vec<_>>(),
+            ["a", "e", "f"]
+        );
+        restore_deleted(&mut blocks, deleted);
+        assert_eq!(blocks, original);
+    }
+
+    #[test]
+    fn delete_out_of_range_is_clamped_or_empty() {
+        let mut blocks = doc();
+        assert!(delete_range(&mut blocks, 10, 12).removed.is_empty());
+        let deleted = delete_range(&mut blocks, 4, 99);
+        assert_eq!(deleted.removed.len(), 2);
+        assert_eq!(blocks.len(), 4);
+    }
+
+    #[test]
+    fn copied_text_keeps_indent_markers_and_numbers() {
+        assert_eq!(
+            selection_text(&doc(), 0, 5),
+            "Compras\n• Pan\n  • Integral\n1. Uno\n2. Dos\n[x] Pagar"
+        );
+        assert_eq!(
+            selection_text(&doc(), 4, 4),
+            "2. Dos",
+            "number from context"
+        );
+    }
+}

@@ -57,6 +57,12 @@ pub struct SilexApp {
     pending_key: Option<(EditorKey, String)>,
     /// Block to focus (and cursor position) on the next frame.
     pending_focus: Option<(String, usize)>,
+    slash: Option<SlashMenu>,
+    /// Escape closed the menu for this block until its text changes.
+    slash_dismissed: Option<(String, String)>,
+    selection: Option<BlockSelection>,
+    /// Last selection delete, offered for undo until the page changes.
+    deleted: Option<editor::DeletedBlocks>,
 }
 
 /// Cursor state of the focused block text field.
@@ -79,6 +85,25 @@ enum EditorKey {
     Outdent,
     Up,
     Down,
+    /// Escape: leave the text and select the block.
+    Select,
+    /// Enter in the slash menu: apply this type.
+    Slash(BlockKind),
+}
+
+/// Slash menu shown under the focused block while "/word" is being typed.
+#[derive(Debug, Clone)]
+struct SlashMenu {
+    block_id: String,
+    matches: Vec<BlockKind>,
+    selected: usize,
+}
+
+/// Selected blocks (by id): `anchor` stays, `head` moves with Shift+↑/↓.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlockSelection {
+    anchor: String,
+    head: String,
 }
 
 /// Inline rename in the sidebar.
@@ -152,6 +177,10 @@ impl SilexApp {
             ime_composing: false,
             pending_key: None,
             pending_focus: None,
+            slash: None,
+            slash_dismissed: None,
+            selection: None,
+            deleted: None,
         };
         app.backup_label = app.describe_last_backup();
         app.trash_count = app.db.trash_count()?;
@@ -167,6 +196,10 @@ impl SilexApp {
         self.save_now()?;
         let page = self.db.get_page(&id)?;
         if let Some(page) = page {
+            self.slash = None;
+            self.slash_dismissed = None;
+            self.selection = None;
+            self.deleted = None;
             self.blocks = self.db.list_blocks(&id)?;
             self.title = page.title;
             // Make the open page visible in the tree.
@@ -639,14 +672,45 @@ impl SilexApp {
         let Some(block) = self.blocks.iter().find(|b| b.id == caret.block_id) else {
             return;
         };
-        if !ctx.memory(|m| m.has_focus(self.block_field_id(&block.id))) || caret.selection {
+        // egui clears focus on Escape at the start of the frame, before this
+        // runs; for Escape the caret from the end of the last frame is enough.
+        let escape = ctx.input(|i| {
+            i.events.iter().any(|e| {
+                matches!(e, egui::Event::Key { key: egui::Key::Escape, pressed: true, modifiers, .. }
+                    if modifiers.is_none())
+            })
+        });
+        let focused = ctx.memory(|m| m.has_focus(self.block_field_id(&block.id)));
+        if (!focused && !escape) || caret.selection {
             return;
         }
         let code = block.kind == BlockKind::Code;
         let at_start = caret.char == 0;
         let at_end = caret.char >= editor::block_char_len(block);
         use egui::{Key, Modifiers as M};
+        // The slash menu, when open, owns ↑ ↓ Enter and Escape.
+        if let Some(menu) = self.slash.as_mut().filter(|m| m.block_id == block.id) {
+            let last = menu.matches.len().saturating_sub(1);
+            if take_exact_key(ctx, Key::ArrowDown, M::NONE) {
+                menu.selected = (menu.selected + 1).min(last);
+            }
+            if take_exact_key(ctx, Key::ArrowUp, M::NONE) {
+                menu.selected = menu.selected.saturating_sub(1);
+            }
+            if take_exact_key(ctx, Key::Escape, M::NONE) {
+                self.slash_dismissed = Some((block.id.clone(), block.content.clone()));
+                self.slash = None;
+                return;
+            }
+            if let Some(kind) = menu.matches.get(menu.selected).copied()
+                && take_exact_key(ctx, Key::Enter, M::NONE)
+            {
+                self.pending_key = Some((EditorKey::Slash(kind), block.id.clone()));
+            }
+            return;
+        }
         let candidates = [
+            (EditorKey::Select, Key::Escape, M::NONE, true),
             (
                 EditorKey::Enter,
                 Key::Enter,
@@ -723,6 +787,21 @@ impl SilexApp {
                 block: index + 1,
                 char: 0,
             }),
+            EditorKey::Select => {
+                self.selection = Some(BlockSelection {
+                    anchor: block_id.clone(),
+                    head: block_id.clone(),
+                });
+                ctx.memory_mut(|m| m.surrender_focus(field));
+                self.pending_focus = None;
+                // The caret drawn this frame is stale now: no text field has focus.
+                self.caret = None;
+                return;
+            }
+            EditorKey::Slash(kind) => {
+                self.slash = None;
+                editor::apply_slash(&mut self.blocks, index, cursor, kind)
+            }
         };
         let structural = !matches!(command, EditorKey::Up | EditorKey::Down);
         if structural {
@@ -747,6 +826,156 @@ impl SilexApp {
             self.pending_focus = Some((target.id.clone(), caret.char));
             ctx.request_repaint();
         }
+    }
+
+    /// Index range of the selection (inclusive), if both ends still exist.
+    fn selection_range(&self) -> Option<(usize, usize)> {
+        let sel = self.selection.as_ref()?;
+        let a = self.blocks.iter().position(|b| b.id == sel.anchor)?;
+        let h = self.blocks.iter().position(|b| b.id == sel.head)?;
+        Some((a.min(h), a.max(h)))
+    }
+
+    /// Keys while blocks are selected (no text field has focus):
+    /// ↑/↓ move, Shift+↑/↓ extend, Backspace/Delete delete, Cmd+C/Cmd+X copy
+    /// or cut, Enter edits, Escape clears.
+    fn handle_selection_keys(&mut self, ctx: &egui::Context) {
+        let Some(sel) = self.selection.clone() else {
+            return;
+        };
+        let Some((first, last)) = self.selection_range() else {
+            self.selection = None;
+            return;
+        };
+        let Some(head) = self.blocks.iter().position(|b| b.id == sel.head) else {
+            self.selection = None;
+            return;
+        };
+        use egui::{Key, Modifiers as M};
+        let id_at = |i: usize| self.blocks.get(i).map(|b| b.id.clone());
+        let step = |key: Key, modifiers: M| take_exact_key(ctx, key, modifiers);
+        if step(Key::ArrowUp, M::SHIFT) {
+            if let Some(id) = head.checked_sub(1).and_then(id_at) {
+                self.selection = Some(BlockSelection { head: id, ..sel });
+            }
+        } else if step(Key::ArrowDown, M::SHIFT) {
+            if let Some(id) = id_at(head + 1) {
+                self.selection = Some(BlockSelection { head: id, ..sel });
+            }
+        } else if step(Key::ArrowUp, M::NONE) {
+            if let Some(id) = first
+                .checked_sub(1)
+                .and_then(id_at)
+                .or_else(|| id_at(first))
+            {
+                self.selection = Some(BlockSelection {
+                    anchor: id.clone(),
+                    head: id,
+                });
+            }
+        } else if step(Key::ArrowDown, M::NONE) {
+            if let Some(id) = id_at(last + 1).or_else(|| id_at(last)) {
+                self.selection = Some(BlockSelection {
+                    anchor: id.clone(),
+                    head: id,
+                });
+            }
+        } else if step(Key::Enter, M::NONE) {
+            if let Some(block) = self.blocks.get(head) {
+                self.pending_focus = Some((block.id.clone(), editor::block_char_len(block)));
+            }
+            self.selection = None;
+        } else if step(Key::Escape, M::NONE) {
+            self.selection = None;
+        } else {
+            let copy = take_event(ctx, |e| matches!(e, egui::Event::Copy));
+            let cut = take_event(ctx, |e| matches!(e, egui::Event::Cut));
+            if copy || cut {
+                ctx.copy_text(editor::selection_text(&self.blocks, first, last));
+            }
+            if cut || step(Key::Backspace, M::NONE) || step(Key::Delete, M::NONE) {
+                self.delete_selection(first, last);
+            }
+        }
+    }
+
+    fn delete_selection(&mut self, first: usize, last: usize) {
+        let deleted = editor::delete_range(&mut self.blocks, first, last);
+        if deleted.removed.is_empty() {
+            return;
+        }
+        self.deleted = Some(deleted);
+        self.selection = self
+            .blocks
+            .get(first.min(self.blocks.len().saturating_sub(1)))
+            .map(|b| BlockSelection {
+                anchor: b.id.clone(),
+                head: b.id.clone(),
+            });
+        self.mark_dirty();
+    }
+
+    fn undo_delete(&mut self) {
+        if let Some(deleted) = self.deleted.take() {
+            editor::restore_deleted(&mut self.blocks, deleted);
+            self.selection = None;
+            self.mark_dirty();
+        }
+    }
+
+    /// After layout: open, update or close the slash menu from the caret, and
+    /// drop the block selection if the user clicked into a text field.
+    fn refresh_slash_and_selection(&mut self) {
+        if self.caret.is_some() {
+            self.selection = None;
+        }
+        let Some(caret) = self.caret.as_ref().filter(|c| !c.selection) else {
+            self.slash = None;
+            return;
+        };
+        let Some(block) = self.blocks.iter().find(|b| b.id == caret.block_id) else {
+            self.slash = None;
+            return;
+        };
+        let dismissed = self
+            .slash_dismissed
+            .as_ref()
+            .is_some_and(|(id, content)| *id == block.id && *content == block.content);
+        if !dismissed {
+            self.slash_dismissed = None;
+        }
+        let matches = editor::slash_query(&block.content, caret.char)
+            .filter(|_| !dismissed && block.kind != BlockKind::Code)
+            .map(editor::slash_matches)
+            .filter(|m| !m.is_empty());
+        self.slash = matches.map(|matches| {
+            let selected = self
+                .slash
+                .as_ref()
+                .filter(|m| m.block_id == block.id)
+                .map_or(0, |m| m.selected.min(matches.len() - 1));
+            SlashMenu {
+                block_id: block.id.clone(),
+                matches,
+                selected,
+            }
+        });
+    }
+
+    /// "N bloques eliminados · Deshacer" after deleting a selection.
+    fn deleted_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(count) = self.deleted.as_ref().map(|d| d.removed.len()) else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.label(format!("Se eliminaron {count} bloque(s)."));
+            if ui.small_button("Deshacer").clicked() {
+                self.undo_delete();
+            }
+            if ui.small_button("Cerrar").clicked() {
+                self.deleted = None;
+            }
+        });
     }
 
     /// Focuses the block chosen by the last editor command, with its cursor.
@@ -1238,6 +1467,7 @@ impl SilexApp {
             self.status_bar(ui);
         });
         self.notice_bar(ui);
+        self.deleted_bar(ui);
         self.page_actions(ui, &page_id);
         if self.selected.as_deref() != Some(page_id.as_str()) {
             // The page was trashed (or another opened) this frame.
@@ -1263,14 +1493,26 @@ impl SilexApp {
                 let numbers = list_numbers(&self.blocks);
                 let scroll_to = self.pending_focus.as_ref().map(|(id, _)| id.clone());
                 self.caret = None;
-                for (block, number) in self.blocks.iter_mut().zip(numbers) {
+                let selected = self.selection_range();
+                let mut clicked_kind = None;
+                for (index, (block, number)) in self.blocks.iter_mut().zip(numbers).enumerate() {
                     let scroll = scroll_to.as_deref() == Some(block.id.as_str());
-                    let out = block_field(ui, self.doc_generation, block, number, scroll);
+                    let is_selected = selected.is_some_and(|(a, b)| (a..=b).contains(&index));
+                    let out =
+                        block_field(ui, self.doc_generation, block, number, scroll, is_selected);
                     modified |= out.changed;
                     if out.caret.is_some() {
                         self.caret = out.caret;
                     }
+                    if let Some(menu) = self.slash.as_ref().filter(|m| m.block_id == block.id)
+                        && let Some(kind) = slash_menu_ui(ui, menu)
+                    {
+                        clicked_kind = Some((kind, block.id.clone()));
+                    }
                     ui.add_space(6.0);
+                }
+                if let Some((kind, id)) = clicked_kind {
+                    self.pending_key = Some((EditorKey::Slash(kind), id));
                 }
             });
         if modified {
@@ -1420,8 +1662,10 @@ impl SilexApp {
         self.handle_shortcuts(&ctx);
         self.take_editor_key(&ctx);
         self.apply_pending_focus(&ctx);
+        self.handle_selection_keys(&ctx);
         self.layout(ui);
         self.run_editor_key(&ctx);
+        self.refresh_slash_and_selection();
         // Save errors are shown by the status bar, so results are not reported twice.
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             let _ = self.save_now();
@@ -1490,57 +1734,99 @@ fn block_field(
     block: &mut Block,
     number: Option<usize>,
     scroll_into_view: bool,
+    selected: bool,
 ) -> BlockOutput {
     let id = field_id(generation, "block", &block.id);
-    ui.horizontal(|ui| {
-        let mut changed = kind_selector(ui, block);
-        ui.add_space(f32::from(block.indent) * INDENT_WIDTH);
-        match block.kind {
-            BlockKind::Todo => changed |= ui.checkbox(&mut block.checked, "").changed(),
-            BlockKind::Bulleted => {
-                ui.label("•");
-            }
-            BlockKind::Numbered => {
-                ui.label(format!("{}.", number.unwrap_or(1)));
-            }
-            BlockKind::Quote => {
-                let (bar, _) = ui.allocate_exact_size(egui::vec2(3.0, 20.0), egui::Sense::hover());
-                ui.painter()
-                    .rect_filled(bar, 1.0, ui.visuals().weak_text_color());
-            }
-            _ => {}
-        }
-        let edit = match block.kind {
-            BlockKind::Heading1 | BlockKind::Heading2 | BlockKind::Heading3 => {
-                TextEdit::singleline(&mut block.content)
-                    .font(egui::FontId::proportional(heading_size(block.kind)))
-            }
-            BlockKind::Code => TextEdit::multiline(&mut block.content)
-                .code_editor()
-                .desired_rows(1),
-            _ => TextEdit::multiline(&mut block.content).desired_rows(1),
-        };
-        let output = edit.id(id).desired_width(f32::INFINITY).show(ui);
-        changed |= output.response.changed();
-        if scroll_into_view {
-            output.response.scroll_to_me(None);
-        }
-        let caret = output
-            .cursor_range
-            .filter(|_| output.response.has_focus())
-            .map(|range| {
-                let row = output.galley.layout_from_cursor(range.primary).row;
-                CaretInfo {
-                    block_id: block.id.clone(),
-                    char: range.primary.index.0,
-                    selection: range.primary.index != range.secondary.index,
-                    first_row: row == 0,
-                    last_row: row + 1 >= output.galley.rows.len(),
+    let fill = if selected {
+        ui.visuals().selection.bg_fill.gamma_multiply(0.35)
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    let frame = egui::Frame::new().fill(fill).corner_radius(4.0);
+    frame
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let mut changed = kind_selector(ui, block);
+                ui.add_space(f32::from(block.indent) * INDENT_WIDTH);
+                match block.kind {
+                    BlockKind::Todo => changed |= ui.checkbox(&mut block.checked, "").changed(),
+                    BlockKind::Bulleted => {
+                        ui.label("•");
+                    }
+                    BlockKind::Numbered => {
+                        ui.label(format!("{}.", number.unwrap_or(1)));
+                    }
+                    BlockKind::Quote => {
+                        let (bar, _) =
+                            ui.allocate_exact_size(egui::vec2(3.0, 20.0), egui::Sense::hover());
+                        ui.painter()
+                            .rect_filled(bar, 1.0, ui.visuals().weak_text_color());
+                    }
+                    _ => {}
                 }
-            });
-        BlockOutput { changed, caret }
+                let edit = match block.kind {
+                    BlockKind::Heading1 | BlockKind::Heading2 | BlockKind::Heading3 => {
+                        TextEdit::singleline(&mut block.content)
+                            .font(egui::FontId::proportional(heading_size(block.kind)))
+                    }
+                    BlockKind::Code => TextEdit::multiline(&mut block.content)
+                        .code_editor()
+                        .desired_rows(1),
+                    _ => TextEdit::multiline(&mut block.content).desired_rows(1),
+                };
+                let output = edit.id(id).desired_width(f32::INFINITY).show(ui);
+                changed |= output.response.changed();
+                if scroll_into_view {
+                    output.response.scroll_to_me(None);
+                }
+                let caret = output
+                    .cursor_range
+                    .filter(|_| output.response.has_focus())
+                    .map(|range| {
+                        let row = output.galley.layout_from_cursor(range.primary).row;
+                        CaretInfo {
+                            block_id: block.id.clone(),
+                            char: range.primary.index.0,
+                            selection: range.primary.index != range.secondary.index,
+                            first_row: row == 0,
+                            last_row: row + 1 >= output.galley.rows.len(),
+                        }
+                    });
+                BlockOutput { changed, caret }
+            })
+            .inner
+        })
+        .inner
+}
+
+/// The slash menu list; returns the type clicked with the mouse, if any.
+fn slash_menu_ui(ui: &mut egui::Ui, menu: &SlashMenu) -> Option<BlockKind> {
+    let mut clicked = None;
+    egui::Frame::popup(ui.style()).show(ui, |ui| {
+        ui.weak("Convertir en… (↑ ↓ Intro, Esc para cerrar)");
+        for (i, kind) in menu.matches.iter().enumerate() {
+            if ui
+                .selectable_label(i == menu.selected, kind.label())
+                .clicked()
+            {
+                clicked = Some(*kind);
+            }
+        }
+    });
+    clicked
+}
+
+/// Removes the first input event matching `wanted`; returns whether found.
+fn take_event(ctx: &egui::Context, wanted: impl Fn(&egui::Event) -> bool) -> bool {
+    ctx.input_mut(|input| {
+        let mut taken = false;
+        input.events.retain(|event| {
+            let matches = !taken && wanted(event);
+            taken |= matches;
+            !matches
+        });
+        taken
     })
-    .inner
 }
 
 /// Takes a key press with exactly these modifiers (egui's `consume_key`
@@ -1674,7 +1960,7 @@ mod tests {
                 ui.memory_mut(|m| m.request_focus(id));
             }
             for block in blocks.iter_mut() {
-                changed |= block_field(ui, 0, block, None, false).changed;
+                changed |= block_field(ui, 0, block, None, false, false).changed;
             }
         });
         // Headless: nothing renders the font texture, so drop it explicitly.
@@ -2181,6 +2467,152 @@ mod tests {
         let commit = egui::Event::Ime(egui::ImeEvent::Commit("に".into()));
         app_frame(&mut app, &ctx, vec![commit]);
         assert!(!app.ime_composing, "a commit ends the composition");
+        Ok(())
+    }
+
+    /// Like `app_frame`, but returns the platform commands (e.g. copy).
+    fn app_frame_commands(
+        app: &mut SilexApp,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> Vec<egui::OutputCommand> {
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+        output.textures_delta.clear();
+        output.platform_output.commands
+    }
+
+    fn type_into(app: &mut SilexApp, ctx: &egui::Context, text: &str) {
+        for c in text.chars() {
+            app_frame(app, ctx, vec![egui::Event::Text(c.to_string())]);
+        }
+    }
+
+    #[test]
+    fn slash_command_changes_the_block_type() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+        type_into(&mut app, &ctx, "/h2");
+        let menu = app.slash.clone().expect("menu open");
+        assert_eq!(menu.matches, [BlockKind::Heading2]);
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        assert_eq!(contents(&app), [(BlockKind::Heading2, 0, String::new())]);
+        assert!(app.slash.is_none());
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(focused_block(&app, &ctx), Some(0), "keeps editing");
+        Ok(())
+    }
+
+    #[test]
+    fn slash_menu_arrows_pick_and_escape_closes() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+        type_into(&mut app, &ctx, "/titulo");
+        assert_eq!(app.slash.as_ref().map(|m| m.matches.len()), Some(3));
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+        assert_eq!(app.slash.as_ref().map(|m| m.selected), Some(1));
+        assert_eq!(app.blocks.len(), 1, "arrows stay in the menu");
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        assert_eq!(app.blocks[0].kind, BlockKind::Heading2);
+
+        // Escape closes the menu and leaves the text (no block selection).
+        let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+        type_into(&mut app, &ctx, "/h1");
+        app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert!(app.slash.is_none());
+        assert!(app.selection.is_none());
+        assert_eq!(app.blocks[0].content, "/h1");
+        assert_eq!(app.blocks[0].kind, Par);
+        // Coming back to the block does not reopen it until the text changes.
+        app.pending_focus = Some((app.blocks[0].id.clone(), 3));
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(focused_block(&app, &ctx), Some(0));
+        assert!(app.slash.is_none(), "stays dismissed");
+        app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.blocks[0].content, "/h");
+        assert!(app.slash.is_some(), "text changed: menu is back");
+        Ok(())
+    }
+
+    #[test]
+    fn enter_without_slash_matches_splits_as_usual() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+        type_into(&mut app, &ctx, "/zzz");
+        assert!(app.slash.is_none());
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        assert_eq!(app.blocks.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn block_selection_extend_copy_delete_and_undo() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(
+            &[
+                (Par, 0, "uno"),
+                (Bul, 0, "dos"),
+                (Bul, 1, "tres"),
+                (Par, 0, "cuatro"),
+            ],
+            1,
+            0,
+        )?;
+        app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.selection_range(), Some((1, 1)));
+        assert_eq!(focused_block(&app, &ctx), None, "text field left");
+
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::SHIFT)]);
+        assert_eq!(app.selection_range(), Some((1, 2)));
+        let commands = app_frame_commands(&mut app, &ctx, vec![egui::Event::Copy]);
+        assert!(
+            commands.contains(&egui::OutputCommand::CopyText("• dos\n  • tres".into())),
+            "{commands:?}"
+        );
+
+        app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+        let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+        assert_eq!(texts, ["uno", "cuatro"]);
+        assert_eq!(app.selection_range(), Some((1, 1)), "selection moves on");
+        assert!(!app.save.can_close());
+
+        app.undo_delete();
+        let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+        assert_eq!(texts, ["uno", "dos", "tres", "cuatro"]);
+        Ok(())
+    }
+
+    #[test]
+    fn selection_moves_with_arrows_and_enter_goes_back_to_editing() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "a"), (Par, 0, "bb"), (Par, 0, "c")], 0, 0)?;
+        app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+        assert_eq!(app.selection_range(), Some((1, 1)));
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        app_frame(&mut app, &ctx, vec![]);
+        assert!(app.selection.is_none());
+        assert_eq!(focused_block(&app, &ctx), Some(1));
+        assert_eq!(caret_char(&app), Some(2), "cursor at the end");
+        Ok(())
+    }
+
+    #[test]
+    fn cut_copies_and_deletes_and_page_switch_drops_undo() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Par, 0, "a"), (Par, 0, "b")], 0, 0)?;
+        app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+        let commands = app_frame_commands(&mut app, &ctx, vec![egui::Event::Cut]);
+        assert!(commands.contains(&egui::OutputCommand::CopyText("a".into())));
+        assert_eq!(app.blocks.len(), 1);
+        assert!(app.deleted.is_some());
+        let other = app.db.create_page("Otra", None)?;
+        app.reload_pages()?;
+        app.open_page(other)?;
+        assert!(app.deleted.is_none() && app.selection.is_none());
         Ok(())
     }
 

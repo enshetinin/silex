@@ -28,7 +28,7 @@
 ## Hito 3 — editor tipo Notion (primer valor diferencial)
 - [ ] Comandos de edición por bloque: Enter/Backspace/Tab/Shift-Tab. *(H3.2 implementada: Intro divide (Mayús+Intro y bloques de código: salto de línea), Retroceso al inicio convierte, quita sangría o fusiona, Supr al final une, Tab/Mayús+Tab con límite de un nivel, ↑/↓ entre bloques; operaciones puras en `src/editor.rs`; sin interceptar durante IME. Tests verdes en macOS; verificación manual pendiente, incluida con un IME real.)*
 - [ ] Más tipos de bloque: H1/2/3, listas, cita y código. *(H3.1 implementada: migración 0003, `BlockKind`, sangría guardada, guardado por sincronización completa y selector de tipo por bloque; tests verdes y actualización real v1/v2→v3 en macOS; verificación manual pendiente.)*
-- [ ] Menú `/`, teclado y selección de bloques.
+- [ ] Menú `/`, teclado y selección de bloques. *(H3.3 implementada: «/palabra» al inicio de un bloque abre el menú de tipos (filtra sin acentos y con alias, ↑ ↓ Intro, Esc cierra); Esc selecciona el bloque, Mayús+↑/↓ amplía, Retroceso/Supr borra con «Deshacer», Cmd+C/Cmd+X copia o corta como texto. Tests verdes en macOS; verificación manual pendiente.)*
 - [ ] Reordenación y borrado de bloques; undo/redo semánticos.
 - [ ] Pruebas de cursor/foco, copy-paste y Unicode/IME.
 
