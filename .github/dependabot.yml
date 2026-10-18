@@ -4,7 +4,15 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Updates go through develop like any other change (see CONTRIBUTING.md).
+    target-branch: develop
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    # Updates go through develop like any other change (see CONTRIBUTING.md).
+    target-branch: develop
+    ignore:
+      # Its refs are Rust versions (@stable, @1.95), not releases of the action;
+      # the MSRV must follow Cargo.toml's rust-version, not Dependabot.
+      - dependency-name: dtolnay/rust-toolchain
