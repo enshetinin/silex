@@ -10,7 +10,14 @@ fn main() -> Result<()> {
         viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1100.0, 760.0]),
         ..Default::default()
     };
-    eframe::run_native("Silex", options, Box::new(move |_cc| Ok(Box::new(app))))
-        .map_err(|err| anyhow::anyhow!("No se puede iniciar la interfaz: {err}"))?;
+    eframe::run_native(
+        "Silex",
+        options,
+        Box::new(move |cc| {
+            app::theme::install(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
+    )
+    .map_err(|err| anyhow::anyhow!("No se puede iniciar la interfaz: {err}"))?;
     Ok(())
 }

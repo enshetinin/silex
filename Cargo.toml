@@ -18,6 +18,11 @@ uuid = { version = "1", features = ["v4"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 
 
+[dev-dependencies]
+# UI snapshots (H5.2): renders the app headless to PNG for review and to
+# catch unintended visual changes. MIT OR Apache-2.0, same version as egui.
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

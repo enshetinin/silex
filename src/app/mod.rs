@@ -13,10 +13,14 @@ use silex_desktop::{
 mod blocks;
 mod dialogs;
 mod document;
+pub mod icons;
 mod jobs;
 mod sidebar;
 #[cfg(test)]
+mod snapshots;
+#[cfg(test)]
 mod tests;
+pub mod theme;
 
 use self::{blocks::*, dialogs::*, sidebar::*};
 
@@ -369,6 +373,10 @@ impl SilexApp {
     /// One frame: shortcuts, layout, dialogs, background work and autosave.
     fn update_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // The root Ui has no background of its own: paint the theme canvas
+        // over the whole window (otherwise the window clear color shows).
+        ui.painter()
+            .rect_filled(ctx.content_rect(), 0.0, theme::current(&ctx).bg);
         self.handle_shortcuts(&ctx);
         self.handle_dropped_files(&ctx);
         self.take_editor_key(&ctx);

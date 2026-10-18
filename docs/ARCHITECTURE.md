@@ -59,6 +59,8 @@ Evitar recrear conexiones cada frame, filtrar SQL para búsqueda y virtualizar p
 Archivos en rutas estándar del OS; sin red, cookies, login o telemetría. No hay cifrado at-rest; documentarlo claramente. Atajos SQL y rutas de adjuntos requieren pruebas de escaping y traversal. Revisión de dependencias mediante Dependabot y auditoría futura.
 
 ## UI/UX
+Sistema de diseño (H5.2): todos los colores salen de `theme::Palette` (`LIGHT`/`DARK`), y cada par texto/fondo tiene un test de contraste WCAG AA. Los espacios, radios y tamaños de texto son tokens (`theme::space`, `radius`, `text`). Las fuentes Inter (Regular y SemiBold) y los iconos Phosphor van incrustadas desde `assets/fonts/` (origen, licencias y SHA-256 en su README); los iconos son texto en el área de uso privado (`src/app/icons.rs`). El tema sigue al sistema (`ThemePreference::System`) y `theme::install` registra los estilos de ambos. Las capturas de `src/app/snapshots.rs` dibujan la app real con `egui_kittest` + wgpu: solo se ejecutan con `SILEX_SNAPSHOTS=1` (dependen del sistema y la GPU), y las de referencia son de macOS. Para aceptar cambios: `SILEX_SNAPSHOTS=1 UPDATE_SNAPSHOTS=1 cargo test --bin silex-desktop snapshots`.
+
 Diseño editorial, navegación lateral, área central legible, estados de carga/guardado/error, accesibilidad por teclado. Atajos (H2.5) se leen al inicio de cada frame con `consume_shortcut`, antes de los widgets, comprobando primero los más específicos (Cmd+Mayús+N antes que Cmd+N). Las acciones sobre páginas (clic, menú contextual, teclado) pasan por un único `RowAction` → `SilexApp::apply`.
 
 Teclado del editor (H3.2): las operaciones son funciones puras sobre `Vec<Block>` en `src/editor.rs`, con posiciones en caracteres (como egui). En cada frame:

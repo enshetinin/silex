@@ -2,3 +2,7 @@
 # purpose (tests/golden/import/edge.md uses CRLF): never convert them, also
 # on Windows checkouts with core.autocrlf=true.
 tests/golden/** -text
+# Bundled fonts are binary data.
+assets/fonts/*.ttf binary
+# UI snapshot references are binary images.
+tests/snapshots/*.png binary
