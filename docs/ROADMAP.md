@@ -37,7 +37,7 @@
 
 ## Hito 4 — importación y exportación
 - [ ] Markdown → bloques con pruebas golden.
-- [ ] Bloques → Markdown estable.
+- [ ] Bloques → Markdown estable. *(H4.1 implementada: `markdown::page_to_markdown` (CommonMark + tareas GFM, todo el texto escapado para volver idéntico), archivo golden y comprobación con `pulldown-cmark`; «Exportar a Markdown» a `Documentos/Silex/Exportaciones` con nombres seguros y escritura atómica. Tests verdes en macOS; verificación manual pendiente.)*
 - [ ] Exportación de espacio de trabajo; adjuntos con rutas seguras.
 
 ## Hito 5 — UX de producto

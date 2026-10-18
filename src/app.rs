@@ -60,6 +60,8 @@ pub struct SilexApp {
     pending_focus: Option<(String, usize)>,
     /// Multi-line paste taken this frame (block id, text), run after layout.
     pending_paste: Option<(String, String)>,
+    /// Last exported file, offered with "Abrir carpeta".
+    last_export: Option<PathBuf>,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -188,6 +190,7 @@ impl SilexApp {
             pending_key: None,
             pending_focus: None,
             pending_paste: None,
+            last_export: None,
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -1046,6 +1049,39 @@ impl SilexApp {
         });
     }
 
+    /// Exports the open page as it is on screen (saved first when possible).
+    fn export_current_page(&mut self) -> Result<()> {
+        let dir = silex_desktop::export::export_root()?;
+        self.export_current_page_to(&dir)
+    }
+
+    fn export_current_page_to(&mut self, dir: &std::path::Path) -> Result<()> {
+        // A save error is shown by the status bar; export what the user sees anyway.
+        let _ = self.save_now();
+        let path = silex_desktop::export::export_page(dir, &self.title, &self.blocks)?;
+        self.last_export = Some(path);
+        Ok(())
+    }
+
+    /// "Exportada a …" with a button to open the folder.
+    fn export_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(path) = self.last_export.clone() else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.label(format!("Exportada a {}", path.display()));
+            if ui.small_button("Abrir carpeta").clicked()
+                && let Some(dir) = path.parent()
+            {
+                let result = silex_desktop::export::open_in_file_manager(dir);
+                self.report(result);
+            }
+            if ui.small_button("Cerrar").clicked() {
+                self.last_export = None;
+            }
+        });
+    }
+
     /// Runs an action from a block's "…" menu.
     fn block_action(&mut self, action: BlockAction, id: &str) {
         let Some(index) = self.blocks.iter().position(|b| b.id == id) else {
@@ -1206,6 +1242,7 @@ impl SilexApp {
         });
         let is_favorite = self.favorites.iter().any(|p| p.id == page_id);
         let mut toggle_favorite = false;
+        let mut export = false;
         ui.horizontal(|ui| {
             let label = if is_favorite {
                 "Quitar de favoritos"
@@ -1217,7 +1254,15 @@ impl SilexApp {
                 .button("Enviar a la papelera")
                 .on_hover_text("Se mueve con sus subpáginas; se puede restaurar")
                 .clicked();
+            export = ui
+                .button("Exportar a Markdown")
+                .on_hover_text("Guarda la página como archivo .md en la carpeta de exportaciones")
+                .clicked();
         });
+        if export {
+            let result = self.export_current_page();
+            self.report(result);
+        }
         if subpage {
             let result = self.create_subpage(page_id);
             self.report(result);
@@ -1655,6 +1700,7 @@ impl SilexApp {
             self.status_bar(ui);
         });
         self.notice_bar(ui);
+        self.export_bar(ui);
         self.page_actions(ui, &page_id);
         if self.selected.as_deref() != Some(page_id.as_str()) {
             // The page was trashed (or another opened) this frame.
@@ -3131,6 +3177,20 @@ mod tests {
         let page = app.selected.clone().expect("page");
         assert_eq!(app.db.list_blocks(&page)?[0].content, text);
         assert_eq!(app.db.search_pages("日本語")?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn exporting_writes_what_is_on_screen_and_offers_the_folder() -> anyhow::Result<()> {
+        let (mut app, ctx) = editor_app(&[(Bul, 0, "uno"), (Bul, 1, "dos")], 0, 3)?;
+        type_into(&mut app, &ctx, "!"); // unsaved edit
+        let dir = std::env::temp_dir().join(format!("silex-app-export-{}", uuid::Uuid::new_v4()));
+        app.export_current_page_to(&dir)?;
+        let path = app.last_export.clone().expect("export offered");
+        let text = std::fs::read_to_string(&path)?;
+        assert!(text.contains("- uno\\!\n  - dos\n"), "{text}"); // "!" is escaped
+        assert!(app.save.can_close(), "saved before exporting");
+        std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
 

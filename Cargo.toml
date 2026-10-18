@@ -15,6 +15,11 @@ eframe = "0.37"
 rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 uuid = { version = "1", features = ["v4"] }
 
+[dev-dependencies]
+# Verifies exported Markdown parses back as intended (becomes a normal
+# dependency for import in H4.2). MIT, CommonMark-compliant.
+pulldown-cmark = { version = "0.13", default-features = false }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
