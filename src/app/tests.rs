@@ -38,7 +38,19 @@ fn frame(
             ui.memory_mut(|m| m.request_focus(id));
         }
         for block in blocks.iter_mut() {
-            changed |= block_field(ui, 0, block, None, false, false).text_changed;
+            changed |= block_field(
+                ui,
+                0,
+                block,
+                &BlockView {
+                    number: None,
+                    scroll_into_view: false,
+                    selected: false,
+                    show_handle: false,
+                    focused: false,
+                },
+            )
+            .text_changed;
         }
     });
     // Headless: nothing renders the font texture, so drop it explicitly.
@@ -1146,4 +1158,64 @@ fn undo_stays_with_its_block_when_blocks_move() {
     assert_eq!(blocks[1].content, "", "undo reverts block a");
     assert_eq!(blocks[0].content, "", "the new block is untouched");
     assert_eq!(blocks[2].content, "", "block b is untouched");
+}
+
+#[test]
+fn sidebar_width_is_stable_across_frames() -> anyhow::Result<()> {
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    // Nested pages: tree rows with expand arrows (icon buttons).
+    let parent = app
+        .db
+        .create_page("Una página con un título bastante largo", None)?;
+    app.db.create_page("Hija", Some(&parent))?;
+    app.expanded.insert(parent);
+    app.reload_pages()?;
+    let ctx = egui::Context::default();
+    let mut widths = Vec::new();
+    for frame in 0..30 {
+        // 0–9 at rest, 10–19 pointer over a sidebar row, 20–29 a block menu open.
+        let events = if (10..20).contains(&frame) {
+            // Over the first tree row (shows its "+" and "…" buttons).
+            vec![egui::Event::PointerMoved(egui::pos2(120.0, 222.0))]
+        } else {
+            vec![]
+        };
+        if frame == 20 {
+            app.blocks.push(Block {
+                id: "b".into(),
+                page_id: app.selected.clone().unwrap_or_default(),
+                kind: BlockKind::Paragraph,
+                content: "texto".into(),
+                checked: false,
+                position: 0,
+                indent: 0,
+            });
+            egui::Popup::open_id(&ctx, super::blocks::handle_menu_id("b"));
+        }
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 760.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut id = egui::Id::NULL;
+        let mut output = ctx.run_ui(input, |ui| {
+            // Same id the panel derives from its parent Ui.
+            id = ui.make_persistent_id("silex_sidebar");
+            app.update_ui(ui);
+        });
+        output.textures_delta.clear();
+        if let Some(state) = egui::containers::panel::PanelState::load(&ctx, id) {
+            widths.push(state.size().x.round());
+        }
+    }
+    assert!(!widths.is_empty(), "panel state found");
+    let first = widths[0];
+    assert!(
+        widths.iter().all(|w| *w == first),
+        "sidebar width drifts: {widths:?}"
+    );
+    Ok(())
 }

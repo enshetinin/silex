@@ -143,3 +143,12 @@ fn sidebar_row_hover_shows_actions() -> anyhow::Result<()> {
         },
     )
 }
+
+#[test]
+fn block_handle_menu() -> anyhow::Result<()> {
+    snapshot_with("block_menu_light", eframe::egui::Theme::Light, |harness| {
+        // Open the handle menu of the paragraph block (its id is stable).
+        let paragraph = harness.state().blocks[1].id.clone();
+        egui::Popup::open_id(&harness.ctx, super::blocks::handle_menu_id(&paragraph));
+    })
+}

@@ -10,6 +10,7 @@ use silex_desktop::{
 };
 
 use super::*;
+use super::{icons, theme};
 
 pub(super) struct TrashDialog {
     pub(super) items: Vec<TrashItem>,
@@ -93,24 +94,28 @@ impl SilexApp {
         let Some(path) = self.last_export.clone() else {
             return;
         };
-        ui.horizontal(|ui| {
-            ui.label(format!("Exportada a {}", path.display()));
-            // A workspace export is a folder: open it; for a page, its folder.
-            let folder = if path.is_dir() {
-                Some(path.as_path())
-            } else {
-                path.parent()
-            };
-            if ui.small_button("Abrir carpeta").clicked()
-                && let Some(dir) = folder
-            {
-                let result = silex_desktop::export::open_in_file_manager(dir);
-                self.report(result);
-            }
-            if ui.small_button("Cerrar").clicked() {
-                self.last_export = None;
-            }
+        // A workspace export is a folder: open it; for a page, its folder.
+        let folder = if path.is_dir() {
+            Some(path.clone())
+        } else {
+            path.parent().map(|p| p.to_path_buf())
+        };
+        let (mut open, mut close) = (false, false);
+        let text = format!("Exportado a {}", path.display());
+        Self::banner(ui, icons::EXPORT, &text, |ui| {
+            close = ui
+                .add(egui::Button::new(icons::icon(icons::CLOSE)).frame_when_inactive(false))
+                .on_hover_text("Cerrar")
+                .clicked();
+            open = ui.small_button("Abrir carpeta").clicked();
         });
+        if open && let Some(dir) = folder {
+            let result = silex_desktop::export::open_in_file_manager(&dir);
+            self.report(result);
+        }
+        if close {
+            self.last_export = None;
+        }
     }
 
     pub(super) fn open_restore_dialog(&mut self) {
@@ -228,39 +233,71 @@ impl SilexApp {
     }
 
     /// Always-visible save state; an error offers an immediate retry.
+    /// Discreet save state (top bar, laid out right to left).
     pub(super) fn status_bar(&mut self, ui: &mut egui::Ui) {
-        let failed = match self.save.status() {
+        let p = theme::current(ui.ctx());
+        match self.save.status() {
             SaveStatus::Saved => {
-                ui.label("Guardado");
-                None
+                ui.label(egui::RichText::new("Guardado").small().color(p.text_muted));
+                ui.label(icons::icon(icons::CHECK).small().color(p.text_muted));
             }
             SaveStatus::Dirty => {
-                ui.label("Cambios sin guardar…");
-                None
+                ui.label(
+                    egui::RichText::new("Guardando…")
+                        .small()
+                        .color(p.text_muted),
+                );
             }
-            SaveStatus::Failed { message } => Some(message.to_owned()),
-        };
-        if let Some(message) = failed {
-            ui.colored_label(
-                ui.visuals().error_fg_color,
-                format!("Error al guardar: {message}"),
-            );
-            if ui.button("Reintentar").clicked() {
-                let _ = self.save_now();
+            SaveStatus::Failed { message } => {
+                let message = message.to_owned();
+                if ui.small_button("Reintentar").clicked() {
+                    let _ = self.save_now();
+                }
+                ui.label(
+                    egui::RichText::new("Error al guardar")
+                        .small()
+                        .color(p.danger),
+                )
+                .on_hover_text(message);
+                ui.label(icons::icon(icons::WARNING).color(p.danger));
             }
         }
+    }
+
+    /// A quiet banner with an icon, a message and optional buttons.
+    fn banner(ui: &mut egui::Ui, icon: &str, text: &str, add_buttons: impl FnOnce(&mut egui::Ui)) {
+        let p = theme::current(ui.ctx());
+        ui.add_space(theme::space::SM);
+        egui::Frame::new()
+            .fill(p.subtle)
+            .corner_radius(theme::radius::MD)
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(icons::icon(icon).color(p.text_muted));
+                    ui.add(egui::Label::new(egui::RichText::new(text).color(p.text)).wrap());
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        add_buttons,
+                    );
+                });
+            });
     }
 
     pub(super) fn notice_bar(&mut self, ui: &mut egui::Ui) {
         let Some(notice) = self.notice.clone() else {
             return;
         };
-        ui.horizontal(|ui| {
-            ui.colored_label(ui.visuals().warn_fg_color, notice);
-            if ui.small_button("Cerrar aviso").clicked() {
-                self.notice = None;
-            }
+        let mut close = false;
+        Self::banner(ui, icons::INFO, &notice, |ui| {
+            close = ui
+                .add(egui::Button::new(icons::icon(icons::CLOSE)).frame_when_inactive(false))
+                .on_hover_text("Cerrar aviso")
+                .clicked();
         });
+        if close {
+            self.notice = None;
+        }
     }
 
     /// Intercepts window close: save first; if that fails, keep the window

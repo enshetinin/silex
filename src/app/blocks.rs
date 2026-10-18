@@ -2,13 +2,13 @@
 
 use eframe::egui::{self, TextEdit};
 use silex_desktop::{
-    db::Shift,
     editor,
     history::EditKind,
-    model::{Block, BlockKind, descendants, list_numbers},
+    model::{Block, BlockKind, list_numbers},
 };
 
 use super::*;
+use super::{icons, theme};
 
 /// Cursor state of the focused block text field.
 #[derive(Debug, Clone)]
@@ -66,12 +66,10 @@ pub(super) fn field_id(generation: u64, kind: &str, id: &str) -> egui::Id {
 /// Horizontal space per indent level.
 pub(super) const INDENT_WIDTH: f32 = 24.0;
 
-/// Renders one block: type selector, indent, marker (checkbox, bullet,
-/// number or quote bar) and its text field. `number` is the list number for
-/// numbered blocks. Returns true when anything in the block changed.
-/// Actions in a block's "…" menu.
+/// Actions in a block's handle menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BlockAction {
+    Convert(BlockKind),
     MoveUp,
     MoveDown,
     Duplicate,
@@ -82,90 +80,272 @@ pub(super) enum BlockAction {
 pub(super) struct BlockOutput {
     /// The text was edited (groups into one undo step while typing).
     pub(super) text_changed: bool,
-    /// Type or checkbox changed.
+    /// Checkbox changed.
     pub(super) other_changed: bool,
     pub(super) action: Option<BlockAction>,
     /// Present when this block's text field has focus.
     pub(super) caret: Option<CaretInfo>,
+    /// The whole row (to know which block the pointer is over).
+    pub(super) rect: egui::Rect,
 }
 
+/// Width of the left gutter where a block's handle appears on hover.
+const GUTTER: f32 = 28.0;
+
+/// Vertical offset of the text inside a text field (its default margin), so
+/// markers line up with the first line of text.
+const TEXT_TOP: f32 = 2.0;
+
+/// Indents a row (title, menus, buttons) to where block text starts.
+fn gutter_space(ui: &mut egui::Ui) {
+    ui.add_space(GUTTER + ui.spacing().item_spacing.x);
+}
+
+/// A list marker or checkbox, nudged down to the first line of text.
+fn marker(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> egui::Response) -> egui::Response {
+    ui.vertical(|ui| {
+        ui.add_space(TEXT_TOP);
+        add(ui)
+    })
+    .inner
+}
+
+/// Id of a block handle's menu (stable, so the handle can stay visible
+/// while its menu is open even if the pointer leaves the row).
+pub(super) fn handle_menu_id(block_id: &str) -> egui::Id {
+    egui::Id::unique(("silex-block-handle", block_id))
+}
+
+/// Icon for each block type (menus).
+pub(super) fn kind_icon(kind: BlockKind) -> &'static str {
+    match kind {
+        BlockKind::Paragraph => icons::TEXT,
+        BlockKind::Heading1 => icons::HEADING_1,
+        BlockKind::Heading2 => icons::HEADING_2,
+        BlockKind::Heading3 => icons::HEADING_3,
+        BlockKind::Todo => icons::TODO,
+        BlockKind::Bulleted => icons::LIST_BULLETS,
+        BlockKind::Numbered => icons::LIST_NUMBERS,
+        BlockKind::Quote => icons::QUOTE,
+        BlockKind::Code => icons::CODE,
+    }
+}
+
+/// How a block is drawn this frame.
+pub(super) struct BlockView {
+    pub(super) number: Option<usize>,
+    pub(super) scroll_into_view: bool,
+    pub(super) selected: bool,
+    /// Show the handle (pointer over the row, or its menu open).
+    pub(super) show_handle: bool,
+    pub(super) focused: bool,
+}
+
+/// One block, borderless: a hover handle in the left gutter (type and
+/// actions menu), indent, marker (checkbox, bullet, number or quote bar)
+/// and the text field styled for its type.
 pub(super) fn block_field(
     ui: &mut egui::Ui,
     generation: u64,
     block: &mut Block,
-    number: Option<usize>,
-    scroll_into_view: bool,
-    selected: bool,
+    view: &BlockView,
 ) -> BlockOutput {
+    let p = theme::current(ui.ctx());
     let id = field_id(generation, "block", &block.id);
-    let fill = if selected {
-        ui.visuals().selection.bg_fill.gamma_multiply(0.35)
+    let fill = if view.selected {
+        p.accent_soft
     } else {
         egui::Color32::TRANSPARENT
     };
-    let frame = egui::Frame::new().fill(fill).corner_radius(4.0);
-    frame
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let action = block_menu(ui);
-                let mut other_changed = kind_selector(ui, block);
-                ui.add_space(f32::from(block.indent) * INDENT_WIDTH);
-                match block.kind {
-                    BlockKind::Todo => {
-                        other_changed |= ui.checkbox(&mut block.checked, "").changed();
-                    }
-                    BlockKind::Bulleted => {
-                        ui.label("•");
-                    }
-                    BlockKind::Numbered => {
-                        ui.label(format!("{}.", number.unwrap_or(1)));
-                    }
-                    BlockKind::Quote => {
-                        let (bar, _) =
-                            ui.allocate_exact_size(egui::vec2(3.0, 20.0), egui::Sense::hover());
-                        ui.painter()
-                            .rect_filled(bar, 1.0, ui.visuals().weak_text_color());
-                    }
-                    _ => {}
+    let frame = egui::Frame::new()
+        .fill(fill)
+        .corner_radius(theme::radius::MD)
+        .inner_margin(egui::Margin::symmetric(0, 1));
+    let inner = frame.show(ui, |ui| {
+        // Top-aligned: the text field is taller than its first line, so
+        // centering would push markers below the text.
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+            let (gutter, _) =
+                ui.allocate_exact_size(egui::vec2(GUTTER, 24.0), egui::Sense::hover());
+            let action = if view.show_handle {
+                block_handle(ui, gutter, block)
+            } else {
+                None
+            };
+            ui.add_space(f32::from(block.indent) * INDENT_WIDTH);
+            let mut other_changed = false;
+            match block.kind {
+                BlockKind::Todo => {
+                    // A checkbox centers its box in the theme's 28 px interact
+                    // height; make that the first line's height (text margin +
+                    // line) and drop the label gap so the box sits on the text.
+                    other_changed |= ui
+                        .scope(|ui| {
+                            ui.spacing_mut().interact_size.y = 18.0 + 2.0 * TEXT_TOP;
+                            ui.spacing_mut().icon_spacing = 0.0;
+                            ui.checkbox(&mut block.checked, "")
+                        })
+                        .inner
+                        .changed();
                 }
-                let edit = match block.kind {
-                    BlockKind::Heading1 | BlockKind::Heading2 | BlockKind::Heading3 => {
-                        TextEdit::singleline(&mut block.content)
-                            .font(egui::FontId::proportional(heading_size(block.kind)))
-                    }
-                    BlockKind::Code => TextEdit::multiline(&mut block.content)
-                        .code_editor()
-                        .desired_rows(1),
-                    _ => TextEdit::multiline(&mut block.content).desired_rows(1),
-                };
-                let output = edit.id(id).desired_width(f32::INFINITY).show(ui);
-                let text_changed = output.response.changed();
-                if scroll_into_view {
-                    output.response.scroll_to_me(None);
-                }
-                let caret = output
-                    .cursor_range
-                    .filter(|_| output.response.has_focus())
-                    .map(|range| {
-                        let row = output.galley.layout_from_cursor(range.primary).row;
-                        CaretInfo {
-                            block_id: block.id.clone(),
-                            char: range.primary.index.0,
-                            selection: range.primary.index != range.secondary.index,
-                            first_row: row == 0,
-                            last_row: row + 1 >= output.galley.rows.len(),
-                        }
+                BlockKind::Bulleted => {
+                    marker(ui, |ui| {
+                        ui.label(egui::RichText::new("•").color(p.text_muted))
                     });
-                BlockOutput {
-                    text_changed,
-                    other_changed,
-                    action,
-                    caret,
                 }
-            })
-            .inner
+                BlockKind::Numbered => {
+                    let number = format!("{}.", view.number.unwrap_or(1));
+                    marker(ui, |ui| {
+                        ui.label(egui::RichText::new(number).color(p.text_muted))
+                    });
+                }
+                BlockKind::Quote => {
+                    let (bar, _) =
+                        ui.allocate_exact_size(egui::vec2(3.0, 22.0), egui::Sense::hover());
+                    ui.painter().rect_filled(bar, 1.5, p.border);
+                }
+                _ => {}
+            }
+            let placeholder = match block.kind {
+                BlockKind::Paragraph if view.focused => Some("Escribe / para comandos"),
+                kind if kind.is_heading() => Some(kind.label()),
+                _ => None,
+            };
+            let style = match block.kind {
+                BlockKind::Heading1 => egui::TextStyle::Name(theme::text::H1.into()),
+                BlockKind::Heading2 => egui::TextStyle::Name(theme::text::H2.into()),
+                BlockKind::Heading3 => egui::TextStyle::Name(theme::text::H3.into()),
+                BlockKind::Code => egui::TextStyle::Monospace,
+                _ => egui::TextStyle::Body,
+            };
+            let mut edit = if block.kind.is_heading() {
+                TextEdit::singleline(&mut block.content)
+            } else {
+                TextEdit::multiline(&mut block.content).desired_rows(1)
+            }
+            .id(id)
+            .font(style)
+            .frame(egui::Frame::NONE)
+            .desired_width(f32::INFINITY);
+            if block.kind == BlockKind::Code {
+                edit = edit.code_editor().frame(
+                    egui::Frame::new()
+                        .fill(p.code_bg)
+                        .corner_radius(theme::radius::MD)
+                        .inner_margin(egui::Margin::same(10)),
+                );
+            }
+            if block.kind == BlockKind::Todo && block.checked {
+                edit = edit.text_color(p.text_muted);
+            }
+            if let Some(text) = placeholder {
+                edit = edit.hint_text(egui::RichText::new(text).color(p.text_faint));
+            }
+            let output = edit.show(ui);
+            let text_changed = output.response.changed();
+            if view.scroll_into_view {
+                output.response.scroll_to_me(None);
+            }
+            let caret = output
+                .cursor_range
+                .filter(|_| output.response.has_focus())
+                .map(|range| {
+                    let row = output.galley.layout_from_cursor(range.primary).row;
+                    CaretInfo {
+                        block_id: block.id.clone(),
+                        char: range.primary.index.0,
+                        selection: range.primary.index != range.secondary.index,
+                        first_row: row == 0,
+                        last_row: row + 1 >= output.galley.rows.len(),
+                    }
+                });
+            (text_changed, other_changed, action, caret)
         })
         .inner
+    });
+    let (text_changed, other_changed, action, caret) = inner.inner;
+    BlockOutput {
+        text_changed,
+        other_changed,
+        action,
+        caret,
+        rect: inner.response.rect,
+    }
+}
+
+/// The hover handle and its menu: convert to another type, move, duplicate,
+/// delete.
+fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<BlockAction> {
+    let p = theme::current(ui.ctx());
+    // Interact + paint, not a widget: nothing is allocated, so showing the
+    // handle can never move the block's text (`put` reserves its widget's
+    // full size, which is wider than the gutter).
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(gutter.center().x, gutter.top() + 12.0),
+        egui::vec2(22.0, 22.0),
+    );
+    let handle = ui.interact(
+        rect,
+        egui::Id::unique(("silex-block-handle-button", &block.id)),
+        egui::Sense::click(),
+    );
+    handle
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Acciones del bloque"));
+    let open = egui::Popup::is_id_open(ui.ctx(), handle_menu_id(&block.id));
+    if handle.hovered() || open {
+        ui.painter().rect_filled(rect, theme::radius::SM, p.subtle);
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icons::DRAG_HANDLE,
+        icons::font(15.0),
+        p.text_muted,
+    );
+    let handle = handle.on_hover_text("Acciones del bloque");
+    let mut action = None;
+    egui::Popup::menu(&handle)
+        .id(handle_menu_id(&block.id))
+        .show(|ui| {
+            ui.menu_button((icons::icon(icons::TEXT), " Convertir en"), |ui| {
+                for kind in BlockKind::ALL {
+                    let current = kind == block.kind;
+                    if ui
+                        .selectable_label(
+                            current,
+                            (icons::icon(kind_icon(kind)), format!(" {}", kind.label())),
+                        )
+                        .clicked()
+                    {
+                        action = Some(BlockAction::Convert(kind));
+                        ui.close();
+                    }
+                }
+            });
+            ui.separator();
+            for (icon, label, chosen) in [
+                (icons::ARROW_UP, " Mover arriba", BlockAction::MoveUp),
+                (icons::ARROW_DOWN, " Mover abajo", BlockAction::MoveDown),
+                (icons::COPY, " Duplicar", BlockAction::Duplicate),
+            ] {
+                if ui.button((icons::icon(icon), label)).clicked() {
+                    action = Some(chosen);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            if ui
+                .button((
+                    icons::icon(icons::TRASH).color(p.danger),
+                    egui::RichText::new(" Eliminar").color(p.danger),
+                ))
+                .clicked()
+            {
+                action = Some(BlockAction::Delete);
+                ui.close();
+            }
+        });
+    action
 }
 
 /// The slash menu list; returns the type clicked with the mouse, if any.
@@ -242,55 +422,6 @@ pub(super) fn delete_char(text: &mut String, char_index: usize) {
     if let Some((byte, _)) = text.char_indices().nth(char_index) {
         text.remove(byte);
     }
-}
-
-pub(super) fn heading_size(kind: BlockKind) -> f32 {
-    match kind {
-        BlockKind::Heading1 => 24.0,
-        BlockKind::Heading2 => 20.0,
-        _ => 16.0,
-    }
-}
-
-/// The "…" menu in front of each block.
-pub(super) fn block_menu(ui: &mut egui::Ui) -> Option<BlockAction> {
-    let mut action = None;
-    ui.menu_button("…", |ui| {
-        for (label, chosen) in [
-            ("Mover arriba (Alt+Mayús+↑)", BlockAction::MoveUp),
-            ("Mover abajo (Alt+Mayús+↓)", BlockAction::MoveDown),
-            ("Duplicar", BlockAction::Duplicate),
-            ("Eliminar", BlockAction::Delete),
-        ] {
-            if ui.button(label).clicked() {
-                action = Some(chosen);
-                ui.close();
-            }
-        }
-    })
-    .response
-    .on_hover_text("Acciones del bloque");
-    action
-}
-
-/// Small type menu in front of each block; returns true if the type changed.
-pub(super) fn kind_selector(ui: &mut egui::Ui, block: &mut Block) -> bool {
-    let before = block.kind;
-    egui::ComboBox::from_id_salt(("silex-kind", &block.id))
-        .width(110.0)
-        .selected_text(block.kind.label())
-        .show_ui(ui, |ui| {
-            for kind in BlockKind::ALL {
-                ui.selectable_value(&mut block.kind, kind, kind.label());
-            }
-        });
-    if block.kind == before {
-        return false;
-    }
-    if block.kind != BlockKind::Todo {
-        block.checked = false;
-    }
-    true
 }
 
 impl SilexApp {
@@ -677,6 +808,15 @@ impl SilexApp {
             return;
         };
         let changed = match action {
+            BlockAction::Convert(kind) => {
+                let block = &mut self.blocks[index];
+                let changed = block.kind != kind;
+                block.kind = kind;
+                if kind != BlockKind::Todo {
+                    block.checked = false;
+                }
+                changed
+            }
             BlockAction::MoveUp => editor::move_range(&mut self.blocks, index, index, true),
             BlockAction::MoveDown => editor::move_range(&mut self.blocks, index, index, false),
             BlockAction::Duplicate => {
@@ -716,232 +856,284 @@ impl SilexApp {
         }
     }
 
-    /// Subpage and move controls for the open page.
-    pub(super) fn page_actions(&mut self, ui: &mut egui::Ui, page_id: &str) {
-        let mut action: Option<Option<String>> = None;
-        let mut subpage = false;
-        let current_parent = self
-            .pages
-            .iter()
-            .find(|p| p.id == page_id)
-            .and_then(|p| p.parent_id.clone());
-        let blocked = descendants(&self.pages, page_id);
-        // Live siblings in display order (same parent as stored in the database).
-        let siblings: Vec<&str> = self
-            .pages
-            .iter()
-            .filter(|p| p.parent_id == current_parent)
-            .map(|p| p.id.as_str())
-            .collect();
-        let index = siblings.iter().position(|id| *id == page_id);
-        let can_up = index.is_some_and(|i| i > 0);
-        let can_down = index.is_some_and(|i| i + 1 < siblings.len());
-        let mut shift = None;
-        let mut trash = false;
-        ui.horizontal(|ui| {
-            subpage = ui.button("+ Subpágina").clicked();
-            if ui
-                .add_enabled(can_up, egui::Button::new("Subir"))
-                .on_hover_text("Subir entre sus hermanas")
-                .clicked()
-            {
-                shift = Some(Shift::Up);
-            }
-            if ui
-                .add_enabled(can_down, egui::Button::new("Bajar"))
-                .on_hover_text("Bajar entre sus hermanas")
-                .clicked()
-            {
-                shift = Some(Shift::Down);
-            }
-            egui::ComboBox::from_id_salt("silex_move_target")
-                .selected_text("Mover a…")
-                .show_ui(ui, |ui| {
-                    if current_parent.is_some() && ui.selectable_label(false, "Raíz").clicked() {
-                        action = Some(None);
-                    }
-                    // Only destinations that cannot create a cycle.
-                    for page in &self.pages {
-                        let valid = page.id != page_id
-                            && !blocked.contains(&page.id)
-                            && current_parent.as_deref() != Some(page.id.as_str());
-                        if valid
-                            && ui
-                                .selectable_label(false, display_title(&page.title))
-                                .clicked()
-                        {
-                            action = Some(Some(page.id.clone()));
-                        }
-                    }
-                });
-        });
-        let is_favorite = self.favorites.iter().any(|p| p.id == page_id);
-        let mut toggle_favorite = false;
-        let mut export = false;
-        ui.horizontal(|ui| {
-            let label = if is_favorite {
-                "Quitar de favoritos"
-            } else {
-                "Añadir a favoritos"
-            };
-            toggle_favorite = ui.button(label).clicked();
-            trash = ui
-                .button("Enviar a la papelera")
-                .on_hover_text("Se mueve con sus subpáginas; se puede restaurar")
-                .clicked();
-            export = ui
-                .button("Exportar a Markdown")
-                .on_hover_text("Guarda la página como archivo .md en la carpeta de exportaciones")
-                .clicked();
-        });
-        if export {
-            let result = self.export_current_page();
-            self.report(result);
-        }
-        if subpage {
-            let result = self.create_subpage(page_id);
-            self.report(result);
-        }
-        if toggle_favorite {
-            let result = self.set_favorite(page_id, !is_favorite);
-            self.report(result);
-        }
-        if trash {
-            let result = self.trash_page(page_id);
-            self.report(result);
-            return;
-        }
-        if let Some(shift) = shift {
-            let result = self.reorder_page(page_id, shift);
-            self.report(result);
-        }
-        if let Some(target) = action {
-            let result = self.move_page(page_id, target.as_deref());
-            self.report(result);
-        }
-    }
-
+    /// The open page: top bar, notices and the centered document column.
     pub(super) fn editor(&mut self, ui: &mut egui::Ui) {
+        let p = theme::current(ui.ctx());
         let Some(page_id) = self.selected.clone() else {
-            ui.label("Crea una página para empezar.");
-            return;
-        };
-        ui.horizontal(|ui| {
-            ui.heading("Documento");
-            if ui.button("Guardar").clicked() {
-                // A save error is already shown by the status bar.
-                let _ = self.save_now();
-            }
-            if ui
-                .add_enabled(self.history.can_undo(), egui::Button::new("Deshacer"))
-                .clicked()
-            {
-                self.undo();
-            }
-            if ui
-                .add_enabled(self.history.can_redo(), egui::Button::new("Rehacer"))
-                .clicked()
-            {
-                self.redo();
-            }
-            self.status_bar(ui);
-        });
-        self.notice_bar(ui);
-        self.export_bar(ui);
-        self.page_actions(ui, &page_id);
-        if self.selected.as_deref() != Some(page_id.as_str()) {
-            // The page was trashed (or another opened) this frame.
-            return;
-        }
-        ui.separator();
-        let title = ui.add(
-            TextEdit::singleline(&mut self.title)
-                .id(field_id(self.doc_generation, "title", &page_id))
-                .font(egui::TextStyle::Heading)
-                .desired_width(f32::INFINITY),
-        );
-        if std::mem::take(&mut self.focus_title) {
-            title.request_focus();
-        }
-        let changed = title.changed();
-        if changed {
-            self.changed(EditKind::Text("title".into()));
-        }
-        ui.add_space(14.0);
-        let mut edit: Option<EditKind> = None;
-        let mut block_action: Option<(BlockAction, String)> = None;
-        egui::ScrollArea::vertical()
-            .id_salt("silex_editor_blocks")
-            .show(ui, |ui| {
-                let numbers = list_numbers(&self.blocks);
-                let scroll_to = self.pending_focus.as_ref().map(|(id, _)| id.clone());
-                self.caret = None;
-                let selected = self.selection_range();
-                let mut clicked_kind = None;
-                for (index, (block, number)) in self.blocks.iter_mut().zip(numbers).enumerate() {
-                    let scroll = scroll_to.as_deref() == Some(block.id.as_str());
-                    let is_selected = selected.is_some_and(|(a, b)| (a..=b).contains(&index));
-                    let out =
-                        block_field(ui, self.doc_generation, block, number, scroll, is_selected);
-                    let kind = if out.other_changed {
-                        Some(EditKind::Other)
-                    } else {
-                        out.text_changed.then(|| EditKind::Text(block.id.clone()))
-                    };
-                    if let Some(kind) = kind {
-                        // Two fields changed in one frame (rare): one non-text step.
-                        edit = Some(if edit.is_some() {
-                            EditKind::Other
-                        } else {
-                            kind
-                        });
-                    }
-                    if let Some(action) = out.action {
-                        block_action = Some((action, block.id.clone()));
-                    }
-                    if out.caret.is_some() {
-                        self.caret = out.caret;
-                    }
-                    if let Some(menu) = self.slash.as_ref().filter(|m| m.block_id == block.id)
-                        && let Some(kind) = slash_menu_ui(ui, menu)
-                    {
-                        clicked_kind = Some((kind, block.id.clone()));
-                    }
-                    ui.add_space(6.0);
-                }
-                if let Some((kind, id)) = clicked_kind {
-                    self.pending_key = Some((EditorKey::Slash(kind), id));
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() / 3.0);
+                ui.label(egui::RichText::new("No hay ninguna página abierta.").color(p.text_muted));
+                ui.add_space(theme::space::SM);
+                if ui
+                    .button((icons::icon(icons::PLUS), " Nueva página"))
+                    .clicked()
+                {
+                    let result = self.create_root_page("Sin título");
+                    self.report(result);
                 }
             });
+            return;
+        };
+        self.top_bar(ui, &page_id);
+        if self.selected.as_deref() != Some(page_id.as_str()) {
+            // The page was trashed (or another opened) from the top bar.
+            return;
+        }
+        self.notice_bar(ui);
+        self.export_bar(ui);
+
+        let mut edit: Option<EditKind> = None;
+        let mut block_action: Option<(BlockAction, String)> = None;
+        let mut hovered = None;
+        let pointer = ui.ctx().pointer_hover_pos();
+        egui::ScrollArea::vertical()
+            .id_salt("silex_editor_blocks")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                const COLUMN: f32 = 720.0;
+                let width = ui.available_width().min(COLUMN + GUTTER);
+                let side = ((ui.available_width() - width) / 2.0).max(0.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(side);
+                    ui.vertical(|ui| {
+                        ui.set_width(width);
+                        ui.add_space(theme::space::XL);
+                        ui.horizontal(|ui| {
+                            gutter_space(ui);
+                            let title = ui.add(
+                                TextEdit::singleline(&mut self.title)
+                                    .id(field_id(self.doc_generation, "title", &page_id))
+                                    .font(egui::TextStyle::Name(theme::text::TITLE.into()))
+                                    .frame(egui::Frame::NONE)
+                                    .hint_text(
+                                        egui::RichText::new("Sin título").color(p.text_faint),
+                                    )
+                                    .desired_width(f32::INFINITY),
+                            );
+                            if std::mem::take(&mut self.focus_title) {
+                                title.request_focus();
+                            }
+                            if title.changed() {
+                                edit = Some(EditKind::Text("title".into()));
+                            }
+                        });
+                        ui.add_space(theme::space::LG);
+
+                        let numbers = list_numbers(&self.blocks);
+                        let scroll_to = self.pending_focus.as_ref().map(|(id, _)| id.clone());
+                        self.caret = None;
+                        let selected = self.selection_range();
+                        let mut clicked_kind = None;
+                        let ctx = ui.ctx().clone();
+                        let focused = ctx.memory(|m| m.focused());
+                        for (index, (block, number)) in
+                            self.blocks.iter_mut().zip(numbers).enumerate()
+                        {
+                            let field = field_id(self.doc_generation, "block", &block.id);
+                            let view = BlockView {
+                                number,
+                                scroll_into_view: scroll_to.as_deref() == Some(block.id.as_str()),
+                                selected: selected.is_some_and(|(a, b)| (a..=b).contains(&index)),
+                                show_handle: self.hovered_block.as_deref()
+                                    == Some(block.id.as_str())
+                                    || egui::Popup::is_id_open(&ctx, handle_menu_id(&block.id)),
+                                focused: focused == Some(field),
+                            };
+                            let out = block_field(ui, self.doc_generation, block, &view);
+                            if pointer.is_some_and(|p| out.rect.contains(p)) {
+                                hovered = Some(block.id.clone());
+                            }
+                            let kind = if out.other_changed {
+                                Some(EditKind::Other)
+                            } else {
+                                out.text_changed.then(|| EditKind::Text(block.id.clone()))
+                            };
+                            if let Some(kind) = kind {
+                                // Two fields changed in one frame (rare): one non-text step.
+                                edit = Some(if edit.is_some() {
+                                    EditKind::Other
+                                } else {
+                                    kind
+                                });
+                            }
+                            if let Some(action) = out.action {
+                                block_action = Some((action, block.id.clone()));
+                            }
+                            if out.caret.is_some() {
+                                self.caret = out.caret;
+                            }
+                            if let Some(menu) =
+                                self.slash.as_ref().filter(|m| m.block_id == block.id)
+                            {
+                                ui.horizontal(|ui| {
+                                    gutter_space(ui);
+                                    if let Some(kind) = slash_menu_ui(ui, menu) {
+                                        clicked_kind = Some((kind, block.id.clone()));
+                                    }
+                                });
+                            }
+                        }
+                        if let Some((kind, id)) = clicked_kind {
+                            self.pending_key = Some((EditorKey::Slash(kind), id));
+                        }
+
+                        ui.add_space(theme::space::SM);
+                        ui.horizontal(|ui| {
+                            gutter_space(ui);
+                            let add = ui.add(
+                                egui::Button::new((
+                                    icons::icon(icons::PLUS).color(p.text_muted),
+                                    egui::RichText::new(" Añadir bloque").color(p.text_muted),
+                                ))
+                                .frame_when_inactive(false),
+                            );
+                            if add.clicked() {
+                                // In memory, like every other edit: undoable and saved by the autosave.
+                                let block = Block {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    page_id: page_id.clone(),
+                                    kind: BlockKind::Paragraph,
+                                    content: String::new(),
+                                    checked: false,
+                                    position: 0,
+                                    indent: 0,
+                                };
+                                self.pending_focus = Some((block.id.clone(), 0));
+                                self.blocks.push(block);
+                                self.mark_dirty();
+                            }
+                        });
+                        ui.add_space(theme::space::XXL);
+                    });
+                });
+            });
+        self.hovered_block = hovered;
         if let Some(kind) = edit {
             self.changed(kind);
         }
         if let Some((action, id)) = block_action {
             self.block_action(action, &id);
         }
-        ui.separator();
+    }
+
+    /// Breadcrumbs on the left; save state, undo/redo, favorite and the
+    /// page menu on the right.
+    fn top_bar(&mut self, ui: &mut egui::Ui, page_id: &str) {
+        let p = theme::current(ui.ctx());
+        let mut action: Option<RowAction> = None;
+        let mut extra: Option<&'static str> = None;
+        let ancestors: Vec<(String, String)> = ancestors(&self.pages, page_id)
+            .into_iter()
+            .rev()
+            .filter_map(|id| {
+                self.pages
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| (id, display_title(&p.title).to_owned()))
+            })
+            .collect();
+        let is_favorite = self.favorites.iter().any(|p| p.id == page_id);
+        let ghost = |text: egui::RichText| egui::Button::new(text).frame_when_inactive(false);
         ui.horizontal(|ui| {
-            for (label, kind) in [
-                ("+ Texto", BlockKind::Paragraph),
-                ("+ Título", BlockKind::Heading1),
-                ("+ Tarea", BlockKind::Todo),
-            ] {
-                if ui.button(label).clicked() {
-                    // In memory, like every other edit: undoable and saved by the autosave.
-                    let block = Block {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        page_id: page_id.clone(),
-                        kind,
-                        content: String::new(),
-                        checked: false,
-                        position: 0,
-                        indent: 0,
-                    };
-                    self.pending_focus = Some((block.id.clone(), 0));
-                    self.blocks.push(block);
-                    self.mark_dirty();
+            ui.set_min_height(32.0);
+            for (id, title) in &ancestors {
+                if ui
+                    .add(ghost(egui::RichText::new(title).color(p.text_muted)))
+                    .clicked()
+                {
+                    action = Some(RowAction::Open(id.clone()));
                 }
+                ui.label(icons::icon(icons::CARET_RIGHT).small().color(p.text_faint));
             }
+            ui.label(egui::RichText::new(display_title(&self.title)).color(p.text));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let more = ui
+                    .add(ghost(icons::icon(icons::DOTS_THREE).color(p.text_muted)))
+                    .on_hover_text("Más acciones");
+                egui::Popup::menu(&more).show(|ui| {
+                    if let Some(chosen) = self.page_menu(ui, page_id) {
+                        action = Some(chosen);
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .button((icons::icon(icons::EXPORT), " Exportar a Markdown"))
+                        .clicked()
+                    {
+                        extra = Some("export");
+                        ui.close();
+                    }
+                    if ui
+                        .button((icons::icon(icons::SAVE), " Guardar ahora"))
+                        .clicked()
+                    {
+                        extra = Some("save");
+                        ui.close();
+                    }
+                });
+                let star_color = if is_favorite { p.accent } else { p.text_muted };
+                let star_tip = if is_favorite {
+                    "Quitar de favoritos"
+                } else {
+                    "Añadir a favoritos"
+                };
+                if ui
+                    .add(ghost(icons::icon(icons::STAR).color(star_color)))
+                    .on_hover_text(star_tip)
+                    .clicked()
+                {
+                    action = Some(RowAction::Favorite(page_id.to_owned(), !is_favorite));
+                }
+                if ui
+                    .add_enabled(
+                        self.history.can_redo(),
+                        ghost(icons::icon(icons::REDO).color(p.text_muted)),
+                    )
+                    .on_hover_text("Rehacer")
+                    .clicked()
+                {
+                    self.redo();
+                }
+                if ui
+                    .add_enabled(
+                        self.history.can_undo(),
+                        ghost(icons::icon(icons::UNDO).color(p.text_muted)),
+                    )
+                    .on_hover_text("Deshacer")
+                    .clicked()
+                {
+                    self.undo();
+                }
+                ui.add_space(theme::space::SM);
+                self.status_bar(ui);
+            });
         });
+        let line = ui.available_rect_before_wrap();
+        ui.painter()
+            .hline(line.x_range(), line.top(), egui::Stroke::new(1.0, p.border));
+        match extra {
+            Some("export") => {
+                let result = self.export_current_page();
+                self.report(result);
+            }
+            Some("save") => {
+                // A save error is already shown by the status indicator.
+                let _ = self.save_now();
+            }
+            _ => {}
+        }
+        if let Some(action) = action {
+            // Renaming the open page is done in its title.
+            let action = match action {
+                RowAction::StartRename(id) if id == page_id => {
+                    self.focus_title = true;
+                    return;
+                }
+                other => other,
+            };
+            let result = self.apply(action);
+            self.report(result);
+        }
     }
 }

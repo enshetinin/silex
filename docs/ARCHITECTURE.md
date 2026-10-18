@@ -9,7 +9,7 @@ src/main.rs                 # Arranque: base de datos y ventana
 src/app/                    # Aplicación egui (binario); todos extienden SilexApp
   mod.rs                    #   Estado, frame, atajos y operaciones de página
   sidebar.rs                #   Árbol, favoritos, búsqueda, menú de página, renombrar
-  blocks.rs                 #   Editor de bloques: teclas, selección, menú /, pegar
+  blocks.rs                 #   Página: barra superior, columna, bloques con asa; teclas, selección, menú /, pegar
   document.rs               #   Guardado y deshacer del documento
   dialogs.rs                #   Papelera, restaurar, cierre; barras de estado y aviso
   jobs.rs                   #   Copias, importación y exportación en segundo plano

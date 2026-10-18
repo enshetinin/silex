@@ -46,6 +46,8 @@ pub struct SilexApp {
     focus_title: bool,
     /// Fonts and styles installed (done on the first frame).
     theme_installed: bool,
+    /// Block under the pointer last frame (shows its handle).
+    hovered_block: Option<String>,
     query: String,
     save: SaveState,
     /// Errors from actions other than saving (search, create, open).
@@ -138,6 +140,7 @@ impl SilexApp {
             blocks: Vec::new(),
             focus_title: false,
             theme_installed: false,
+            hovered_block: None,
             query: String::new(),
             save: SaveState::default(),
             notice: None,

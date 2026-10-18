@@ -163,11 +163,28 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
     // Icon buttons must fit inside the row: the theme's minimum interact
     // height (28 px) would make rows with buttons taller than the others.
     ui.spacing_mut().interact_size.y = 22.0;
+    // Interact + paint instead of `put`: `put` reserves the button's real
+    // size (wider than 22 px), which made the panel grow a little every frame.
+    let row_id = row.id;
     let icon_button = |ui: &mut egui::Ui, center: egui::Pos2, icon: &str| {
-        ui.put(
-            egui::Rect::from_center_size(center, egui::vec2(22.0, 22.0)),
-            egui::Button::new(icons::icon(icon).color(p.sidebar_muted)).frame_when_inactive(false),
-        )
+        let rect = egui::Rect::from_center_size(center, egui::vec2(22.0, 22.0));
+        let response = ui.interact(rect, row_id.with(icon), egui::Sense::click());
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, theme::radius::SM, p.sidebar_selected);
+        }
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            icon,
+            icons::font(14.0),
+            if response.hovered() {
+                p.sidebar_text
+            } else {
+                p.sidebar_muted
+            },
+        );
+        response
     };
     let mut caret = None;
     if parts.caret_slot {
