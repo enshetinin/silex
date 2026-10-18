@@ -44,17 +44,26 @@ pub struct Database {
 }
 
 impl Database {
-    /// Opens the user's database. `SILEX_DB_PATH` overrides the location
+    /// Where the user's database lives. `SILEX_DB_PATH` overrides it
     /// (development and manual testing, so real data stays untouched).
-    pub fn open_default() -> Result<Self> {
+    /// The folder is `dev.silex.Silex` on macOS, matching the app's bundle
+    /// identifier (ADR 0005).
+    pub fn default_path() -> Result<PathBuf> {
         if let Some(path) = std::env::var_os("SILEX_DB_PATH") {
-            return Self::open(path);
+            return Ok(PathBuf::from(path));
         }
         let dirs = ProjectDirs::from("dev", "silex", "Silex")
             .context("No se encuentra el directorio de datos del sistema")?;
-        std::fs::create_dir_all(dirs.data_local_dir())
-            .context("No se puede crear el directorio de datos")?;
-        Self::open(dirs.data_local_dir().join("silex.sqlite3"))
+        Ok(dirs.data_local_dir().join("silex.sqlite3"))
+    }
+
+    /// Opens the user's database (see [`Database::default_path`]).
+    pub fn open_default() -> Result<Self> {
+        let path = Self::default_path()?;
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).context("No se puede crear el directorio de datos")?;
+        }
+        Self::open(path)
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {

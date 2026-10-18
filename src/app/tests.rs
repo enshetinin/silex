@@ -1512,3 +1512,10 @@ fn sidebar_width_is_stable_across_frames() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn the_window_icon_is_embedded_and_readable() {
+    let icon = super::window_icon().expect("embedded PNG decodes");
+    assert_eq!((icon.width, icon.height), (512, 512));
+    assert_eq!(icon.rgba.len(), 512 * 512 * 4);
+}

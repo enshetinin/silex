@@ -5,12 +5,13 @@ Aplicación **nativa renderizada en Rust** usando egui/eframe, persistencia loca
 
 ## Módulos actuales
 ```
-src/main.rs                 # Arranque: base de datos y ventana
+src/main.rs                 # Arranque: base de datos, ventana e icono
 src/app/                    # Aplicación egui (binario); todos extienden SilexApp
   mod.rs                    #   Estado, frame, atajos y operaciones de página
   sidebar.rs                #   Árbol, favoritos, botón «Buscar», menú de página, renombrar
   search.rs                 #   Ventana de búsqueda y acciones (Cmd+K)
   palette.rs                #   Qué hace cada acción de la paleta
+  startup.rs                #   Ventana de error si la app no puede arrancar
   blocks.rs                 #   Página: barra superior, columna, bloques con asa; teclas, selección, menú /, pegar
   document.rs               #   Guardado y deshacer del documento
   dialogs.rs                #   Papelera, restaurar, cierre; barras de estado y aviso
@@ -86,9 +87,13 @@ Paleta de comandos (H5.8): la misma ventana lista acciones antes que las página
 
 Deshacer (H3.4, ADR 0004): todos los cambios del documento pasan por `SilexApp::changed(kind)`, que guarda en `History` la instantánea anterior (`shadow`) y programa el autoguardado. Cmd+Z, Cmd+Mayús+Z y Cmd+Y se interceptan antes que los campos de texto del documento. Mover (Alt+Mayús+↑/↓), duplicar (Cmd+D) y el menú «…» de cada bloque son operaciones puras de `src/editor.rs`. egui no replica automáticamente controles estéticos del OS: planificar esfuerzo visual explícito. egui no hace shaping ni texto bidireccional (árabe/hebreo se dibujan de izquierda a derecha y sin ligaduras); los glifos que faltan se toman de las fuentes del sistema (`system_fonts`). UX de editor rich-text de varios bloques es el componente más complejo y requiere prototipos.
 
+## Empaquetado (H5.9, ADR 0005)
+`cargo packager --release` (con `cargo install cargo-packager --locked`) genera en `dist/` los paquetes de la plataforma actual: en macOS, `Silex.app` y `Silex_<versión>_<arquitectura>.dmg` con firma ad-hoc. La configuración está en `[package.metadata.packager]` de `Cargo.toml`; el identificador `dev.silex.Silex` no debe cambiar, porque también nombra la carpeta de datos en macOS. Los iconos se generan desde `assets/app-icon/silex.svg` con `scripts/make-icons.sh` y se versionan. La ventana lleva el PNG de 512 px incrustado y, en Linux, el `app_id` `silex-desktop`. Una app empaquetada no tiene terminal: si no puede abrir la base, `src/app/startup.rs` muestra el error y la ruta del archivo en una ventana (la release de Windows no abre consola). Windows y Linux: H5.10, en CI.
+
 ## ADRs
 Cada decisión irreversible (formato de documento, sincronización, cifrado, editor, arquitectura de concurrencia) tiene su propia `docs/decisions/NNNN-*.md`: problema, alternativas, decisión, consecuencias, migración.
 - `0001-native-rust.md`: egui/eframe + SQLite.
 - `0002-undo-strategy.md`: deshacer de texto por campo con ids estables (Hito 1); deshacer semántico en el Hito 3.
 - `0003-block-model.md`: tipos de bloque ampliados y lista plana con sangría.
 - `0004-document-undo.md`: deshacer/rehacer del documento con instantáneas (sustituye a 0002).
+- `0005-packaging.md`: cargo-packager, identificador `dev.silex.Silex`, iconos y firma pendiente.

@@ -21,11 +21,23 @@ mod search;
 mod sidebar;
 #[cfg(test)]
 mod snapshots;
+mod startup;
 #[cfg(test)]
 mod tests;
 pub mod theme;
 
+pub use self::startup::StartupError;
 use self::{blocks::*, dialogs::*, search::*, sidebar::*};
+
+/// Window id on Linux (Wayland app id, X11 class). Matches the desktop
+/// entry the Linux packages install (`silex-desktop.desktop`, ADR 0005).
+pub const APP_ID: &str = "silex-desktop";
+
+/// The app icon for the window, taskbar and (unbundled) macOS Dock.
+/// `None` if the embedded image cannot be read: the app starts anyway.
+pub fn window_icon() -> Option<egui::IconData> {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../assets/app-icon/silex-512.png")).ok()
+}
 
 pub struct SilexApp {
     db: Database,

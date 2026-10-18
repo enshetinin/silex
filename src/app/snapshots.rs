@@ -446,3 +446,57 @@ fn command_palette() -> anyhow::Result<()> {
         },
     )
 }
+
+// ---- Startup error window (shown when the app cannot open its data). ----
+
+fn startup_error_harness() -> Harness<'static, super::StartupError> {
+    let err = anyhow::anyhow!("La base de datos usa un esquema más reciente (9)");
+    let path = std::path::Path::new(
+        "/Users/ana/Library/Application Support/dev.silex.Silex/silex.sqlite3",
+    );
+    let mut harness = Harness::builder()
+        .with_size([760.0, 420.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .build_ui_state(
+            |ui, window: &mut super::StartupError| window.update_ui(ui),
+            super::StartupError::new(&err, Some(path)),
+        );
+    harness.run();
+    harness
+}
+
+#[test]
+fn startup_error_shows_the_error_and_copies_it() {
+    let mut harness = startup_error_harness();
+    let unnamed = harness.unnamed_widgets();
+    assert!(unnamed.is_empty(), "unnamed widgets:\n{unnamed:#?}");
+    assert!(
+        harness
+            .query_by_label_contains("esquema más reciente")
+            .is_some()
+    );
+    assert!(harness.query_by_label_contains("dev.silex.Silex").is_some());
+    harness.get_by_label("Copiar el error").click();
+    // One frame: its output holds the copy command.
+    harness.step();
+    let copied = harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t.contains("esquema") && t.contains("silex.sqlite3")));
+    assert!(copied, "the error and the file are copied");
+    assert!(harness.query_by_label("Cerrar").is_some());
+}
+
+#[test]
+fn startup_error() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = startup_error_harness();
+    harness.run();
+    harness.snapshot("startup_error_light");
+    Ok(())
+}

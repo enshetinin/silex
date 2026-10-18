@@ -23,6 +23,33 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # catch unintended visual changes. MIT OR Apache-2.0, same version as egui.
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
 
+# Installers (H5.9, ADR 0005): `cargo packager --release`, after
+# `cargo install cargo-packager --locked`. Output in dist/ (ignored by Git).
+# macOS: .app and .dmg; Windows: NSIS installer; Linux: .deb and AppImage.
+[package.metadata.packager]
+product-name = "Silex"
+# Also the name of the data folder on macOS (`directories`); never change it.
+identifier = "dev.silex.Silex"
+publisher = "Silex"
+copyright = "Copyright (c) 2026 Yev"
+category = "Productivity"
+# No `license-file`: it would make the .dmg and the Windows installer ask the
+# user to accept the MIT license, which needs no acceptance.
+before-packaging-command = "cargo build --release --locked"
+out-dir = "dist"
+icons = [
+    "assets/app-icon/silex-*.png",
+    "assets/app-icon/Silex.icns",
+    "assets/app-icon/silex.ico",
+]
+binaries = [{ path = "silex-desktop", main = true }]
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"
+# Ad-hoc signature: the bundle is sealed, but macOS still warns about an
+# unidentified developer. Developer ID signing is pending (ADR 0005).
+signing-identity = "-"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
