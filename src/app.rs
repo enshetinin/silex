@@ -3434,6 +3434,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("silex-app-ws-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir)?;
         let mut app = SilexApp::new(Database::open(dir.join("silex.sqlite3"))?)?;
+        // A file database would start the automatic backup on the first frame,
+        // still writing into `dir` while the test cleans up: not under test here.
+        app.startup_backup_pending = false;
         app.title = "Título sin guardar".into();
         app.mark_dirty();
         let ctx = egui::Context::default();

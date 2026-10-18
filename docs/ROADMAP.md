@@ -36,9 +36,12 @@
 - [x] Pruebas de cursor/foco, copy-paste y Unicode/IME. *(H3.5: pegar varias líneas crea bloques y reconstruye el formato de copia de Silex; integridad Unicode en todas las posiciones; Intro de confirmación del IME descartado durante la composición; pruebas manuales en `docs/MANUAL_QA.md`.)*
 
 ## Hito 4 — importación y exportación
-- [ ] Markdown → bloques con pruebas golden. *(H4.2 verificada a mano: `markdown::markdown_to_page` con `pulldown-cmark` (CommonMark + tareas GFM); el formato en línea que Silex no tiene se conserva como texto; golden de Markdown estilo Obsidian, GitHub y casos límite; ida y vuelta exacta y exportación estable; importar arrastrando `.md` a la ventana, en un hilo aparte, una transacción por página, máximo 10 MB y solo UTF-8. Tests verdes y verificación manual en macOS.)*
-- [ ] Bloques → Markdown estable. *(H4.1 verificada a mano: `markdown::page_to_markdown` (CommonMark + tareas GFM, todo el texto escapado para volver idéntico), archivo golden y comprobación con `pulldown-cmark`; «Exportar a Markdown» a `Documentos/Silex/Exportaciones` con nombres seguros y escritura atómica. Tests verdes y verificación manual en macOS.)*
-- [ ] Exportación de espacio de trabajo; adjuntos con rutas seguras. *(H4.3 implementada: «Exportar todo a Markdown» crea `Silex <fecha>/` con un `.md` por página y una carpeta por página con subpáginas, sin la papelera, en un hilo aparte, a través de una carpeta temporal que se renombra al final; nombres seguros y sin choques entre archivo y carpeta (`safe_path::unique_stem`). Medido: 100 páginas en ~0,4 s, y al reimportarlas salen idénticas. Adjuntos: Silex no tiene adjuntos; las rutas seguras quedan listas para cuando existan, con su propio ADR. Tests verdes en macOS; verificación manual pendiente.)*
+
+**Cerrado (2026-10-18):** tests verdes y verificación manual en macOS. Windows y Linux: cubiertos por la CI de cada PR; las pruebas manuales en esos sistemas siguen pendientes. Los adjuntos pasan al Hito 7, porque Silex aún no tiene adjuntos.
+
+- [x] Markdown → bloques con pruebas golden. *(H4.2: `markdown::markdown_to_page` con `pulldown-cmark` (CommonMark + tareas GFM); el formato en línea que Silex no tiene se conserva como texto; golden de Markdown estilo Obsidian, GitHub y casos límite; ida y vuelta exacta y exportación estable; importar arrastrando `.md` a la ventana, en un hilo aparte, una transacción por página, máximo 10 MB y solo UTF-8. Tests verdes y verificación manual en macOS.)*
+- [x] Bloques → Markdown estable. *(H4.1: `markdown::page_to_markdown` (CommonMark + tareas GFM, todo el texto escapado para volver idéntico), archivo golden y comprobación con `pulldown-cmark`; «Exportar a Markdown» a `Documentos/Silex/Exportaciones` con nombres seguros y escritura atómica. Tests verdes y verificación manual en macOS.)*
+- [x] Exportación de espacio de trabajo; adjuntos con rutas seguras. *(H4.3: «Exportar todo a Markdown» crea `Silex <fecha>/` con un `.md` por página y una carpeta por página con subpáginas, sin la papelera, en un hilo aparte, a través de una carpeta temporal que se renombra al final; nombres seguros y sin choques entre archivo y carpeta (`safe_path::unique_stem`). Medido: 100 páginas en ~0,4 s, y al reimportarlas salen idénticas. Adjuntos: Silex no tiene adjuntos todavía; las rutas seguras (`safe_path`) quedan listas y los adjuntos pasan al Hito 7. Tests verdes y verificación manual en macOS.)*
 
 ## Hito 5 — UX de producto
 - [ ] Diseño coherente oscuro/claro, accesibilidad y navegación completa teclado.
@@ -51,4 +54,5 @@
 
 ## Hito 7 — funcionalidades opcionales
 - [ ] Historial/versionado, enlaces bidireccionales, plantillas.
+- [ ] Adjuntos locales (P1 del PRD), con un ADR propio: almacenamiento, límites de tamaño, copias de seguridad y exportación, reutilizando `safe_path` (viene del Hito 4).
 - [ ] Evaluar cifrado y sincronización únicamente con ADR, threat model y pruebas.
