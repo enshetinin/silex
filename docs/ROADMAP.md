@@ -18,10 +18,10 @@
 - [x] Crear backups automáticos verificables y restauración. *(H1.2: copia con la API de backup en un hilo aparte, verificada antes de darla por buena, al arrancar si la última tiene > 24 h y con botón manual; se conservan 10. H1.3: restauración con confirmación y copia previa del estado actual. Tests verdes y verificación manual en macOS.)*
 - [x] Recuperación de errores de escritura, señal clara de documento sin guardar. *(H1.1: estado visible, reintento con backoff 1–30 s, cierre bloqueado con «Reintentar / Salir sin guardar». Tests verdes y verificación manual en macOS.)*
 - [x] Tests de edición/cierre/apertura y manejo de fallos. *(Reapertura con Unicode, rollback de guardado fallido, `SaveState` (no cerrar con cambios pendientes, backoff), página en la papelera desde otra conexión, copias corruptas, restauración fallida sin efectos. El cierre real de la ventana se verificó a mano.)*
-- [ ] Acciones deshacer/rehacer de texto con estrategia documentada. *(H1.4 implementada: deshacer de egui por campo con ids estables por bloque; ADR 0002. Tests verdes en macOS; verificación manual pendiente.)*
+- [x] Acciones deshacer/rehacer de texto con estrategia documentada. *(H1.4: deshacer de egui por campo con ids estables por bloque; ADR 0002. Tests verdes y verificación manual en macOS.)*
 
 ## Hito 2 — páginas navegables
-- [ ] Anidación visual y reordenación de páginas; evitar ciclos.
+- [ ] Anidación visual y reordenación de páginas; evitar ciclos. *(H2.1 implementada: árbol con subpáginas, plegar/desplegar, «+ Subpágina» y «Mover a…» con ciclos rechazados en la BD y destinos inválidos ocultos en la UI. Tests verdes en macOS; verificación manual pendiente. Reordenar hermanos: H2.2.)*
 - [ ] Favoritos, renombrado contextual, papelera, restauración.
 - [ ] Atajos de navegación y lista filtrable.
 

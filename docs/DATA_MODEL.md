@@ -27,7 +27,7 @@
 
 ## Riesgos conocidos del starter
 - Los valores `position` usan enteros consecutivos. Reordenar bloques requerirá transacciones y renumeración o fractional indexing.
-- La anidación almacenada no está expuesta en UI, ni tiene controles para ciclos ni orden jerárquico.
+- Anidación: `Database::move_page` rechaza ciclos con una consulta recursiva dentro de la transacción (comprobación de la app, no un trigger). Una página cuyo padre falta o está en la papelera se muestra en la raíz hasta definir la papelera recursiva (H2.3). Si los datos contuvieran un ciclo, `build_tree` no entra en bucle y muestra esas páginas en la raíz.
 - SQLite no está cifrada.
 - Falta backup/restauración con interfaz de usuario.
 - FTS frase exacta; el UX de búsqueda necesita ranking, snippets, prefijos y normalización.

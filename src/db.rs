@@ -153,6 +153,49 @@ impl Database {
         Ok(id)
     }
 
+    /// Moves a page under `new_parent` (or to the root) as its last child.
+    /// Rejects missing/trashed pages and any move that would create a cycle.
+    pub fn move_page(&mut self, id: &str, new_parent: Option<&str>) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let live = |page: &str| -> rusqlite::Result<bool> {
+            tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND deleted_at IS NULL)",
+                [page],
+                |r| r.get(0),
+            )
+        };
+        ensure!(live(id)?, "La página no existe o está en la papelera");
+        if let Some(parent) = new_parent {
+            ensure!(live(parent)?, "El destino no existe o está en la papelera");
+            // Walk up from the destination; UNION deduplicates, so it ends even on bad data.
+            let creates_cycle: bool = tx.query_row(
+                "WITH RECURSIVE chain(id) AS (
+                     SELECT ?1
+                     UNION
+                     SELECT p.parent_id FROM pages p JOIN chain c ON p.id = c.id
+                     WHERE p.parent_id IS NOT NULL
+                 )
+                 SELECT EXISTS (SELECT 1 FROM chain WHERE id = ?2)",
+                params![parent, id],
+                |r| r.get(0),
+            )?;
+            ensure!(
+                !creates_cycle,
+                "No se puede mover una página dentro de sí misma ni de sus subpáginas"
+            );
+        }
+        tx.execute(
+            "UPDATE pages SET parent_id = ?2,
+                 sort_order = (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages
+                               WHERE parent_id IS ?2 AND id <> ?1),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+            params![id, new_parent],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_page(&self, id: &str) -> Result<Option<Page>> {
         self.conn
             .query_row(

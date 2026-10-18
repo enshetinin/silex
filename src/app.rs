@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Instant};
+use std::{collections::HashSet, path::PathBuf, time::Instant};
 
 use anyhow::{Context, Result};
 use eframe::egui::{self, TextEdit};
@@ -7,13 +7,17 @@ use silex_desktop::{
         Database,
         backup::{self, BackupJob},
     },
-    model::{Block, Page},
+    model::{Block, Page, TreeRow, ancestors, build_tree, descendants},
     save_state::{SaveState, SaveStatus},
 };
 
 pub struct SilexApp {
     db: Database,
     pages: Vec<Page>,
+    /// Visible sidebar rows, rebuilt when pages or `expanded` change (not every frame).
+    tree: Vec<TreeRow>,
+    /// Pages whose children are shown; kept for the session only.
+    expanded: HashSet<String>,
     selected: Option<String>,
     title: String,
     blocks: Vec<Block>,
@@ -52,6 +56,8 @@ impl SilexApp {
         let mut app = Self {
             db,
             pages,
+            tree: Vec::new(),
+            expanded: HashSet::new(),
             selected: None,
             title: String::new(),
             blocks: Vec::new(),
@@ -68,8 +74,9 @@ impl SilexApp {
             doc_generation: 0,
         };
         app.backup_label = app.describe_last_backup();
-        if let Some(page) = app.pages.first() {
-            app.open_page(page.id.clone())?;
+        app.rebuild_tree();
+        if let Some(row) = app.tree.first() {
+            app.open_page(row.page.id.clone())?;
         }
         Ok(app)
     }
@@ -80,14 +87,131 @@ impl SilexApp {
         if let Some(page) = page {
             self.blocks = self.db.list_blocks(&id)?;
             self.title = page.title;
+            // Make the open page visible in the tree.
+            self.expanded.extend(ancestors(&self.pages, &id));
             self.selected = Some(id);
+            self.rebuild_tree();
         }
         Ok(())
     }
 
     fn reload_pages(&mut self) -> Result<()> {
         self.pages = self.db.list_pages()?;
+        self.rebuild_tree();
         Ok(())
+    }
+
+    fn rebuild_tree(&mut self) {
+        self.tree = build_tree(&self.pages, &self.expanded);
+    }
+
+    fn toggle_expanded(&mut self, id: &str) {
+        if !self.expanded.remove(id) {
+            self.expanded.insert(id.to_owned());
+        }
+        self.rebuild_tree();
+    }
+
+    fn create_subpage(&mut self, parent: &str) -> Result<()> {
+        self.save_now()?;
+        let id = self.db.create_page("Sin título", Some(parent))?;
+        self.expanded.insert(parent.to_owned());
+        self.reload_pages()?;
+        self.open_page(id)
+    }
+
+    fn move_page(&mut self, id: &str, new_parent: Option<&str>) -> Result<()> {
+        self.save_now()?;
+        self.db.move_page(id, new_parent)?;
+        if let Some(parent) = new_parent {
+            self.expanded.insert(parent.to_owned());
+            self.expanded.extend(ancestors(&self.pages, parent));
+        }
+        self.reload_pages()
+    }
+
+    /// Sidebar tree: indentation, expand/collapse arrow and page title.
+    fn tree_rows(&mut self, ui: &mut egui::Ui) {
+        let mut open = None;
+        let mut toggle = None;
+        for row in &self.tree {
+            ui.horizontal(|ui| {
+                ui.add_space(row.depth as f32 * 14.0);
+                let (_, response) =
+                    ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+                if row.has_children {
+                    let openness = if self.expanded.contains(&row.page.id) {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    let response = response
+                        .on_hover_text("Mostrar u ocultar subpáginas")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    egui::collapsing_header::paint_default_icon(ui, openness, &response);
+                    if response.clicked() {
+                        toggle = Some(row.page.id.clone());
+                    }
+                }
+                let selected = self.selected.as_deref() == Some(row.page.id.as_str());
+                if ui
+                    .selectable_label(selected, display_title(&row.page.title))
+                    .clicked()
+                {
+                    open = Some(row.page.id.clone());
+                }
+            });
+        }
+        if let Some(id) = toggle {
+            self.toggle_expanded(&id);
+        }
+        if let Some(id) = open {
+            let result = self.open_page(id);
+            self.report(result);
+        }
+    }
+
+    /// Subpage and move controls for the open page.
+    fn page_actions(&mut self, ui: &mut egui::Ui, page_id: &str) {
+        let mut action: Option<Option<String>> = None;
+        let mut subpage = false;
+        let current_parent = self
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .and_then(|p| p.parent_id.clone());
+        let blocked = descendants(&self.pages, page_id);
+        ui.horizontal(|ui| {
+            subpage = ui.button("+ Subpágina").clicked();
+            egui::ComboBox::from_id_salt("silex_move_target")
+                .selected_text("Mover a…")
+                .show_ui(ui, |ui| {
+                    if current_parent.is_some() && ui.selectable_label(false, "Raíz").clicked() {
+                        action = Some(None);
+                    }
+                    // Only destinations that cannot create a cycle.
+                    for page in &self.pages {
+                        let valid = page.id != page_id
+                            && !blocked.contains(&page.id)
+                            && current_parent.as_deref() != Some(page.id.as_str());
+                        if valid
+                            && ui
+                                .selectable_label(false, display_title(&page.title))
+                                .clicked()
+                        {
+                            action = Some(Some(page.id.clone()));
+                        }
+                    }
+                });
+        });
+        if subpage {
+            let result = self.create_subpage(page_id);
+            self.report(result);
+        }
+        if let Some(target) = action {
+            let result = self.move_page(page_id, target.as_deref());
+            self.report(result);
+        }
     }
 
     fn mark_dirty(&mut self) {
@@ -301,31 +425,13 @@ impl SilexApp {
         ui.add(TextEdit::singleline(&mut self.query).hint_text("Buscar…"));
         ui.separator();
         ui.label("Páginas");
-        let found = if self.query.is_empty() {
-            Ok(self.pages.clone())
+        if self.query.is_empty() {
+            egui::ScrollArea::vertical()
+                .id_salt("silex_sidebar_tree")
+                .max_height(400.0)
+                .show(ui, |ui| self.tree_rows(ui));
         } else {
-            self.db.search_pages(&self.query)
-        };
-        match found {
-            Ok(pages) => {
-                let mut open = None;
-                egui::ScrollArea::vertical()
-                    .id_salt("silex_sidebar_pages")
-                    .max_height(400.0)
-                    .show(ui, |ui| {
-                        for page in &pages {
-                            let selected = self.selected.as_deref() == Some(&page.id);
-                            if ui.selectable_label(selected, &page.title).clicked() {
-                                open = Some(page.id.clone());
-                            }
-                        }
-                    });
-                if let Some(id) = open {
-                    let result = self.open_page(id);
-                    self.report(result);
-                }
-            }
-            Err(err) => self.notice = Some(format!("Error de búsqueda: {err:#}")),
+            self.search_results(ui);
         }
         ui.separator();
         ui.add(TextEdit::singleline(&mut self.new_page_title).hint_text("Nombre de página"));
@@ -362,6 +468,32 @@ impl SilexApp {
         }
     }
 
+    /// Flat list of search matches (title and content).
+    fn search_results(&mut self, ui: &mut egui::Ui) {
+        let found = self.db.search_pages(&self.query);
+        match found {
+            Ok(pages) => {
+                let mut open = None;
+                egui::ScrollArea::vertical()
+                    .id_salt("silex_sidebar_pages")
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        for page in &pages {
+                            let selected = self.selected.as_deref() == Some(&page.id);
+                            if ui.selectable_label(selected, &page.title).clicked() {
+                                open = Some(page.id.clone());
+                            }
+                        }
+                    });
+                if let Some(id) = open {
+                    let result = self.open_page(id);
+                    self.report(result);
+                }
+            }
+            Err(err) => self.notice = Some(format!("Error de búsqueda: {err:#}")),
+        }
+    }
+
     fn editor(&mut self, ui: &mut egui::Ui) {
         let Some(page_id) = self.selected.clone() else {
             ui.label("Crea una página para empezar.");
@@ -376,6 +508,7 @@ impl SilexApp {
             self.status_bar(ui);
         });
         self.notice_bar(ui);
+        self.page_actions(ui, &page_id);
         ui.separator();
         let changed = ui
             .add(
@@ -603,6 +736,14 @@ fn block_field(ui: &mut egui::Ui, generation: u64, block: &mut Block) -> bool {
     .inner
 }
 
+fn display_title(title: &str) -> &str {
+    if title.trim().is_empty() {
+        "Sin título"
+    } else {
+        title
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,6 +822,14 @@ mod tests {
             app.db.add_block(&page, kind)?;
         }
         app.blocks = app.db.list_blocks(&page)?;
+        // A nested, expanded tree: page ─ child ─ grandchild, plus a second child.
+        let child = app.db.create_page("Hija", Some(&page))?;
+        app.db.create_page("Nieta", Some(&child))?;
+        app.db.create_page("Hija 2", Some(&page))?;
+        app.expanded.extend([page.clone(), child]);
+        app.reload_pages()?;
+        let depths: Vec<usize> = app.tree.iter().map(|r| r.depth).collect();
+        assert_eq!(depths, vec![0, 1, 2, 1]);
 
         let ctx = egui::Context::default();
         let mut warnings = Vec::new();
