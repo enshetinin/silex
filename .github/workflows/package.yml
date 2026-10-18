@@ -61,37 +61,36 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $installer = Get-ChildItem dist -Filter '*-setup.exe' | Select-Object -First 1
+          $installer = Get-ChildItem -Path dist -Filter '*-setup.exe' | Select-Object -First 1
           if (-not $installer) { throw 'No se generó el instalador' }
-          # User data lives in %LOCALAPPDATA%\silex\Silex\data. It must survive
-          # install and uninstall (it was lost when the install folder was
-          # %LOCALAPPDATA%\Silex: see packaging/windows/installer.nsi).
-          $data = Join-Path $env:LOCALAPPDATA 'silex\Silex\data'
-          New-Item -ItemType Directory -Force $data | Out-Null
-          $marker = Join-Path $data 'silex.sqlite3'
-          Set-Content -NoNewline $marker 'datos del usuario'
-          Start-Process $installer.FullName -ArgumentList '/S' -Wait
-          if (-not (Test-Path $marker)) { throw 'La instalación borró los datos del usuario' }
+          # A stand-in for the user's database, where the app keeps it
+          # (`directories`: %LOCALAPPDATA%\silex\Silex\data). It must survive
+          # install and uninstall. Always named parameters: with positional
+          # ones, Set-Content took the text as the path (a false alarm once).
+          $data = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'silex\Silex\data'
+          New-Item -ItemType Directory -Force -Path $data | Out-Null
+          $marker = Join-Path -Path $data -ChildPath 'silex.sqlite3'
+          Set-Content -LiteralPath $marker -Value 'datos del usuario' -NoNewline
+          function Assert-Data([string] $when) {
+            if (-not (Test-Path -LiteralPath $marker)) { throw "$when borró los datos del usuario" }
+            if ((Get-Content -LiteralPath $marker -Raw) -ne 'datos del usuario') { throw "$when cambió los datos del usuario" }
+          }
+          Assert-Data 'La preparación'
+
+          Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait
+          Assert-Data 'La instalación'
           # Per-user install folder of packaging/windows/installer.nsi.
-          $dir = Join-Path $env:LOCALAPPDATA 'Programs\Silex'
-          $exe = Join-Path $dir 'silex-desktop.exe'
-          if (-not (Test-Path $exe)) { throw "No se instaló $exe" }
-          $info = (Get-Item $exe).VersionInfo
+          $dir = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Programs\Silex'
+          $exe = Join-Path -Path $dir -ChildPath 'silex-desktop.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "No se instaló $exe" }
+          $info = (Get-Item -LiteralPath $exe).VersionInfo
           if ($info.ProductName -ne 'Silex') { throw "Sin recursos en el .exe: '$($info.ProductName)'" }
-          # Diagnostics: what the generated uninstaller deletes, and whether a
-          # folder left inside the install folder survives (informational).
-          Select-String -Path 'dist\.cargo-packager\nsis\x64\installer.nsi' -Pattern '^\s*(RMDir|RmDir|Delete)\b' -ErrorAction SilentlyContinue |
-            ForEach-Object { "nsi:$($_.LineNumber): $($_.Line.Trim())" }
-          $canary = Join-Path $dir 'canary\keep.txt'
-          New-Item -ItemType Directory -Force (Split-Path $canary) | Out-Null
-          Set-Content $canary 'canary'
-          Start-Process (Join-Path $dir 'uninstall.exe') -ArgumentList '/S' -Wait
+
+          Start-Process -FilePath (Join-Path -Path $dir -ChildPath 'uninstall.exe') -ArgumentList '/S' -Wait
           # The uninstaller copies itself and finishes in the background.
-          for ($i = 0; $i -lt 30 -and (Test-Path $exe); $i++) { Start-Sleep -Seconds 1 }
-          if (Test-Path $exe) { throw 'La desinstalación dejó el .exe' }
-          Write-Host "::notice::Carpeta dentro de la instalación tras desinstalar: $(if (Test-Path $canary) { 'se conserva' } else { 'borrada' })"
-          if (-not (Test-Path $marker)) { throw 'La desinstalación borró los datos del usuario' }
-          if ((Get-Content -Raw $marker) -ne 'datos del usuario') { throw 'Los datos del usuario cambiaron' }
+          for ($i = 0; $i -lt 30 -and (Test-Path -LiteralPath $dir); $i++) { Start-Sleep -Seconds 1 }
+          if (Test-Path -LiteralPath $dir) { throw "La desinstalación dejó $dir" }
+          Assert-Data 'La desinstalación'
 
       - name: Check the Linux packages
         if: runner.os == 'Linux'

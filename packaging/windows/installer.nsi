@@ -7,7 +7,9 @@
 ; is %LOCALAPPDATA%\Programs\Silex (the Windows folder for per-user
 ; programs) instead of %LOCALAPPDATA%\Silex. Windows paths ignore case, so
 ; the latter contains the user's data folder (%LOCALAPPDATA%\silex\Silex\data,
-; from `directories`), and an uninstall test in CI lost the data there.
+; from `directories`). The uninstaller never deletes it (no recursive
+; delete), but it then leaves %LOCALAPPDATA%\Silex behind with the data
+; inside, which looks like leftovers and is easy to delete by hand.
 ;
 ; When upgrading cargo-packager, copy its new template and apply the same
 ; one-line change (search for "Silex:").
