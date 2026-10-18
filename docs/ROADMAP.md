@@ -22,14 +22,14 @@
 
 ## Hito 2 — páginas navegables
 - [x] Anidación visual y reordenación de páginas; evitar ciclos. *(H2.1: árbol con subpáginas, plegar/desplegar, «+ Subpágina» y «Mover a…» con ciclos rechazados en la BD y destinos inválidos ocultos en la UI. H2.2: «Subir/Bajar» entre hermanas con renumeración transaccional. Tests verdes y verificación manual en macOS.)*
-- [ ] Favoritos, renombrado contextual, papelera, restauración. *(H2.3 verificada a mano: papelera por ramas con lista y «Restaurar»; sin borrado definitivo. H2.4 implementada: favoritos con migración aditiva 0002 (copias v1 restaurables); tests verdes en macOS, verificación manual pendiente. Renombrado contextual: H2.5.)*
-- [ ] Atajos de navegación y lista filtrable.
+- [x] Favoritos, renombrado contextual, papelera, restauración. *(H2.3: papelera por ramas con «Restaurar», sin borrado definitivo. H2.4: favoritos con migración aditiva 0002 y copias v1 restaurables. H2.5: menú contextual en cada página y renombrado en línea (F2). Tests verdes y verificación manual en macOS.)*
+- [x] Atajos de navegación y lista filtrable. *(H2.5: Cmd/Ctrl+N, Cmd/Ctrl+Mayús+N, Cmd/Ctrl+K, Alt+↑/↓, F2; la búsqueda filtra el árbol por título y lista aparte las coincidencias en el contenido. Tests verdes y verificación manual en macOS.)*
 
 ## Hito 3 — editor tipo Notion (primer valor diferencial)
-- [ ] Comandos de edición por bloque: Enter/Backspace/Tab/Shift-Tab.
-- [ ] Más tipos de bloque: H1/2/3, listas, cita y código.
-- [ ] Menú `/`, teclado y selección de bloques.
-- [ ] Reordenación y borrado de bloques; undo/redo semánticos.
+- [ ] Comandos de edición por bloque: Enter/Backspace/Tab/Shift-Tab. *(H3.2 implementada: Intro divide (Mayús+Intro y bloques de código: salto de línea), Retroceso al inicio convierte, quita sangría o fusiona, Supr al final une, Tab/Mayús+Tab con límite de un nivel, ↑/↓ entre bloques; operaciones puras en `src/editor.rs`; sin interceptar durante IME. Tests verdes en macOS; verificación manual pendiente, incluida con un IME real.)*
+- [ ] Más tipos de bloque: H1/2/3, listas, cita y código. *(H3.1 implementada: migración 0003, `BlockKind`, sangría guardada, guardado por sincronización completa y selector de tipo por bloque; tests verdes y actualización real v1/v2→v3 en macOS; verificación manual pendiente.)*
+- [ ] Menú `/`, teclado y selección de bloques. *(H3.3 implementada: «/palabra» al inicio de un bloque abre el menú de tipos (filtra sin acentos y con alias, ↑ ↓ Intro, Esc cierra); Esc selecciona el bloque, Mayús+↑/↓ amplía, Retroceso/Supr borra con «Deshacer», Cmd+C/Cmd+X copia o corta como texto. Tests verdes en macOS; verificación manual pendiente.)*
+- [ ] Reordenación y borrado de bloques; undo/redo semánticos. *(H3.4 implementada: Alt+Mayús+↑/↓ mueve el bloque o la selección, Cmd+D duplica, menú «…» por bloque (mover, duplicar, eliminar); un único deshacer/rehacer de documento con instantáneas, agrupando el tecleo (ADR 0004, sustituye a 0002). Tests verdes en macOS; verificación manual pendiente.)*
 - [ ] Pruebas de cursor/foco, copy-paste y Unicode/IME.
 
 ## Hito 4 — importación y exportación

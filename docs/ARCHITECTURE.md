@@ -47,9 +47,21 @@ Evitar recrear conexiones cada frame, filtrar SQL para búsqueda y virtualizar p
 Archivos en rutas estándar del OS; sin red, cookies, login o telemetría. No hay cifrado at-rest; documentarlo claramente. Atajos SQL y rutas de adjuntos requieren pruebas de escaping y traversal. Revisión de dependencias mediante Dependabot y auditoría futura.
 
 ## UI/UX
-Diseño editorial, navegación lateral, área central legible, estados de carga/guardado/error, accesibilidad por teclado. egui no replica automáticamente controles estéticos del OS: planificar esfuerzo visual explícito. UX de editor rich-text de varios bloques es el componente más complejo y requiere prototipos.
+Diseño editorial, navegación lateral, área central legible, estados de carga/guardado/error, accesibilidad por teclado. Atajos (H2.5) se leen al inicio de cada frame con `consume_shortcut`, antes de los widgets, comprobando primero los más específicos (Cmd+Mayús+N antes que Cmd+N). Las acciones sobre páginas (clic, menú contextual, teclado) pasan por un único `RowAction` → `SilexApp::apply`.
+
+Teclado del editor (H3.2): las operaciones son funciones puras sobre `Vec<Block>` en `src/editor.rs`, con posiciones en caracteres (como egui). En cada frame:
+1. Antes de los widgets se decide si la tecla es un comando del bloque con foco. Se usa el cursor del frame anterior y la coincidencia de modificadores es exacta, para que Mayús+Intro no cuente como Intro. Si aplica, se consume.
+2. No se intercepta nada durante una composición IME (`ImeEvent::Preedit` no vacía), con texto seleccionado ni en bloques de código (Intro y Tab).
+3. Después del layout se ejecuta la operación con el cursor ya actualizado, por si en el mismo frame llegó texto antes de la tecla.
+4. Se fija el foco y el cursor del bloque destino para el frame siguiente.
+
+Menú `/` y selección (H3.3): el menú se calcula después del layout a partir del cursor (`editor::slash_query`) y, mientras está abierto, se queda con ↑ ↓ Intro y Esc. Esc en un bloque lo selecciona: egui borra el foco con Esc al empezar el frame, así que para esa tecla basta el cursor del frame anterior. Las teclas de selección se leen antes del layout, sin ningún campo de texto con foco; Cmd+C y Cmd+X llegan como `Event::Copy`/`Event::Cut`. Borrar una selección se deshace con Cmd+Z.
+
+Deshacer (H3.4, ADR 0004): todos los cambios del documento pasan por `SilexApp::changed(kind)`, que guarda en `History` la instantánea anterior (`shadow`) y programa el autoguardado. Cmd+Z, Cmd+Mayús+Z y Cmd+Y se interceptan antes que los campos de texto del documento. Mover (Alt+Mayús+↑/↓), duplicar (Cmd+D) y el menú «…» de cada bloque son operaciones puras de `src/editor.rs`. egui no replica automáticamente controles estéticos del OS: planificar esfuerzo visual explícito. UX de editor rich-text de varios bloques es el componente más complejo y requiere prototipos.
 
 ## ADRs
 Cada decisión irreversible (formato de documento, sincronización, cifrado, editor, arquitectura de concurrencia) tiene su propia `docs/decisions/NNNN-*.md`: problema, alternativas, decisión, consecuencias, migración.
 - `0001-native-rust.md`: egui/eframe + SQLite.
 - `0002-undo-strategy.md`: deshacer de texto por campo con ids estables (Hito 1); deshacer semántico en el Hito 3.
+- `0003-block-model.md`: tipos de bloque ampliados y lista plana con sangría.
+- `0004-document-undo.md`: deshacer/rehacer del documento con instantáneas (sustituye a 0002).

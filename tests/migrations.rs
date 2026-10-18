@@ -8,7 +8,8 @@ use rusqlite::Connection;
 use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
-const LATEST: i64 = 2;
+const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
+const LATEST: i64 = 3;
 
 struct TempDir(PathBuf);
 
@@ -47,6 +48,33 @@ fn write_v1_database(path: &Path) -> anyhow::Result<()> {
          PRAGMA user_version = 1;",
     )?;
     Ok(())
+}
+
+/// A database exactly as Silex v2 left it (v1 content plus a favorite).
+fn write_v2_database(path: &Path) -> anyhow::Result<()> {
+    write_v1_database(path)?;
+    let conn = Connection::open(path)?;
+    conn.execute_batch(SCHEMA_V2)?;
+    conn.execute_batch(
+        "UPDATE pages SET favorite_at = '2026-02-01T00:00:00.000Z' WHERE id = 'p2';
+         -- A block deleted in the middle leaves a rowid gap, as real use does
+         -- (deleting the last row would let SQLite reuse its rowid).
+         INSERT INTO blocks (id, page_id, kind, content, position) VALUES
+             ('borrado', 'p1', 'paragraph', 'temporal', 9),
+             ('b3', 'p1', 'heading', 'Panes del mundo', 0);
+         DELETE FROM blocks WHERE id = 'borrado';
+         PRAGMA user_version = 2;",
+    )?;
+    Ok(())
+}
+
+fn block_rowids(path: &Path) -> anyhow::Result<Vec<(String, i64)>> {
+    let conn = Connection::open(path)?;
+    let rows = conn
+        .prepare("SELECT id, rowid FROM blocks ORDER BY id")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
 }
 
 fn has_column(path: &Path, table: &str, column: &str) -> anyhow::Result<bool> {
@@ -176,4 +204,138 @@ fn backups_with_unknown_schema_are_rejected() -> anyhow::Result<()> {
     Connection::open(&future)?.execute_batch("PRAGMA user_version = 99;")?;
     assert!(backup::verify_backup(&future).is_err());
     Ok(())
+}
+
+mod v3 {
+    use super::*;
+    use silex_desktop::model::BlockKind;
+
+    #[test]
+    fn v2_database_gets_block_kinds_and_indent_keeping_rowids() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v2_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+
+        let db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(
+            block_rowids(&tmp.db())?,
+            rowids_before,
+            "FTS depends on rowids"
+        );
+        let heading = &db.list_blocks("p1")?[0];
+        assert_eq!(heading.kind, BlockKind::Heading1, "heading → heading_1");
+        assert_eq!(heading.indent, 0);
+        let bread = db.list_blocks("p2")?;
+        assert_eq!(bread[0].kind, BlockKind::Paragraph);
+        assert_eq!(bread[1].kind, BlockKind::Todo);
+        assert!(bread[1].checked);
+        // Search, favorites and trash survive the table rebuild.
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert_eq!(db.search_pages("mundo")?.len(), 1);
+        assert_eq!(db.list_favorites()?.len(), 1);
+        assert_eq!(db.list_trash()?.len(), 1);
+        drop(db);
+        // The rebuilt FTS index matches its content table.
+        backup::verify_backup(&tmp.db())?;
+        Ok(())
+    }
+
+    #[test]
+    fn rebuilt_table_keeps_constraints_and_triggers() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v2_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        // Foreign key and cascade still work on the rebuilt table.
+        assert!(db.add_block("no-existe", BlockKind::Paragraph).is_err());
+        // FTS triggers were recreated: edits are searchable.
+        let mut blocks = db.list_blocks("p2")?;
+        blocks[0].content = "Masa de espelta".into();
+        db.save_document("p2", "Pan de masa madre", &blocks)?;
+        assert_eq!(db.search_pages("espelta")?.len(), 1);
+        assert!(db.search_pages("centeno")?.is_empty());
+        drop(db);
+        let conn = Connection::open(tmp.db())?;
+        assert!(
+            conn.execute(
+                "INSERT INTO blocks (id, page_id, kind, indent) VALUES ('x', 'p1', 'paragraph', 7)",
+                []
+            )
+            .is_err(),
+            "indent CHECK"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO blocks (id, page_id, kind) VALUES ('y', 'p1', 'heading')",
+                []
+            )
+            .is_err(),
+            "old kind name rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v3() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(has_column(&tmp.db(), "blocks", "indent")?);
+        assert!(has_column(&tmp.db(), "pages", "favorite_at")?);
+        assert_eq!(db.list_blocks("p2")?[0].content, "Harina de centeno 🌾");
+        Ok(())
+    }
+
+    #[test]
+    fn failed_rebuild_leaves_the_v2_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v2_database(&tmp.db())?;
+        // An orphan block (only possible with foreign keys off) makes the copy
+        // into the new table fail after it was created: all must roll back.
+        let conn = Connection::open(tmp.db())?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO blocks (id, page_id, kind) VALUES ('huerfano', 'no-existe', 'paragraph');",
+        )?;
+        drop(conn);
+
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 3"), "{err:#}");
+
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 2);
+        let leftover: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'blocks_v3')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(!leftover, "new table rolled back");
+        drop(conn);
+        assert!(!has_column(&tmp.db(), "blocks", "indent")?);
+        let blocks: i64 =
+            Connection::open(tmp.db())?
+                .query_row("SELECT COUNT(*) FROM blocks", [], |r| r.get(0))?;
+        assert_eq!(blocks, 4, "nothing lost");
+        Ok(())
+    }
+
+    #[test]
+    fn v2_backup_restores_into_v3() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v2_database(&old_db)?;
+        let v2_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+
+        let mut db = Database::open(tmp.db())?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v2_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(db.list_blocks("p1")?[0].kind, BlockKind::Heading1);
+        assert_eq!(db.search_pages("mundo")?.len(), 1);
+        Ok(())
+    }
 }
