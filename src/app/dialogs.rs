@@ -106,6 +106,7 @@ impl SilexApp {
             close = ui
                 .add(egui::Button::new(icons::icon(icons::CLOSE)).frame_when_inactive(false))
                 .on_hover_text("Cerrar")
+                .accessible_name("Cerrar aviso de exportación")
                 .clicked();
             open = ui.small_button("Abrir carpeta").clicked();
         });
@@ -293,6 +294,7 @@ impl SilexApp {
             close = ui
                 .add(egui::Button::new(icons::icon(icons::CLOSE)).frame_when_inactive(false))
                 .on_hover_text("Cerrar aviso")
+                .accessible_name("Cerrar aviso")
                 .clicked();
         });
         if close {

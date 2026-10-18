@@ -106,9 +106,6 @@ fn snapshot_with(
         .with_theme(theme)
         .with_os(eframe::egui::os::OperatingSystem::Mac)
         .with_context_setup(theme::install)
-        // 28 widgets still lack accessible names (block type selectors, text
-        // fields…): fixed in H5.5 (accessibility), then this check goes back on.
-        .with_accessibility_check(false)
         .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
     harness.run();
     interact(&mut harness);
@@ -150,5 +147,235 @@ fn block_handle_menu() -> anyhow::Result<()> {
         // Open the handle menu of the paragraph block (its id is stable).
         let paragraph = harness.state().blocks[1].id.clone();
         egui::Popup::open_id(&harness.ctx, super::blocks::handle_menu_id(&paragraph));
+    })
+}
+
+// ---- Accessibility: no rendering needed, so these always run (also in CI). ----
+
+/// The demo app in a harness, settled.
+fn a11y_harness(app: SilexApp) -> Harness<'static, SilexApp> {
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness
+}
+
+/// Every control has a name, and no name is only an icon glyph (Private Use
+/// Area characters mean nothing to a screen reader).
+#[track_caller]
+fn assert_accessible(harness: &Harness<'_, SilexApp>, state: &str) {
+    let unnamed = harness.unnamed_widgets();
+    assert!(
+        unnamed.is_empty(),
+        "{state}: unnamed widgets:\n{unnamed:#?}"
+    );
+    let is_icon = |c: char| ('\u{E000}'..='\u{F8FF}').contains(&c);
+    let icon_only: Vec<String> = harness
+        .root()
+        .children_recursive()
+        .map(|node| node.accesskit_node())
+        .filter(|node| !node.is_hidden())
+        .filter_map(|node| {
+            let label = node.label()?;
+            let meaningful = label.chars().any(|c| !c.is_whitespace() && !is_icon(c));
+            (!label.trim().is_empty() && !meaningful)
+                .then(|| format!("{:?} {label:?} at {:?}", node.role(), node.raw_bounds()))
+        })
+        .collect();
+    assert!(
+        icon_only.is_empty(),
+        "{state}: icon-only names:\n{icon_only:#?}"
+    );
+}
+
+fn click_button(harness: &mut Harness<'_, SilexApp>, label: &str) {
+    harness
+        .get_all_by_label(label)
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .unwrap_or_else(|| panic!("button {label:?}"))
+        .click();
+    harness.run();
+}
+
+#[test]
+fn every_control_has_a_name() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    assert_accessible(&harness, "at rest");
+
+    // Row actions appear on hover.
+    harness
+        .get_all_by_label("Notas de lectura")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .expect("row")
+        .hover();
+    harness.run();
+    assert_accessible(&harness, "row hover");
+    assert!(harness.query_by_label("Más acciones").is_some());
+    assert!(harness.query_by_label("Nueva subpágina").is_some());
+
+    let paragraph = harness.state().blocks[1].id.clone();
+    egui::Popup::open_id(&harness.ctx, super::blocks::handle_menu_id(&paragraph));
+    harness.run();
+    assert_accessible(&harness, "block menu");
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+
+    for button in [
+        "Más acciones de la página",
+        "Ajustes",
+        "Copias y exportación",
+        "Atajos de teclado",
+    ] {
+        click_button(&mut harness, button);
+        assert_accessible(&harness, button);
+        egui::Popup::close_all(&harness.ctx);
+        harness.run();
+    }
+
+    harness.state_mut().query = "receta".into();
+    harness.run();
+    assert_accessible(&harness, "search results");
+
+    harness.state_mut().query.clear();
+    harness.state_mut().selected = None;
+    harness.run();
+    assert_accessible(&harness, "no page open");
+    Ok(())
+}
+
+#[test]
+fn settings_menu_changes_and_stores_the_theme_and_size() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    click_button(&mut harness, "Ajustes");
+    harness.get_by_label("Oscuro").click();
+    harness.run();
+    harness.get_by_label("125 %").click();
+    harness.run();
+    assert_eq!(harness.ctx.theme(), egui::Theme::Dark);
+    assert!((harness.ctx.zoom_factor() - 1.25).abs() < 1e-6);
+    let stored = harness.state().db.load_settings()?;
+    assert_eq!(stored.theme, silex_desktop::settings::ThemeMode::Dark);
+    assert_eq!(stored.zoom_percent, 125);
+    Ok(())
+}
+
+#[test]
+fn stored_settings_apply_at_startup_and_keyboard_zoom_is_remembered() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    db.save_settings(&silex_desktop::settings::Settings {
+        theme: silex_desktop::settings::ThemeMode::Dark,
+        zoom_percent: 125,
+    })?;
+    let mut harness = a11y_harness(SilexApp::new(db)?);
+    assert_eq!(harness.ctx.theme(), egui::Theme::Dark);
+    assert!((harness.ctx.zoom_factor() - 1.25).abs() < 1e-6);
+
+    // What egui does on Cmd+− (outside our code), and an out-of-range zoom.
+    harness.ctx.set_zoom_factor(1.1);
+    harness.run();
+    assert_eq!(harness.state().db.load_settings()?.zoom_percent, 110);
+    harness.ctx.set_zoom_factor(4.0);
+    harness.run();
+    assert_eq!(harness.state().db.load_settings()?.zoom_percent, 200);
+    assert!((harness.ctx.zoom_factor() - 2.0).abs() < 1e-6, "clamped");
+    Ok(())
+}
+
+#[test]
+fn settings_menu() -> anyhow::Result<()> {
+    snapshot_with(
+        "settings_menu_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            click_button(harness, "Ajustes");
+        },
+    )
+}
+
+#[test]
+fn keyboard_focus_is_visible() -> anyhow::Result<()> {
+    snapshot_with(
+        "keyboard_focus_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            // Tab from the search field to the first tree rows.
+            harness
+                .ctx
+                .memory_mut(|m| m.request_focus(super::sidebar::search_id()));
+            harness.run();
+            for _ in 0..3 {
+                harness.key_press(egui::Key::Tab);
+                harness.run();
+            }
+        },
+    )
+}
+
+#[test]
+fn row_menu_stays_open_while_the_pointer_moves_into_it() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    let row = |h: &Harness<'_, SilexApp>| {
+        h.get_all_by_label("Notas de lectura")
+            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+            .expect("row")
+            .rect()
+    };
+    let row_rect = row(&harness);
+    harness.hover_at(row_rect.center());
+    harness.run();
+    click_button(&mut harness, "Más acciones");
+    assert!(harness.query_by_label("Abrir").is_some(), "menu opened");
+
+    // Leave the row and go over a menu item, as a user does.
+    let item = harness.get_by_label("Abrir").rect();
+    assert!(!row_rect.contains(item.center()));
+    harness.hover_at(item.center());
+    harness.run();
+    assert!(
+        harness.query_by_label("Abrir").is_some(),
+        "menu closed on hover"
+    );
+    harness.get_by_label("Abrir").click();
+    harness.run();
+    assert_eq!(
+        harness.state().title,
+        "Notas de lectura",
+        "the menu action ran"
+    );
+    Ok(())
+}
+
+#[test]
+fn slash_menu_lists_options_in_a_column() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    click_button(&mut harness, "Añadir bloque");
+    harness.event(egui::Event::Text("/".into()));
+    harness.run();
+    assert!(harness.state().slash.is_some(), "slash menu opened");
+    assert_accessible(&harness, "slash menu");
+    let option = |label: &str| {
+        harness
+            .get_all_by_label_contains(label)
+            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+            .unwrap_or_else(|| panic!("option {label:?}"))
+            .rect()
+    };
+    let (first, second) = (option("Título 1"), option("Título 2"));
+    assert!(
+        second.top() >= first.bottom() - 0.5,
+        "{first:?} / {second:?}"
+    );
+    assert!((second.left() - first.left()).abs() < 0.5, "same column");
+    Ok(())
+}
+
+#[test]
+fn slash_menu() -> anyhow::Result<()> {
+    snapshot_with("slash_menu_light", eframe::egui::Theme::Light, |harness| {
+        click_button(harness, "Añadir bloque");
+        harness.event(egui::Event::Text("/".into()));
     })
 }

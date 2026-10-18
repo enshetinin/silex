@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 3;
+const LATEST: i64 = 4;
 
 struct TempDir(PathBuf);
 
@@ -335,6 +335,131 @@ mod v3 {
         db.restore_from_backup(&v2_backup)?;
         assert_eq!(db.schema_version()?, LATEST);
         assert_eq!(db.list_blocks("p1")?[0].kind, BlockKind::Heading1);
+        assert_eq!(db.search_pages("mundo")?.len(), 1);
+        Ok(())
+    }
+}
+
+mod v4 {
+    use super::*;
+    use silex_desktop::settings::{Settings, ThemeMode};
+
+    const SCHEMA_V3: &str = include_str!("../src/db/migrations/0003_block_kinds.sql");
+
+    /// A database exactly as Silex v3 left it.
+    fn write_v3_database(path: &Path) -> anyhow::Result<()> {
+        write_v2_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V3)?;
+        conn.execute_batch("PRAGMA user_version = 3;")?;
+        Ok(())
+    }
+
+    #[test]
+    fn v3_database_gets_settings_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v3_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        assert_eq!(db.load_settings()?, Settings::default());
+        assert_eq!(db.list_blocks("p2")?[0].content, "Harina de centeno 🌾");
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert_eq!(db.list_favorites()?.len(), 1);
+        assert_eq!(db.list_trash()?.len(), 1);
+        // A verified v3 copy was made before upgrading.
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1
+        );
+        db.save_settings(&Settings {
+            theme: ThemeMode::Light,
+            zoom_percent: 110,
+        })?;
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        Ok(())
+    }
+
+    #[test]
+    fn settings_survive_reopening() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let wanted = Settings {
+            theme: ThemeMode::Dark,
+            zoom_percent: 125,
+        };
+        let mut db = Database::open(tmp.db())?;
+        db.save_settings(&Settings::default())?;
+        db.save_settings(&wanted)?; // overwrites, no duplicate rows
+        drop(db);
+        let db = Database::open(tmp.db())?;
+        assert_eq!(db.load_settings()?, wanted);
+        drop(db);
+        let rows: i64 =
+            Connection::open(tmp.db())?
+                .query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))?;
+        assert_eq!(rows, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn damaged_settings_fall_back_to_defaults() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        drop(Database::open(tmp.db())?);
+        Connection::open(tmp.db())?.execute_batch(
+            "INSERT INTO settings (key, value) VALUES
+                 ('theme', 'violeta'), ('zoom_percent', '-3'), ('futuro', '1');",
+        )?;
+        let db = Database::open(tmp.db())?;
+        assert_eq!(db.load_settings()?, Settings::default());
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v4() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(db.load_settings()?, Settings::default());
+        assert!(db.list_blocks("p2")?[1].checked);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v3_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v3_database(&tmp.db())?;
+        // A table already named `settings` makes the migration fail.
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE settings (x INTEGER);")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 4"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 3);
+        assert!(
+            has_column(&tmp.db(), "settings", "x")?,
+            "old table kept as is"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn v3_backup_restores_into_v4() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v3_database(&old_db)?;
+        let v3_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+
+        let mut db = Database::open(tmp.db())?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v3_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(db.load_settings()?, Settings::default());
         assert_eq!(db.search_pages("mundo")?.len(), 1);
         Ok(())
     }

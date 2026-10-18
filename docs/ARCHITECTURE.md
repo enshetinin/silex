@@ -20,6 +20,7 @@ src/db.rs, src/db/          #   SQLite: consultas, migraciones, copias (backup.r
 src/editor.rs               #   Operaciones puras del editor de bloques
 src/history.rs              #   Instantáneas para deshacer/rehacer
 src/save_state.rs           #   Cuándo guardar y reintentar
+src/settings.rs             #   Preferencias (tema, tamaño) y su validación
 src/markdown/               #   Markdown ↔ bloques
 src/import.rs, src/export.rs#   Lectura y escritura de archivos
 src/safe_path.rs            #   Nombres de archivo seguros

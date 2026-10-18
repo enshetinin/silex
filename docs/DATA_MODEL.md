@@ -29,6 +29,11 @@
 - La numeración de listas se calcula al pintar (`list_numbers`), no se guarda.
 - `save_document` sincroniza la lista completa de la página (inserta, actualiza, borra, `position` = índice) en una transacción y solo toca filas cambiadas, para no reindexar FTS de más.
 
+## Versión 4 — ajustes (`0004_settings.sql`)
+- `settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`: preferencias clave-valor (`theme` = `system`/`light`/`dark`, `zoom_percent` entre 50 y 200). Una preferencia nueva no necesita migración.
+- Rust valida cada valor al leer (`settings::Settings::from_pairs`): una clave desconocida o un valor inválido se ignoran y se usa el valor por defecto; nunca impiden arrancar.
+- Los ajustes viven en la base, así que entran en las copias de seguridad: restaurar una copia restaura también sus ajustes.
+
 ## Evolución
 - Las migraciones publicadas (`0001`, `0002`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).

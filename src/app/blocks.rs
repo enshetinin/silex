@@ -184,6 +184,7 @@ pub(super) fn block_field(
                             ui.spacing_mut().interact_size.y = 18.0 + 2.0 * TEXT_TOP;
                             ui.spacing_mut().icon_spacing = 0.0;
                             ui.checkbox(&mut block.checked, "")
+                                .accessible_name("Tarea completada")
                         })
                         .inner
                         .changed();
@@ -242,7 +243,10 @@ pub(super) fn block_field(
                 edit = edit.hint_text(egui::RichText::new(text).color(p.text_faint));
             }
             let output = edit.show(ui);
-            let text_changed = output.response.changed();
+            // Screen readers announce the block type ("Tarea", "Título 1"…).
+            let response =
+                egui::Response::clone(&output.response).accessible_name(block.kind.label());
+            let text_changed = response.changed();
             if view.scroll_into_view {
                 output.response.scroll_to_me(None);
             }
@@ -349,19 +353,62 @@ fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<
 }
 
 /// The slash menu list; returns the type clicked with the mouse, if any.
-pub(super) fn slash_menu_ui(ui: &mut egui::Ui, menu: &SlashMenu) -> Option<BlockKind> {
+/// The slash menu, floating under the block (above it when there is no
+/// room below) so it never pushes the document or gets cut off. Returns the
+/// type clicked with the mouse, if any.
+pub(super) fn slash_menu_ui(
+    ui: &mut egui::Ui,
+    menu: &SlashMenu,
+    block: egui::Rect,
+) -> Option<BlockKind> {
+    let p = theme::current(ui.ctx());
+    // Text starts after the gutter; rows are ~30 px plus the header.
+    let left = block.left() + GUTTER + ui.spacing().item_spacing.x;
+    let height = 44.0 + 30.0 * menu.matches.len() as f32;
+    let screen = ui.ctx().content_rect();
+    let below = screen.bottom() - block.bottom() >= height || block.top() - screen.top() < height;
+    let (pivot, anchor) = if below {
+        (
+            egui::Align2::LEFT_TOP,
+            egui::pos2(left, block.bottom() + 4.0),
+        )
+    } else {
+        (
+            egui::Align2::LEFT_BOTTOM,
+            egui::pos2(left, block.top() - 4.0),
+        )
+    };
     let mut clicked = None;
-    egui::Frame::popup(ui.style()).show(ui, |ui| {
-        ui.weak("Convertir en… (↑ ↓ Intro, Esc para cerrar)");
-        for (i, kind) in menu.matches.iter().enumerate() {
-            if ui
-                .selectable_label(i == menu.selected, kind.label())
-                .clicked()
-            {
-                clicked = Some(*kind);
-            }
-        }
-    });
+    egui::Area::new(egui::Id::unique(("silex-slash-menu", &menu.block_id)))
+        .order(egui::Order::Foreground)
+        .pivot(pivot)
+        .fixed_pos(anchor)
+        .constrain(true)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                    ui.set_width(240.0);
+                    ui.label(
+                        egui::RichText::new("Convertir en… (↑ ↓ Intro, Esc para cerrar)")
+                            .small()
+                            .color(p.text_muted),
+                    );
+                    for (i, kind) in menu.matches.iter().enumerate() {
+                        let option = ui.add(egui::Button::selectable(
+                            i == menu.selected,
+                            (icons::icon(kind_icon(*kind)), format!("  {}", kind.label())),
+                        ));
+                        if i == menu.selected {
+                            // Arrow keys can move past the visible part.
+                            option.scroll_to_me(None);
+                        }
+                        if option.clicked() {
+                            clicked = Some(*kind);
+                        }
+                    }
+                });
+            });
+        });
     clicked
 }
 
@@ -964,13 +1011,9 @@ impl SilexApp {
                             }
                             if let Some(menu) =
                                 self.slash.as_ref().filter(|m| m.block_id == block.id)
+                                && let Some(kind) = slash_menu_ui(ui, menu, out.rect)
                             {
-                                ui.horizontal(|ui| {
-                                    gutter_space(ui);
-                                    if let Some(kind) = slash_menu_ui(ui, menu) {
-                                        clicked_kind = Some((kind, block.id.clone()));
-                                    }
-                                });
+                                clicked_kind = Some((kind, block.id.clone()));
                             }
                         }
                         if let Some((kind, id)) = clicked_kind {
@@ -980,13 +1023,15 @@ impl SilexApp {
                         ui.add_space(theme::space::SM);
                         ui.horizontal(|ui| {
                             gutter_space(ui);
-                            let add = ui.add(
-                                egui::Button::new((
-                                    icons::icon(icons::PLUS).color(p.text_muted),
-                                    egui::RichText::new(" Añadir bloque").color(p.text_muted),
-                                ))
-                                .frame_when_inactive(false),
-                            );
+                            let add = ui
+                                .add(
+                                    egui::Button::new((
+                                        icons::icon(icons::PLUS).color(p.text_muted),
+                                        egui::RichText::new(" Añadir bloque").color(p.text_muted),
+                                    ))
+                                    .frame_when_inactive(false),
+                                )
+                                .accessible_name("Añadir bloque");
                             if add.clicked() {
                                 // In memory, like every other edit: undoable and saved by the autosave.
                                 let block = Block {
@@ -1050,7 +1095,8 @@ impl SilexApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let more = ui
                     .add(ghost(icons::icon(icons::DOTS_THREE).color(p.text_muted)))
-                    .on_hover_text("Más acciones");
+                    .on_hover_text("Más acciones")
+                    .accessible_name("Más acciones de la página");
                 egui::Popup::menu(&more).show(|ui| {
                     if let Some(chosen) = self.page_menu(ui, page_id) {
                         action = Some(chosen);
@@ -1081,6 +1127,7 @@ impl SilexApp {
                 if ui
                     .add(ghost(icons::icon(icons::STAR).color(star_color)))
                     .on_hover_text(star_tip)
+                    .accessible_name(star_tip)
                     .clicked()
                 {
                     action = Some(RowAction::Favorite(page_id.to_owned(), !is_favorite));
@@ -1091,6 +1138,7 @@ impl SilexApp {
                         ghost(icons::icon(icons::REDO).color(p.text_muted)),
                     )
                     .on_hover_text("Rehacer")
+                    .accessible_name("Rehacer")
                     .clicked()
                 {
                     self.redo();
@@ -1101,6 +1149,7 @@ impl SilexApp {
                         ghost(icons::icon(icons::UNDO).color(p.text_muted)),
                     )
                     .on_hover_text("Deshacer")
+                    .accessible_name("Deshacer")
                     .clicked()
                 {
                     self.undo();

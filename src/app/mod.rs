@@ -8,6 +8,7 @@ use silex_desktop::{
     history::{History, Snapshot},
     model::{Block, Page, TreeRow, ancestors, build_tree},
     save_state::SaveState,
+    settings::{Settings, ThemeMode},
 };
 
 mod blocks;
@@ -48,6 +49,8 @@ pub struct SilexApp {
     theme_installed: bool,
     /// Block under the pointer last frame (shows its handle).
     hovered_block: Option<String>,
+    /// Theme and interface size (stored in the database).
+    settings: Settings,
     query: String,
     save: SaveState,
     /// Errors from actions other than saving (search, create, open).
@@ -141,6 +144,7 @@ impl SilexApp {
             focus_title: false,
             theme_installed: false,
             hovered_block: None,
+            settings: Settings::default(),
             query: String::new(),
             save: SaveState::default(),
             notice: None,
@@ -175,6 +179,11 @@ impl SilexApp {
         app.rebuild_tree();
         if let Some(row) = app.tree.first() {
             app.open_page(row.page.id.clone())?;
+        }
+        // Preferences are not worth refusing to start over: report and use defaults.
+        match app.db.load_settings() {
+            Ok(settings) => app.settings = settings,
+            Err(err) => app.notice = Some(format!("No se pudieron leer los ajustes: {err:#}")),
         }
         Ok(app)
     }
@@ -360,6 +369,51 @@ impl SilexApp {
         self.report(result);
     }
 
+    /// Applies the stored theme and size. At startup "Sistema" leaves egui's
+    /// theme alone (it already follows the OS, and tests set their own).
+    fn apply_settings(&self, ctx: &egui::Context, startup: bool) {
+        let preference = match self.settings.theme {
+            ThemeMode::System => egui::ThemePreference::System,
+            ThemeMode::Light => egui::ThemePreference::Light,
+            ThemeMode::Dark => egui::ThemePreference::Dark,
+        };
+        if self.settings.theme != ThemeMode::System || !startup {
+            ctx.set_theme(preference);
+        }
+        let zoom = f32::from(self.settings.zoom_percent) / 100.0;
+        if (ctx.zoom_factor() - zoom).abs() > f32::EPSILON {
+            ctx.set_zoom_factor(zoom);
+        }
+    }
+
+    /// Changes settings, applies them and stores them.
+    fn set_settings(&mut self, ctx: &egui::Context, settings: Settings) {
+        if settings == self.settings {
+            return;
+        }
+        self.settings = settings;
+        self.apply_settings(ctx, false);
+        let result = self.db.save_settings(&self.settings);
+        self.report(result);
+    }
+
+    /// Keyboard zoom (Cmd +/−/0, handled by egui) changes the size too:
+    /// keep it within range and remember it.
+    fn sync_zoom(&mut self, ctx: &egui::Context) {
+        let factor = ctx.zoom_factor();
+        let zoom = Settings::zoom_from_factor(factor);
+        if (factor * 100.0 - f32::from(zoom)).abs() > 0.5 {
+            ctx.set_zoom_factor(f32::from(zoom) / 100.0);
+        }
+        if zoom != self.settings.zoom_percent {
+            let settings = Settings {
+                zoom_percent: zoom,
+                ..self.settings
+            };
+            self.set_settings(ctx, settings);
+        }
+    }
+
     fn report<T>(&mut self, result: Result<T>) {
         if let Err(err) = result {
             self.notice = Some(format!("{err:#}"));
@@ -396,7 +450,9 @@ impl SilexApp {
             theme::install(&ctx);
             // This frame's root Ui copied the old style when it was created.
             ui.set_style(ctx.global_style());
+            self.apply_settings(&ctx, true);
         }
+        self.sync_zoom(&ctx);
         // The root Ui has no background of its own: paint the theme canvas
         // over the whole window (otherwise the window clear color shows).
         ui.painter()

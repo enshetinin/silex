@@ -11,6 +11,7 @@ use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::model::{Block, BlockKind, MAX_INDENT, NewBlock, Page, TrashItem};
+use crate::settings::Settings;
 
 pub mod backup;
 
@@ -19,6 +20,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("db/migrations/0001_init.sql")),
     (2, include_str!("db/migrations/0002_favorites.sql")),
     (3, include_str!("db/migrations/0003_block_kinds.sql")),
+    (4, include_str!("db/migrations/0004_settings.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -177,6 +179,31 @@ impl Database {
         Ok(self
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))?)
+    }
+
+    /// User preferences; defaults for anything missing or invalid.
+    pub fn load_settings(&self) -> Result<Settings> {
+        let mut stmt = self.conn.prepare("SELECT key, value FROM settings")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Settings::from_pairs(
+            rows.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+        ))
+    }
+
+    /// Stores every preference in one transaction.
+    pub fn save_settings(&mut self, settings: &Settings) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for (key, value) in settings.to_pairs() {
+            tx.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Marks or unmarks a live page as favorite. Marking keeps the original

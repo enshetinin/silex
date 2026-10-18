@@ -10,6 +10,7 @@ use silex_desktop::{
 
 use super::*;
 use super::{icons, theme};
+use silex_desktop::settings::{ThemeMode, ZOOM_STEPS};
 
 /// Inline rename in the sidebar.
 pub(super) struct Rename {
@@ -84,6 +85,7 @@ fn section_header_with_add(ui: &mut egui::Ui, title: &str, tooltip: &str) -> boo
                     egui::Button::new(icons::icon(icons::PLUS).weak()).frame_when_inactive(false),
                 )
                 .on_hover_text(tooltip)
+                .accessible_name(tooltip)
                 .clicked()
             })
             .inner
@@ -148,15 +150,28 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
         egui::WidgetInfo::selected(egui::Role::Button, true, parts.selected, parts.label)
     });
     let hovered = ui.rect_contains_pointer(rect);
+    // The "…" menu is open: keep the row's actions (the pointer leaves the
+    // row to reach the menu, and the menu only lives while its button is
+    // drawn) and its highlight. Same id `Popup::menu` derives from the button.
+    let menu_open = egui::Popup::is_id_open(ui.ctx(), row.id.with(icons::DOTS_THREE).with("popup"));
     let fill = if parts.selected {
         p.sidebar_selected
-    } else if hovered || row.has_focus() {
+    } else if hovered || row.has_focus() || menu_open {
         p.sidebar_hover
     } else {
         egui::Color32::TRANSPARENT
     };
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(theme::radius::MD), fill);
+    if row.has_focus() {
+        // Keyboard focus: an outline, distinct from hover and selection.
+        ui.painter().rect_stroke(
+            rect.shrink(0.5),
+            egui::CornerRadius::same(theme::radius::MD),
+            egui::Stroke::new(1.5, p.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
 
     let cy = rect.center().y;
     let mut x = rect.left() + theme::space::SM + parts.depth as f32 * ROW_INDENT;
@@ -166,10 +181,13 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
     // Interact + paint instead of `put`: `put` reserves the button's real
     // size (wider than 22 px), which made the panel grow a little every frame.
     let row_id = row.id;
-    let icon_button = |ui: &mut egui::Ui, center: egui::Pos2, icon: &str| {
+    let icon_button = |ui: &mut egui::Ui, center: egui::Pos2, icon: &str, name: &str| {
         let rect = egui::Rect::from_center_size(center, egui::vec2(22.0, 22.0));
         let response = ui.interact(rect, row_id.with(icon), egui::Sense::click());
-        if response.hovered() {
+        // Painted by hand, so name it for screen readers and keyboard users.
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+        let active = response.hovered() || response.has_focus();
+        if active {
             ui.painter()
                 .rect_filled(rect, theme::radius::SM, p.sidebar_selected);
         }
@@ -178,13 +196,13 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
             egui::Align2::CENTER_CENTER,
             icon,
             icons::font(14.0),
-            if response.hovered() {
+            if active {
                 p.sidebar_text
             } else {
                 p.sidebar_muted
             },
         );
-        response
+        response.on_hover_text(name)
     };
     let mut caret = None;
     if parts.caret_slot {
@@ -194,8 +212,12 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
             } else {
                 icons::CARET_RIGHT
             };
-            let response = icon_button(ui, egui::pos2(x + 8.0, cy), icon)
-                .on_hover_text("Mostrar u ocultar subpáginas");
+            let name = if expanded {
+                "Ocultar subpáginas"
+            } else {
+                "Mostrar subpáginas"
+            };
+            let response = icon_button(ui, egui::pos2(x + 8.0, cy), icon, name);
             caret = Some(response);
         }
         x += 20.0;
@@ -215,13 +237,25 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
 
     let mut right = rect.right() - theme::space::XS;
     let (mut plus, mut more) = (None, None);
-    if parts.hover_actions && hovered {
-        more = Some(
-            icon_button(ui, egui::pos2(right - 11.0, cy), icons::DOTS_THREE)
-                .on_hover_text("Más acciones"),
-        );
+    // Also while the row has keyboard focus, so Tab reaches its actions.
+    let focus_inside = row.has_focus()
+        || [icons::DOTS_THREE, icons::PLUS]
+            .iter()
+            .any(|icon| ui.memory(|m| m.has_focus(row_id.with(*icon))));
+    if parts.hover_actions && (hovered || focus_inside || menu_open) {
+        more = Some(icon_button(
+            ui,
+            egui::pos2(right - 11.0, cy),
+            icons::DOTS_THREE,
+            "Más acciones",
+        ));
         right -= 24.0;
-        plus = Some(icon_button(ui, egui::pos2(right - 11.0, cy), icons::PLUS));
+        plus = Some(icon_button(
+            ui,
+            egui::pos2(right - 11.0, cy),
+            icons::PLUS,
+            "Nueva subpágina",
+        ));
         right -= 24.0;
     }
     if let Some(trailing) = &parts.trailing {
@@ -742,7 +776,38 @@ impl SilexApp {
             &RowParts::nav(icons::KEYBOARD, "Atajos de teclado", None),
         );
         egui::Popup::menu(&shortcuts.row).show(Self::shortcuts_help);
+
+        let settings = sidebar_row(ui, &RowParts::nav(icons::SETTINGS, "Ajustes", None));
+        egui::Popup::menu(&settings.row)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| self.settings_menu(ui));
         let _ = p;
+    }
+
+    /// Theme and interface size.
+    pub(super) fn settings_menu(&mut self, ui: &mut egui::Ui) {
+        let mut settings = self.settings;
+        ui.label(egui::RichText::new("Tema").small().weak());
+        ui.horizontal(|ui| {
+            for mode in ThemeMode::ALL {
+                ui.selectable_value(&mut settings.theme, mode, mode.label());
+            }
+        });
+        ui.add_space(theme::space::SM);
+        ui.label(egui::RichText::new("Tamaño de la interfaz").small().weak());
+        ui.horizontal(|ui| {
+            for zoom in ZOOM_STEPS {
+                ui.selectable_value(&mut settings.zoom_percent, zoom, format!("{zoom} %"));
+            }
+        });
+        let cmd = cmd_label(ui.ctx());
+        ui.label(
+            egui::RichText::new(format!("También con {cmd}+ / {cmd}− / {cmd}+0"))
+                .small()
+                .weak(),
+        );
+        let ctx = ui.ctx().clone();
+        self.set_settings(&ctx, settings);
     }
 
     /// Search: title matches as a filtered tree, then pages that only match
@@ -787,6 +852,12 @@ impl SilexApp {
                     (format!("{cmd}+Z / {cmd}+Mayús+Z"), "Deshacer / rehacer"),
                     ("/".to_owned(), "Cambiar el tipo de bloque"),
                     ("Clic derecho".to_owned(), "Acciones de una página"),
+                    (
+                        format!("{cmd}+ / {cmd}− / {cmd}+0"),
+                        "Tamaño de la interfaz",
+                    ),
+                    ("Tab / Mayús+Tab".to_owned(), "Moverse entre controles"),
+                    ("Intro / Espacio".to_owned(), "Activar el control enfocado"),
                 ] {
                     ui.monospace(keys);
                     ui.label(what);
