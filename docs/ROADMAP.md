@@ -26,11 +26,14 @@
 - [x] Atajos de navegación y lista filtrable. *(H2.5: Cmd/Ctrl+N, Cmd/Ctrl+Mayús+N, Cmd/Ctrl+K, Alt+↑/↓, F2; la búsqueda filtra el árbol por título y lista aparte las coincidencias en el contenido. Tests verdes y verificación manual en macOS.)*
 
 ## Hito 3 — editor tipo Notion (primer valor diferencial)
-- [ ] Comandos de edición por bloque: Enter/Backspace/Tab/Shift-Tab. *(H3.2 implementada: Intro divide (Mayús+Intro y bloques de código: salto de línea), Retroceso al inicio convierte, quita sangría o fusiona, Supr al final une, Tab/Mayús+Tab con límite de un nivel, ↑/↓ entre bloques; operaciones puras en `src/editor.rs`; sin interceptar durante IME. Tests verdes en macOS; verificación manual pendiente, incluida con un IME real.)*
-- [ ] Más tipos de bloque: H1/2/3, listas, cita y código. *(H3.1 implementada: migración 0003, `BlockKind`, sangría guardada, guardado por sincronización completa y selector de tipo por bloque; tests verdes y actualización real v1/v2→v3 en macOS; verificación manual pendiente.)*
-- [ ] Menú `/`, teclado y selección de bloques. *(H3.3 implementada: «/palabra» al inicio de un bloque abre el menú de tipos (filtra sin acentos y con alias, ↑ ↓ Intro, Esc cierra); Esc selecciona el bloque, Mayús+↑/↓ amplía, Retroceso/Supr borra con «Deshacer», Cmd+C/Cmd+X copia o corta como texto. Tests verdes en macOS; verificación manual pendiente.)*
-- [ ] Reordenación y borrado de bloques; undo/redo semánticos. *(H3.4 implementada: Alt+Mayús+↑/↓ mueve el bloque o la selección, Cmd+D duplica, menú «…» por bloque (mover, duplicar, eliminar); un único deshacer/rehacer de documento con instantáneas, agrupando el tecleo (ADR 0004, sustituye a 0002). Tests verdes en macOS; verificación manual pendiente.)*
-- [ ] Pruebas de cursor/foco, copy-paste y Unicode/IME. *(H3.5 implementada: pegar varias líneas crea bloques (reconoce el formato de copia de Silex, normaliza saltos de línea y caracteres de control), integridad Unicode en todas las posiciones, IME (Intro de confirmación descartado durante la composición) y `docs/MANUAL_QA.md`. Tests verdes en macOS; pruebas manuales de IME, portapapeles y fuentes pendientes.)*
+
+**Cerrado (2026-10-18):** tests verdes y verificación manual en macOS, incluidas las pruebas de `docs/MANUAL_QA.md`. Windows y Linux: cubiertos por la CI de cada PR; las pruebas manuales en esos sistemas siguen pendientes.
+
+- [x] Comandos de edición por bloque: Enter/Backspace/Tab/Shift-Tab. *(H3.2: Intro divide (Mayús+Intro y bloques de código: salto de línea), Retroceso al inicio convierte, quita sangría o fusiona, Supr al final une, Tab/Mayús+Tab con límite de un nivel, ↑/↓ entre bloques; operaciones puras en `src/editor.rs`; sin interceptar durante IME.)*
+- [x] Más tipos de bloque: H1/2/3, listas, cita y código. *(H3.1: migración 0003 (reconstrucción de `blocks` conservando `rowid` y FTS), `BlockKind`, sangría guardada, guardado por sincronización completa y selector de tipo; ADR 0003.)*
+- [x] Menú `/`, teclado y selección de bloques. *(H3.3: «/palabra» abre el menú de tipos (alias, sin acentos, ↑ ↓ Intro, Esc); Esc selecciona bloques, Mayús+↑/↓ amplía, Retroceso/Supr borra, Cmd+C/Cmd+X copia o corta.)*
+- [x] Reordenación y borrado de bloques; undo/redo semánticos. *(H3.4: Alt+Mayús+↑/↓ mueve, Cmd+D duplica, menú «…» por bloque; deshacer/rehacer de documento con instantáneas, agrupando el tecleo; ADR 0004 sustituye a 0002.)*
+- [x] Pruebas de cursor/foco, copy-paste y Unicode/IME. *(H3.5: pegar varias líneas crea bloques y reconstruye el formato de copia de Silex; integridad Unicode en todas las posiciones; Intro de confirmación del IME descartado durante la composición; pruebas manuales en `docs/MANUAL_QA.md`.)*
 
 ## Hito 4 — importación y exportación
 - [ ] Markdown → bloques con pruebas golden.
