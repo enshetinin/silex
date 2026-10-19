@@ -89,10 +89,10 @@ impl SilexApp {
     /// Saves pending edits now. On failure the edits stay in memory, the
     /// error is shown in the status bar and a retry is scheduled.
     pub(super) fn save_now(&mut self) -> Result<()> {
-        // Row names edited in a database table are saved with the rest;
-        // their error is reported apart from the document's.
-        let names = self.save_row_names();
-        self.report(names);
+        // Row names and cells edited in a database table are saved with
+        // the rest; their error is reported apart from the document's.
+        let table = self.save_table_edits();
+        self.report(table);
         if !self.save.is_dirty() {
             return Ok(());
         }

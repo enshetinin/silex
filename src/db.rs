@@ -7,12 +7,13 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use directories::ProjectDirs;
-use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
+use rusqlite::{Connection, MAIN_DB, OptionalExtension, params, types::Value};
 use uuid::Uuid;
 
 use crate::model::{
     Block, BlockKind, DatabaseView, MAX_INDENT, NewBlock, Page, PageKind, TrashItem, ViewKind,
 };
+use crate::property::{CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues};
 use crate::search::{self, BlockMatch, Candidate, SearchHit};
 use crate::settings::Settings;
 
@@ -448,6 +449,293 @@ impl Database {
         Ok(views)
     }
 
+    /// Live properties of a database in column order, each with its select
+    /// options. «Nombre» is the row's title, not a property.
+    pub fn database_properties(&self, database_id: &str) -> Result<Vec<Property>> {
+        read_properties(&self.conn, database_id, Deleted::No)
+    }
+
+    /// Deleted properties of a database, most recently deleted first. They
+    /// keep their values and options and can be restored.
+    pub fn deleted_properties(&self, database_id: &str) -> Result<Vec<Property>> {
+        read_properties(&self.conn, database_id, Deleted::Yes)
+    }
+
+    /// Adds a property as the last column of a live database.
+    pub fn add_property(
+        &mut self,
+        database_id: &str,
+        name: &str,
+        kind: PropertyKind,
+    ) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        ensure!(
+            page_kind(&tx, database_id)? == Some(PageKind::Database),
+            "La base de datos no existe o está en la papelera"
+        );
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO db_properties (id, database_id, name, kind, position)
+             VALUES (?1, ?2, ?3, ?4,
+                     (SELECT COALESCE(MAX(position), -1) + 1 FROM db_properties WHERE database_id = ?2))",
+            params![id, database_id, name, kind.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn rename_property(&self, id: &str, name: &str) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE db_properties SET name = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, name],
+        )?;
+        ensure!(affected == 1, "La propiedad no existe o está borrada");
+        Ok(())
+    }
+
+    /// Moves a live property one column left (`Up`) or right (`Down`).
+    /// Returns `false` at the edge. Live properties are renumbered 0..n.
+    pub fn move_property(&mut self, id: &str, shift: Shift) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let database: String = tx
+            .query_row(
+                "SELECT database_id FROM db_properties WHERE id = ?1 AND deleted_at IS NULL",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La propiedad no existe o está borrada")?;
+        let mut columns: Vec<String> = tx
+            .prepare(
+                "SELECT id FROM db_properties WHERE database_id = ?1 AND deleted_at IS NULL
+                 ORDER BY position, id",
+            )?
+            .query_map([&database], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let index = columns
+            .iter()
+            .position(|c| c == id)
+            .context("La propiedad no aparece en su base de datos")?;
+        let target = match shift {
+            Shift::Up => index.checked_sub(1),
+            Shift::Down => Some(index + 1).filter(|&i| i < columns.len()),
+        };
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        columns.swap(index, target);
+        for (position, column) in columns.iter().enumerate() {
+            tx.execute(
+                "UPDATE db_properties SET position = ?2 WHERE id = ?1",
+                params![column, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Deletes a property logically (ADR 0006): it leaves the table, and its
+    /// values and options stay for [`Database::restore_property`].
+    pub fn delete_property(&self, id: &str) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE db_properties SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+        )?;
+        ensure!(affected == 1, "La propiedad no existe o ya está borrada");
+        Ok(())
+    }
+
+    /// Brings a deleted property back, with its values, as the last column.
+    pub fn restore_property(&mut self, id: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let database: String = tx
+            .query_row(
+                "SELECT database_id FROM db_properties WHERE id = ?1 AND deleted_at IS NOT NULL",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La propiedad no está borrada")?;
+        tx.execute(
+            "UPDATE db_properties SET deleted_at = NULL,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                 position = (SELECT COALESCE(MAX(position), -1) + 1 FROM db_properties
+                             WHERE database_id = ?2 AND deleted_at IS NULL)
+             WHERE id = ?1",
+            params![id, database],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds an option at the end of a live select property.
+    pub fn add_select_option(
+        &mut self,
+        property_id: &str,
+        name: &str,
+        color: OptionColor,
+    ) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        let kind: String = tx
+            .query_row(
+                "SELECT kind FROM db_properties WHERE id = ?1 AND deleted_at IS NULL",
+                [property_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La propiedad no existe o está borrada")?;
+        ensure!(
+            PropertyKind::parse(&kind) == Some(PropertyKind::Select),
+            "Solo las propiedades de selección tienen opciones"
+        );
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO db_select_options (id, property_id, name, color, position)
+             VALUES (?1, ?2, ?3, ?4,
+                     (SELECT COALESCE(MAX(position), -1) + 1 FROM db_select_options WHERE property_id = ?2))",
+            params![id, property_id, name, color.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// The values of a database's live rows for its live properties, in one
+    /// query. A value that does not fit its property (another column, a
+    /// missing option) reads as empty: see [`CellValue::from_columns`].
+    pub fn database_values(&self, database_id: &str) -> Result<TableValues> {
+        let mut stmt = self.conn.prepare(
+            "SELECT v.page_id, v.property_id, p.kind, v.text_value, v.number_value,
+                    v.bool_value, v.date_value, o.id
+             FROM db_properties p
+             JOIN db_values v ON v.property_id = p.id
+             JOIN pages r ON r.id = v.page_id
+             LEFT JOIN db_select_options o ON o.id = v.option_id AND o.property_id = p.id
+             WHERE p.database_id = ?1 AND p.deleted_at IS NULL
+               AND r.parent_id = ?1 AND r.deleted_at IS NULL",
+        )?;
+        let mut rows = stmt.query([database_id])?;
+        let mut values = TableValues::new();
+        while let Some(r) = rows.next()? {
+            let kind: String = r.get(2)?;
+            let Some(kind) = PropertyKind::parse(&kind) else {
+                continue;
+            };
+            let text = match r.get::<_, Value>(3)? {
+                Value::Text(text) => Some(text),
+                _ => None,
+            };
+            let number = match r.get::<_, Value>(4)? {
+                Value::Real(n) => Some(n),
+                Value::Integer(n) => Some(n as f64),
+                _ => None,
+            };
+            let flag = match r.get::<_, Value>(5)? {
+                Value::Integer(n) => Some(n),
+                _ => None,
+            };
+            let date = match r.get::<_, Value>(6)? {
+                Value::Text(date) => Some(date),
+                _ => None,
+            };
+            let option: Option<String> = r.get(7)?;
+            if let Some(value) = CellValue::from_columns(kind, text, number, flag, date, option) {
+                values
+                    .entry(r.get(0)?)
+                    .or_default()
+                    .insert(r.get(1)?, value);
+            }
+        }
+        Ok(values)
+    }
+
+    /// Sets the value of one cell; `None` or an empty value (empty text, an
+    /// unticked box) clears it. The row must be a live row of the property's
+    /// database, the property live, and the value of its kind (a finite
+    /// number, an option of that property). Rejected values change nothing.
+    pub fn set_value(
+        &mut self,
+        row_id: &str,
+        property_id: &str,
+        value: Option<&CellValue>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let (database, kind): (String, String) = tx
+            .query_row(
+                "SELECT database_id, kind FROM db_properties WHERE id = ?1 AND deleted_at IS NULL",
+                [property_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .context("La propiedad no existe o está borrada")?;
+        let kind = PropertyKind::parse(&kind)
+            .with_context(|| format!("tipo de propiedad desconocido: {kind}"))?;
+        let is_row: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND parent_id = ?2 AND deleted_at IS NULL)",
+            params![row_id, database],
+            |r| r.get(0),
+        )?;
+        ensure!(
+            is_row,
+            "La fila no existe, está en la papelera o es de otra base de datos"
+        );
+        if let Some(value) = value {
+            ensure!(
+                value.kind() == kind,
+                "Un valor de tipo {} no cabe en una propiedad de tipo {}",
+                value.kind().label(),
+                kind.label()
+            );
+        }
+        match value.filter(|v| !v.is_empty()) {
+            None => {
+                tx.execute(
+                    "DELETE FROM db_values WHERE page_id = ?1 AND property_id = ?2",
+                    params![row_id, property_id],
+                )?;
+            }
+            Some(value) => {
+                let (mut text, mut number, mut flag, mut date, mut option) =
+                    (None, None, None, None, None);
+                match value {
+                    CellValue::Text(t) => text = Some(t.as_str()),
+                    CellValue::Number(n) => {
+                        ensure!(n.is_finite(), "El número no es válido");
+                        number = Some(*n);
+                    }
+                    CellValue::Checkbox(on) => flag = Some(i64::from(*on)),
+                    CellValue::Date(d) => date = Some(d.to_string()),
+                    CellValue::Select(id) => {
+                        let belongs: bool = tx.query_row(
+                            "SELECT EXISTS (SELECT 1 FROM db_select_options WHERE id = ?1 AND property_id = ?2)",
+                            params![id, property_id],
+                            |r| r.get(0),
+                        )?;
+                        ensure!(belongs, "La opción no es de esta propiedad");
+                        option = Some(id.as_str());
+                    }
+                }
+                tx.execute(
+                    "INSERT INTO db_values
+                         (page_id, property_id, text_value, number_value, bool_value, date_value, option_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT (page_id, property_id) DO UPDATE SET
+                         text_value = excluded.text_value,
+                         number_value = excluded.number_value,
+                         bool_value = excluded.bool_value,
+                         date_value = excluded.date_value,
+                         option_id = excluded.option_id,
+                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                    params![row_id, property_id, text, number, flag, date, option],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Creates a page with its blocks in one transaction (import): either the
     /// whole page exists afterwards or nothing was created.
     pub fn create_page_with_blocks(
@@ -845,6 +1133,66 @@ impl Database {
         }
         Ok(hits)
     }
+}
+
+/// Which properties [`read_properties`] lists.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Deleted {
+    No,
+    Yes,
+}
+
+/// Properties of a database with their select options: the live ones in
+/// column order, or the deleted ones newest first. A property of an unknown
+/// kind (a newer Silex) is skipped, never an error that hides the table.
+fn read_properties(
+    conn: &Connection,
+    database_id: &str,
+    deleted: Deleted,
+) -> Result<Vec<Property>> {
+    let sql = match deleted {
+        Deleted::No => {
+            "SELECT id, name, kind FROM db_properties
+             WHERE database_id = ?1 AND deleted_at IS NULL ORDER BY position, id"
+        }
+        Deleted::Yes => {
+            "SELECT id, name, kind FROM db_properties
+             WHERE database_id = ?1 AND deleted_at IS NOT NULL ORDER BY deleted_at DESC, id"
+        }
+    };
+    let mut options: HashMap<String, Vec<SelectOption>> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT o.property_id, o.id, o.name, o.color FROM db_select_options o
+         JOIN db_properties p ON p.id = o.property_id
+         WHERE p.database_id = ?1 ORDER BY o.position, o.id",
+    )?;
+    let mut rows = stmt.query([database_id])?;
+    while let Some(r) = rows.next()? {
+        let color: String = r.get(3)?;
+        options.entry(r.get(0)?).or_default().push(SelectOption {
+            id: r.get(1)?,
+            name: r.get(2)?,
+            // The CHECK allows only known colors; never hide an option over one.
+            color: OptionColor::parse(&color).unwrap_or(OptionColor::Gray),
+        });
+    }
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query([database_id])?;
+    let mut properties = Vec::new();
+    while let Some(r) = rows.next()? {
+        let kind: String = r.get(2)?;
+        let Some(kind) = PropertyKind::parse(&kind) else {
+            continue;
+        };
+        let id: String = r.get(0)?;
+        properties.push(Property {
+            options: options.remove(&id).unwrap_or_default(),
+            id,
+            name: r.get(1)?,
+            kind,
+        });
+    }
+    Ok(properties)
 }
 
 /// Kind of a live page; `None` if it is missing or in the trash.

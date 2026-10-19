@@ -125,7 +125,6 @@ fn marker_slot(ui: &mut egui::Ui, line: f32, sense: egui::Sense) -> (egui::Rect,
 /// To-do checkbox: a rounded box, filled with the accent and ticked when
 /// done, centered on the first line of text.
 fn todo_checkbox(ui: &mut egui::Ui, line: f32, checked: &mut bool) -> egui::Response {
-    let p = theme::current(ui.ctx());
     let (rect, mut response) = marker_slot(ui, line, egui::Sense::click());
     if response.clicked() {
         *checked = !*checked;
@@ -134,7 +133,20 @@ fn todo_checkbox(ui: &mut egui::Ui, line: f32, checked: &mut bool) -> egui::Resp
     let on = *checked;
     let enabled = ui.is_enabled();
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, on, ""));
-    let b = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
+    paint_check_box(ui, rect.center(), on, &response);
+    response
+}
+
+/// The to-do box (also a checkbox cell of a database table): 16 px around
+/// `center`, filled and ticked when `on`, with a focus ring.
+pub(super) fn paint_check_box(
+    ui: &egui::Ui,
+    center: egui::Pos2,
+    on: bool,
+    response: &egui::Response,
+) {
+    let p = theme::current(ui.ctx());
+    let b = egui::Rect::from_center_size(center, egui::vec2(16.0, 16.0));
     let radius = egui::CornerRadius::same(theme::radius::SM);
     let painter = ui.painter();
     if on {
@@ -165,7 +177,6 @@ fn todo_checkbox(ui: &mut egui::Ui, line: f32, checked: &mut bool) -> egui::Resp
             egui::StrokeKind::Outside,
         );
     }
-    response
 }
 
 /// Id of a block handle's menu (stable, so the handle can stay visible
@@ -1008,6 +1019,35 @@ impl SilexApp {
         self.notice_bar(ui);
         self.export_bar(ui);
 
+        // A database shows its table instead of blocks (ADR 0006). The
+        // table scrolls in its own area, so the title stays and both
+        // scroll bars are in sight; it gets room for its columns.
+        if self.database.as_ref().is_some_and(|d| d.id == page_id) {
+            self.caret = None;
+            self.hovered_block = None;
+            let width = ui.available_width().min(1200.0 + GUTTER);
+            let side = ((ui.available_width() - width) / 2.0).max(0.0);
+            let mut edit = None;
+            ui.horizontal_top(|ui| {
+                ui.add_space(side);
+                ui.vertical(|ui| {
+                    ui.set_width(width);
+                    ui.add_space(theme::space::XL);
+                    edit = self.page_title(ui, &page_id);
+                    ui.add_space(theme::space::LG);
+                    // Lined up with the title text.
+                    ui.horizontal_top(|ui| {
+                        gutter_space(ui);
+                        ui.vertical(|ui| self.database_table(ui));
+                    });
+                });
+            });
+            if let Some(kind) = edit {
+                self.changed(kind);
+            }
+            return;
+        }
+
         let mut edit: Option<EditKind> = None;
         let mut block_action: Option<(BlockAction, String)> = None;
         let mut hovered = None;
@@ -1024,38 +1064,8 @@ impl SilexApp {
                     ui.vertical(|ui| {
                         ui.set_width(width);
                         ui.add_space(theme::space::XL);
-                        ui.horizontal(|ui| {
-                            gutter_space(ui);
-                            let title = ui.add(
-                                TextEdit::singleline(&mut self.title)
-                                    .id(field_id(self.doc_generation, "title", &page_id))
-                                    .font(egui::TextStyle::Name(theme::text::TITLE.into()))
-                                    .frame(egui::Frame::NONE)
-                                    .hint_text(
-                                        egui::RichText::new("Sin título").color(p.text_faint),
-                                    )
-                                    .desired_width(f32::INFINITY),
-                            );
-                            if std::mem::take(&mut self.focus_title) {
-                                title.request_focus();
-                            }
-                            if title.changed() {
-                                edit = Some(EditKind::Text("title".into()));
-                            }
-                        });
+                        edit = self.page_title(ui, &page_id);
                         ui.add_space(theme::space::LG);
-
-                        // A database shows its table instead of blocks (ADR 0006).
-                        if self.database.as_ref().is_some_and(|d| d.id == page_id) {
-                            self.caret = None;
-                            // Lined up with the title text, like blocks.
-                            ui.horizontal_top(|ui| {
-                                gutter_space(ui);
-                                ui.vertical(|ui| self.database_table(ui));
-                            });
-                            ui.add_space(theme::space::XXL);
-                            return;
-                        }
 
                         let numbers = list_numbers(&self.blocks);
                         let scroll_to = self.pending_focus.as_ref().map(|(id, _)| id.clone());
@@ -1159,12 +1169,35 @@ impl SilexApp {
         }
     }
 
+    /// The page title, in line with the text of the blocks. Returns the
+    /// edit when it changed.
+    fn page_title(&mut self, ui: &mut egui::Ui, page_id: &str) -> Option<EditKind> {
+        let p = theme::current(ui.ctx());
+        ui.horizontal(|ui| {
+            gutter_space(ui);
+            let title = ui.add(
+                TextEdit::singleline(&mut self.title)
+                    .id(field_id(self.doc_generation, "title", page_id))
+                    .font(egui::TextStyle::Name(theme::text::TITLE.into()))
+                    .frame(egui::Frame::NONE)
+                    .hint_text(egui::RichText::new("Sin título").color(p.text_faint))
+                    .desired_width(f32::INFINITY),
+            );
+            if std::mem::take(&mut self.focus_title) {
+                title.request_focus();
+            }
+            title.changed().then(|| EditKind::Text("title".into()))
+        })
+        .inner
+    }
+
     /// Breadcrumbs on the left; save state, undo/redo, favorite and the
     /// page menu on the right.
     fn top_bar(&mut self, ui: &mut egui::Ui, page_id: &str) {
         let p = theme::current(ui.ctx());
         let mut action: Option<RowAction> = None;
         let mut extra: Option<&'static str> = None;
+        let mut restore_property: Option<String> = None;
         let ancestors: Vec<(String, String)> = ancestors(&self.pages, page_id)
             .into_iter()
             .rev()
@@ -1202,6 +1235,10 @@ impl SilexApp {
                 egui::Popup::menu(&more).show(|ui| {
                     if let Some(chosen) = self.page_menu(ui, page_id) {
                         action = Some(chosen);
+                        ui.close();
+                    }
+                    if let Some(property) = self.deleted_properties_menu(ui) {
+                        restore_property = Some(property);
                         ui.close();
                     }
                     ui.separator();
@@ -1263,6 +1300,10 @@ impl SilexApp {
         let line = ui.available_rect_before_wrap();
         ui.painter()
             .hline(line.x_range(), line.top(), egui::Stroke::new(1.0, p.border));
+        if let Some(property) = restore_property {
+            let result = self.restore_property(&property);
+            self.report(result);
+        }
         match extra {
             Some("export") => {
                 let result = self.export_current_page();

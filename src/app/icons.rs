@@ -66,6 +66,13 @@ pub const KEYBOARD: &str = "\u{e2d8}";
 pub const TABLE: &str = "\u{e476}";
 /// "Aa": the name column of a database (text-aa).
 pub const TEXT_AA: &str = "\u{e6ee}";
+/// Property types (H6.2): text, number, date and select.
+pub const TEXT_ALIGN_LEFT: &str = "\u{e484}";
+pub const HASH: &str = "\u{e2a2}";
+pub const CALENDAR: &str = "\u{e10a}"; // calendar-blank
+pub const CARET_CIRCLE_DOWN: &str = "\u{e11e}";
+pub const ARROW_LEFT: &str = "\u{e058}";
+pub const ARROW_RIGHT: &str = "\u{e06c}";
 
 /// Every icon above, for tests.
 #[cfg(test)]
@@ -114,4 +121,10 @@ pub const ALL: &[(&str, &str)] = &[
     ("KEYBOARD", KEYBOARD),
     ("TABLE", TABLE),
     ("TEXT_AA", TEXT_AA),
+    ("TEXT_ALIGN_LEFT", TEXT_ALIGN_LEFT),
+    ("HASH", HASH),
+    ("CALENDAR", CALENDAR),
+    ("CARET_CIRCLE_DOWN", CARET_CIRCLE_DOWN),
+    ("ARROW_LEFT", ARROW_LEFT),
+    ("ARROW_RIGHT", ARROW_RIGHT),
 ];

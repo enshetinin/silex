@@ -503,14 +503,41 @@ fn startup_error() -> anyhow::Result<()> {
 
 // ---- Databases (H6.1) ----
 
-/// The demo app with a database «Lecturas» (three rows) open.
+/// The demo app with a database «Lecturas» open: three rows with an
+/// author, a page count, a «Leído» box, a date and a state (H6.2).
 fn database_app() -> anyhow::Result<(SilexApp, String, Vec<String>)> {
+    use silex_desktop::property::{CellValue, Date, OptionColor, PropertyKind};
     let mut app = demo_app()?;
-    let base = app.db.create_database("Lecturas", None)?;
+    let db = &mut app.db;
+    let base = db.create_database("Lecturas", None)?;
     let rows = ["Rayuela", "Pedro Páramo", "Ficciones"]
         .into_iter()
-        .map(|title| app.db.create_row(&base, title))
+        .map(|title| db.create_row(&base, title))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let autor = db.add_property(&base, "Autor", PropertyKind::Text)?;
+    let paginas = db.add_property(&base, "Páginas", PropertyKind::Number)?;
+    let leido = db.add_property(&base, "Leído", PropertyKind::Checkbox)?;
+    let estado = db.add_property(&base, "Estado", PropertyKind::Select)?;
+    let fecha = db.add_property(&base, "Terminado", PropertyKind::Date)?;
+    let terminado = db.add_select_option(&estado, "Terminado", OptionColor::Green)?;
+    let leyendo = db.add_select_option(&estado, "Leyendo", OptionColor::Blue)?;
+    let text = |t: &str| CellValue::Text(t.into());
+    let cells = [
+        (0, &autor, text("Julio Cortázar")),
+        (1, &autor, text("Juan Rulfo")),
+        (2, &autor, text("Jorge Luis Borges")),
+        (0, &paginas, CellValue::Number(736.0)),
+        (1, &paginas, CellValue::Number(124.0)),
+        (0, &leido, CellValue::Checkbox(true)),
+        (0, &estado, CellValue::Select(terminado)),
+        (2, &estado, CellValue::Select(leyendo)),
+    ];
+    for (row, property, value) in cells {
+        db.set_value(&rows[row], property, Some(&value))?;
+    }
+    if let Some(date) = Date::parse("2026-09-14") {
+        db.set_value(&rows[0], &fecha, Some(&CellValue::Date(date)))?;
+    }
     app.reload_pages()?;
     app.open_page(base.clone())?;
     Ok((app, base, rows))
@@ -528,6 +555,75 @@ fn database_rows_open_as_pages_and_every_control_has_a_name() -> anyhow::Result<
     // Its breadcrumb leads back to the database.
     click_button(&mut harness, "Lecturas");
     assert_eq!(harness.state().selected.as_deref(), Some(base.as_str()));
+    Ok(())
+}
+
+/// A menu item: a button whose label is `text` after its icon glyph.
+fn menu_item<'h>(
+    harness: &'h Harness<'_, SilexApp>,
+    text: &'h str,
+) -> Option<egui_kittest::Node<'h>> {
+    let is_icon = |c: char| ('\u{E000}'..='\u{F8FF}').contains(&c);
+    harness.query_all_by_label_contains(text).find(|node| {
+        let node = node.accesskit_node();
+        node.role() == egui::accesskit::Role::Button
+            && node
+                .label()
+                .is_some_and(|l| l.trim_matches(|c: char| c.is_whitespace() || is_icon(c)) == text)
+    })
+}
+
+#[test]
+fn table_cells_and_property_menus_have_names() -> anyhow::Result<()> {
+    let (app, _, _) = database_app()?;
+    let mut harness = a11y_harness(app);
+    // Each cell says its property, row and value.
+    for label in [
+        "Autor, Rayuela: Julio Cortázar",
+        "Páginas, Pedro Páramo: 124",
+        "Páginas, Ficciones: vacío",
+        "Estado, Rayuela: Terminado",
+        "Terminado, Rayuela: 2026-09-14",
+        "Leído, Rayuela",
+    ] {
+        assert!(harness.query_by_label(label).is_some(), "{label}");
+    }
+    // A checkbox cell is a checkbox, ticked or not.
+    let leido = harness.get_by_label("Leído, Pedro Páramo");
+    assert_eq!(
+        leido.accesskit_node().role(),
+        egui::accesskit::Role::CheckBox
+    );
+    leido.click();
+    harness.run();
+    assert!(
+        harness
+            .get_by_label("Leído, Pedro Páramo")
+            .accesskit_node()
+            .toggled()
+            .is_some_and(|t| t == egui::accesskit::Toggled::True)
+    );
+
+    click_button(&mut harness, "Estado, Selección");
+    assert_accessible(&harness, "property menu");
+    assert!(menu_item(&harness, "Mover a la izquierda").is_some());
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+
+    click_button(&mut harness, "Estado, Ficciones: Leyendo");
+    assert_accessible(&harness, "select menu");
+    assert!(harness.query_by_label("Terminado").is_some());
+    assert!(menu_item(&harness, "Quitar la opción").is_some());
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+
+    click_button(&mut harness, "Añadir una propiedad");
+    assert_accessible(&harness, "add property menu");
+    menu_item(&harness, "Fecha").expect("type «Fecha»").click();
+    harness.run();
+    let state = harness.state();
+    let added = state.database.as_ref().and_then(|d| d.properties.last());
+    assert_eq!(added.map(|p| p.name.as_str()), Some("Fecha"));
     Ok(())
 }
 
@@ -550,17 +646,43 @@ fn the_pages_plus_menu_creates_a_database() -> anyhow::Result<()> {
 
 #[test]
 fn database_table() -> anyhow::Result<()> {
+    database_snapshot("database_table_light", eframe::egui::Theme::Light, |_| {})
+}
+
+#[test]
+fn database_table_dark() -> anyhow::Result<()> {
+    database_snapshot("database_table_dark", eframe::egui::Theme::Dark, |_| {})
+}
+
+/// A select cell's menu: search field, the options as tags, «Quitar».
+#[test]
+fn database_select_menu() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_select_menu_light",
+        eframe::egui::Theme::Light,
+        |harness| click_button(harness, "Estado, Rayuela: Terminado"),
+    )
+}
+
+/// Like [`snapshot_with`], with the database «Lecturas» open.
+fn database_snapshot(
+    name: &str,
+    theme: eframe::egui::Theme,
+    interact: impl FnOnce(&mut Harness<'_, SilexApp>),
+) -> anyhow::Result<()> {
     if !enabled() {
         return Ok(());
     }
     let (app, _, _) = database_app()?;
     let mut harness = Harness::builder()
         .with_size([1100.0, 760.0])
-        .with_theme(eframe::egui::Theme::Light)
+        .with_theme(theme)
         .with_os(eframe::egui::os::OperatingSystem::Mac)
         .with_context_setup(theme::install)
         .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
     harness.run();
-    harness.snapshot("database_table_light");
+    interact(&mut harness);
+    harness.run();
+    harness.snapshot(name);
     Ok(())
 }

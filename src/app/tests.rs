@@ -5,6 +5,7 @@ use eframe::egui::{self};
 use silex_desktop::{
     db::Database,
     model::{Block, BlockKind},
+    property::{CellValue, Date, OptionColor, PropertyKind, SelectOption},
 };
 
 fn block(id: &str) -> Block {
@@ -1555,7 +1556,7 @@ fn a_new_database_opens_with_an_empty_table() -> anyhow::Result<()> {
         "Nombre",
         "0 filas",
         "Todavía no hay filas.",
-        " Nueva fila",
+        "Nueva fila",
     ] {
         assert!(painted.iter().any(|t| t == text), "{text:?} in {painted:?}");
     }
@@ -1696,16 +1697,48 @@ fn exporting_a_database_writes_its_table() -> anyhow::Result<()> {
 }
 
 /// Manual: `cargo test --release --bin silex-desktop database_scale -- --ignored --nocapture`.
-/// Prints timings (ADR 0006 targets: < 50 ms to open, < 16 ms per frame).
+/// Prints timings (ADR 0006 targets: < 50 ms to open, < 16 ms per frame)
+/// with 10 properties, two of each type, and a value in every cell.
 #[test]
 #[ignore = "scale smoke test; run manually"]
 fn database_scale_smoke() -> anyhow::Result<()> {
     for count in [1_000, 10_000] {
         let mut db = Database::open_in_memory()?;
         let base = db.create_database("Grande", None)?;
-        for i in 0..count {
-            db.create_row(&base, &format!("Fila {i}"))?;
+        let mut properties = Vec::new();
+        for round in 0..2 {
+            for kind in PropertyKind::ALL {
+                let id = db.add_property(&base, &format!("{} {round}", kind.label()), kind)?;
+                let option = match kind {
+                    PropertyKind::Select => {
+                        Some(db.add_select_option(&id, "Hecho", OptionColor::Green)?)
+                    }
+                    _ => None,
+                };
+                properties.push((id, kind, option));
+            }
         }
+        let date = Date::parse("2026-10-19").map(CellValue::Date);
+        for i in 0..count {
+            let row = db.create_row(&base, &format!("Fila {i}"))?;
+            for (property, kind, option) in &properties {
+                let value = match kind {
+                    PropertyKind::Text => Some(CellValue::Text(format!("Texto {i}"))),
+                    PropertyKind::Number => Some(CellValue::Number(i as f64)),
+                    PropertyKind::Checkbox => Some(CellValue::Checkbox(i % 2 == 0)),
+                    PropertyKind::Date => date.clone(),
+                    PropertyKind::Select => option.clone().map(CellValue::Select),
+                };
+                db.set_value(&row, property, value.as_ref())?;
+            }
+        }
+        let t = std::time::Instant::now();
+        let values = db.database_values(&base)?;
+        println!(
+            "{count} filas: leer {} celdas {:?}",
+            values.values().map(|cells| cells.len()).sum::<usize>(),
+            t.elapsed()
+        );
         let mut app = SilexApp::new(db)?;
         let t = std::time::Instant::now();
         app.open_page(base.clone())?;
@@ -1718,5 +1751,232 @@ fn database_scale_smoke() -> anyhow::Result<()> {
         }
         println!("{count} filas: un frame de la tabla {:?}", t.elapsed() / 10);
     }
+    Ok(())
+}
+
+// ---- Typed properties (H6.2, ADR 0006) ----
+
+/// A database with one row, «Rayuela», and the given properties.
+fn table_app(
+    properties: &[(PropertyKind, &str)],
+) -> anyhow::Result<(SilexApp, egui::Context, String, Vec<String>)> {
+    let (mut app, ctx, base) = database_app()?;
+    let row = app.db.create_row(&base, "Rayuela")?;
+    app.reload_pages()?;
+    let ids = properties
+        .iter()
+        .map(|(kind, name)| app.add_property(*kind, name))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    app_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, row, ids))
+}
+
+/// The value of a cell as stored in SQLite.
+fn stored(app: &SilexApp, row: &str, property: &str) -> anyhow::Result<Option<CellValue>> {
+    let base = app
+        .database
+        .as_ref()
+        .map(|d| d.id.clone())
+        .unwrap_or_default();
+    Ok(app
+        .db
+        .database_values(&base)?
+        .get(row)
+        .and_then(|cells| cells.get(property))
+        .cloned())
+}
+
+/// Puts the keyboard on a cell and "clicks" it with Enter, as a keyboard
+/// user would. Two more frames let a text field or menu take the focus.
+fn press_cell(app: &mut SilexApp, ctx: &egui::Context, focus: egui::Id) {
+    use egui::{Key, Modifiers as M};
+    ctx.memory_mut(|m| m.request_focus(focus));
+    app_frame(app, ctx, vec![]);
+    app_frame(app, ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(app, ctx, vec![]);
+    app_frame(app, ctx, vec![]);
+}
+
+#[test]
+fn numbers_and_dates_are_typed_in_their_cells() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, row, ids) =
+        table_app(&[(PropertyKind::Number, "Páginas"), (PropertyKind::Date, "")])?;
+    let (paginas, fecha) = (&ids[0], &ids[1]);
+    let names: Vec<String> = app
+        .database
+        .as_ref()
+        .map(|d| d.properties.iter().map(|p| p.name.clone()).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        names,
+        ["Páginas", "Fecha"],
+        "an empty name takes the type's"
+    );
+
+    press_cell(&mut app, &ctx, cell_id(&row, paginas));
+    assert!(ctx.memory(|m| m.has_focus(cell_edit_id(&row, paginas))));
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("736,5".into())]);
+    assert_eq!(stored(&app, &row, paginas)?, None, "not before leaving");
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(stored(&app, &row, paginas)?, Some(CellValue::Number(736.5)));
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        ctx.memory(|m| m.has_focus(cell_id(&row, paginas))),
+        "the keyboard stays on the cell"
+    );
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "736,5"), "{painted:?}");
+
+    // A date that does not exist is refused and explained.
+    press_cell(&mut app, &ctx, cell_id(&row, fecha));
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("30/02/2026".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(stored(&app, &row, fecha)?, None);
+    let notice = app.notice.take().unwrap_or_default();
+    assert!(notice.contains("no es una fecha válida"), "{notice}");
+    assert!(app.database.as_ref().is_some_and(|d| d.editing.is_none()));
+
+    // D/M/AAAA is read as a date and stored as AAAA-MM-DD.
+    press_cell(&mut app, &ctx, cell_id(&row, fecha));
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("19/10/2026".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let date = Date::parse("2026-10-19").map(CellValue::Date);
+    assert_eq!(stored(&app, &row, fecha)?, date);
+
+    // Escape drops what was typed.
+    press_cell(&mut app, &ctx, cell_id(&row, paginas));
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("9".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(stored(&app, &row, paginas)?, Some(CellValue::Number(736.5)));
+    assert!(app.notice.is_none(), "{:?}", app.notice);
+    Ok(())
+}
+
+#[test]
+fn a_cell_being_typed_in_is_saved_when_leaving_the_database() -> anyhow::Result<()> {
+    let (mut app, ctx, row, ids) = table_app(&[(PropertyKind::Text, "Autor")])?;
+    press_cell(&mut app, &ctx, cell_id(&row, &ids[0]));
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("Cortázar".into())]);
+    // Straight to another page, with the cell still focused.
+    let base = app.selected.clone().unwrap_or_default();
+    let other = app.db.create_page("Notas", None)?;
+    app.reload_pages()?;
+    app.open_page(other)?;
+    assert!(app.database.is_none());
+    app.open_page(base)?;
+    assert_eq!(
+        stored(&app, &row, &ids[0])?,
+        Some(CellValue::Text("Cortázar".into()))
+    );
+    Ok(())
+}
+
+#[test]
+fn checkboxes_tick_and_selects_create_and_reuse_options() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, row, ids) = table_app(&[
+        (PropertyKind::Checkbox, "Leído"),
+        (PropertyKind::Select, "Estado"),
+    ])?;
+    let (leido, estado) = (&ids[0], &ids[1]);
+
+    press_cell(&mut app, &ctx, cell_id(&row, leido));
+    assert_eq!(stored(&app, &row, leido)?, Some(CellValue::Checkbox(true)));
+    press_cell(&mut app, &ctx, cell_id(&row, leido));
+    assert_eq!(stored(&app, &row, leido)?, None, "unticked is empty");
+
+    // Enter in the select menu creates the option typed, with a color.
+    press_cell(&mut app, &ctx, cell_id(&row, estado));
+    assert!(egui::Popup::is_id_open(&ctx, select_menu_id(&row, estado)));
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("Leído".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let options = |app: &SilexApp| -> Vec<SelectOption> {
+        app.database
+            .as_ref()
+            .and_then(|d| d.properties.iter().find(|p| &p.id == estado))
+            .map(|p| p.options.clone())
+            .unwrap_or_default()
+    };
+    let created = options(&app);
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].name, "Leído");
+    assert_eq!(created[0].color, OptionColor::Blue);
+    assert_eq!(
+        stored(&app, &row, estado)?,
+        Some(CellValue::Select(created[0].id.clone()))
+    );
+    assert!(!egui::Popup::is_id_open(&ctx, select_menu_id(&row, estado)));
+
+    // Typing part of a name and Enter picks the existing option.
+    let other = app
+        .db
+        .create_row(&app.selected.clone().unwrap_or_default(), "Ficciones")?;
+    app.reload_pages()?;
+    app_frame(&mut app, &ctx, vec![]);
+    press_cell(&mut app, &ctx, cell_id(&other, estado));
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("lei".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(options(&app).len(), 1, "no duplicate");
+    assert_eq!(
+        stored(&app, &other, estado)?,
+        Some(CellValue::Select(created[0].id.clone()))
+    );
+    Ok(())
+}
+
+#[test]
+fn properties_are_renamed_in_their_menu_deleted_and_restored() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, row, ids) = table_app(&[
+        (PropertyKind::Text, "Autor"),
+        (PropertyKind::Number, "Páginas"),
+    ])?;
+    let autor = &ids[0];
+    app.set_cell(&row, autor, Some(CellValue::Text("Cortázar".into())))?;
+
+    // The header opens the menu with the name ready to change.
+    press_cell(&mut app, &ctx, property_header_id(autor));
+    app_frame(&mut app, &ctx, vec![key(Key::A, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("Autora".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let base = app.selected.clone().unwrap_or_default();
+    let names = |app: &SilexApp| -> anyhow::Result<Vec<String>> {
+        Ok(app
+            .db
+            .database_properties(&base)?
+            .into_iter()
+            .map(|p| p.name)
+            .collect())
+    };
+    assert_eq!(names(&app)?, ["Autora", "Páginas"]);
+
+    // Escape leaves the name as it was.
+    press_cell(&mut app, &ctx, property_header_id(autor));
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("XX".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(names(&app)?, ["Autora", "Páginas"]);
+
+    app.delete_property(autor)?;
+    assert_eq!(names(&app)?, ["Páginas"]);
+    let notice = app.notice.take().unwrap_or_default();
+    assert!(notice.contains("Propiedades borradas"), "{notice}");
+    assert!(app.database.as_ref().is_some_and(|d| d.deleted.len() == 1));
+
+    app.restore_property(autor)?;
+    assert_eq!(
+        names(&app)?,
+        ["Páginas", "Autora"],
+        "back as the last column"
+    );
+    assert_eq!(
+        stored(&app, &row, autor)?,
+        Some(CellValue::Text("Cortázar".into())),
+        "with its values"
+    );
     Ok(())
 }

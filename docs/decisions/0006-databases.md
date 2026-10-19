@@ -105,7 +105,8 @@ CREATE TABLE db_views (
    - Crear una base, la tabla solo con la columna Nombre, añadir filas, abrirlas y mandarlas a la papelera.
    - Filas ocultas en el árbol; ruta en la búsqueda; exportación con la tabla de nombres.
 2. **H6.2 — Propiedades tipadas.** Añadir, renombrar, ordenar, ocultar y borrar con restauración; editar las celdas de los cinco tipos; opciones de selección con color; propiedades en la página de la fila.
-3. **H6.3 — Ordenar y filtrar.** Por vista y guardado; varias vistas por base, en pestañas.
+   - *Actualización (2026-10-19):* se entrega en dos partes. **H6.2a**: propiedades en la tabla (añadir, renombrar, mover, borrar y restaurar), las celdas de los cinco tipos y las opciones creadas desde la celda. **H6.2b**: propiedades en la página de la fila, recorrer las celdas con flechas, Tab e Intro, y renombrar, cambiar de color o borrar opciones. «Ocultar» pasa a H6.3, porque vive en la configuración de la vista que H6.3 diseña junto con el orden y los filtros.
+3. **H6.3 — Ordenar y filtrar.** Por vista y guardado; varias vistas por base, en pestañas; ocultar propiedades por vista.
 4. **H6.4 — Deshacer en la tabla** (operaciones inversas) y exportación con todas las propiedades.
 5. **H6.5 — Vista Kanban** agrupada por una propiedad de selección; arrastrar tarjetas entre columnas cambia el valor.
 
