@@ -69,3 +69,86 @@ Descárgalos de los *artifacts* del workflow «Paquetes» (GitHub → Actions �
 - Linux (`.deb`): `sudo apt install ./silex-desktop_<versión>_amd64.deb`. Silex aparece en el menú de aplicaciones con su icono, y la ventana abierta usa ese icono en el dock o la barra (X11 y Wayland).
 - Linux (AppImage): `chmod +x silex-desktop_<versión>_x86_64.AppImage` y ábrelo. Debe arrancar en Ubuntu 22.04 o posterior.
 
+## 9. Bases de datos (H6.1)
+- «+» de «Páginas» → «Nueva base de datos»: se abre con el título listo para escribir, la pestaña «Tabla», la columna «Nombre» y «Todavía no hay filas.». En la barra lateral aparece con el icono de tabla.
+- «Nueva fila» (o Cmd+Mayús+N, o la paleta): aparece una fila con el cursor en su nombre. Escribe y pulsa Intro; añade varias seguidas.
+- Edita un nombre y, sin pulsar Intro, cambia de página o cierra la app: al volver, el nombre está guardado.
+- «Abrir» en una fila: se abre como página, con la ruta «Base › Fila» arriba; escribe bloques y vuelve a la base desde la ruta. Las filas nunca aparecen en la barra lateral.
+- Clic derecho en una fila: «Renombrar» pone el cursor en su celda; «Enviar a la papelera» la quita de la tabla, y restaurarla desde la papelera la devuelve a su base.
+- Envía la base entera a la papelera y restáurala: vuelve con todas sus filas.
+- Cmd+K: busca el nombre de una fila; el resultado muestra la ruta de la base.
+- «…» → «Exportar a Markdown» en la base: un `.md` con una tabla de nombres. «Exportar todo» incluye además una carpeta con las filas.
+- Con la semilla (`cargo run --example seed -- /tmp/silex-qa.sqlite3`), «Base de prueba» tiene 1000 filas: se abre al momento y el desplazamiento de la tabla es fluido.
+
+## 10. Propiedades (H6.2a)
+Con una base de datos abierta (o «Base de prueba» de la semilla):
+- «Propiedad» (junto a «N filas») → escribe «Páginas» → «Número»: aparece la columna con el icono #. Repite con «Leído» (Casilla), «Terminado» (Fecha), «Estado» (Selección) y un texto sin nombre (se llama «Texto»).
+- Número: clic en la celda, escribe `736,5` e Intro → se ve «736,5» alineado a la derecha. Escribe `doce` → aviso «no es un número» y la celda conserva su valor. Escribe algo y pulsa Escape → no cambia.
+- Fecha: `19/10/2026` → se ve «2026-10-19». `30/02/2026` → aviso y sin cambios.
+- Casilla: clic la marca y otro clic la desmarca. Con el teclado: Tab hasta la celda y Espacio.
+- Selección: clic → escribe «Leído» e Intro → se crea la opción con color y queda puesta. En otra fila, escribe «lei» e Intro → elige «Leído», sin duplicarla. «Quitar la opción» vacía la celda.
+- Cabecera de una propiedad: renombrar (Intro o clic fuera guardan; Escape no), «Mover a la izquierda/derecha» y «Borrar la propiedad» (aviso). «…» → «Propiedades borradas» → «Restaurar» la devuelve al final con sus valores.
+- Escribe en una celda y, sin salir, cambia de página o cierra la app: al volver, el valor está guardado.
+- Ventana por defecto (1100×760) con 5 o más propiedades: la tabla se desplaza en horizontal (barra fina bajo las filas, Mayús+rueda o trackpad) y la cabecera la sigue; el título no se mueve. Con 1000 filas el desplazamiento vertical es fluido y la cabecera queda fija.
+- Cierra y vuelve a abrir la app: propiedades, orden y valores siguen ahí.
+- Modo oscuro: las etiquetas de las opciones se leen bien.
+- Con VoiceOver/NVDA/Orca: cada celda se anuncia como «Propiedad, fila: valor» y las casillas como casilla marcada o no.
+
+## 11. Filas como páginas, teclado y opciones (H6.2b)
+- «Abrir» en una fila: bajo el título aparecen sus propiedades con icono y nombre a la izquierda. Los números van a la izquierda, y lo vacío dice «Vacío». Edita un texto, un número, una fecha, la casilla y la selección (crea una opción nueva): vuelve a la base por la ruta y la tabla muestra los cambios.
+- En la página de la fila, escribe en una propiedad y, sin salir del campo, cambia de página: al volver está guardado.
+- En la tabla, clic en una celda y Escape (queda con el foco): ↑/↓/←/→ la mueven. En el nombre, ←/→ mueven el cursor y → al final del nombre pasa a la primera propiedad. Intro edita la celda enfocada; Intro otra vez guarda y deja el foco en ella.
+- Con la semilla (1000 filas): mantén ↓ pulsada desde la primera fila; la tabla baja con el foco y la cabecera sigue fija. → hasta la última columna desplaza la tabla en horizontal.
+- Cabecera de una propiedad de selección: aparece «Opciones». Cambia el nombre de una (Intro o clic fuera), su color (clic en la muestra → elige otro) y bórrala: pide confirmación y dice en cuántas filas se vacía; «Cancelar» no borra. Las celdas que la tenían quedan vacías; las demás, igual.
+- El menú de opciones no cambia de tamaño ni se mueve mientras está abierto.
+- Con VoiceOver/NVDA/Orca: en la página de la fila cada valor se anuncia como «Propiedad, fila: valor»; las muestras de color se anuncian con el nombre del color.
+
+## 12. Ordenar, filtrar y columnas (H6.3a)
+Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
+- «Filtrar» → «+ Añadir un filtro» → «Número» → «mayor que» → escribe `1000`: el recuento dice «N de 1000 filas» y la tabla se actualiza al teclear. «Filtrar (1)» queda acentuado. Escribe `abc`: aparece «Valor no válido» y se ven todas las filas.
+- Añade un segundo filtro «Estado» «es» «Hecho»: solo filas que cumplen los dos. Quita uno con «×».
+- Filtra hasta que no quede ninguna: «Ninguna fila coincide con los filtros.»
+- «Ordenar» → «Notas» → «Descendente»; añade un segundo orden. Las filas vacías van al final.
+- Con un filtro activo, edita una celda para que la fila deje de cumplirlo: la fila no desaparece mientras está en pantalla. Cambia de página y vuelve: ya no está.
+- «Nueva fila» con un filtro activo: la fila nueva aparece al final, aunque esté vacía.
+- «Columnas»: desmarca «Notas» → desaparece de la tabla (y las flechas la saltan); sigue en la página de una fila. Cabecera de una propiedad → «Ocultar en esta vista» hace lo mismo. «Mostrar todas» las devuelve.
+- Cierra y vuelve a abrir la app: filtros, orden y columnas ocultas siguen ahí.
+- Los menús no cambian de tamaño ni se mueven mientras están abiertos; elegir una columna u operador no los cierra.
+
+## 13. Varias vistas (H6.3b)
+- «+» junto a «Tabla»: aparece «Tabla 2» y se abre. Ponle un filtro; vuelve a «Tabla»: no tiene ese filtro. Vuelve a «Tabla 2»: sigue ahí.
+- Clic en la pestaña abierta: menú con su nombre listo para cambiar (Intro o clic fuera lo guardan; Escape no). «Duplicar la vista» crea una copia con sus reglas. «Mover a la izquierda/derecha» cambia el orden de las pestañas.
+- Clic derecho en una pestaña que no está abierta: abre su menú sin cambiar de vista.
+- «Borrar la vista»: pide confirmación y dice que las filas no se pierden; «Cancelar» no borra. Con una sola vista, «Borrar la vista» está desactivado.
+- Abre otra página y vuelve a la base: se abre en la última vista usada. Cierra la app y vuelve: las vistas, sus nombres y reglas siguen (se abre en la primera).
+
+## 14. Deshacer en la tabla y exportación (H6.4)
+- Cambia un número, marca una casilla y elige una opción; pulsa Cmd+Z tres veces (sin estar escribiendo): vuelven los valores anteriores, uno a uno. Cmd+Mayús+Z los rehace. Los botones de la barra superior hacen lo mismo.
+- Renombra una fila en su celda (Intro) y Cmd+Z: vuelve el nombre anterior.
+- «Nueva fila» y Cmd+Z: la fila va a la papelera (aparece en ella). Cmd+Mayús+Z la devuelve.
+- Clic derecho en una fila → «Enviar a la papelera» y Cmd+Z: vuelve con sus valores.
+- Borra una propiedad y Cmd+Z: vuelve con sus valores.
+- Escribiendo en una celda, Cmd+Z deshace solo el texto del campo.
+- Cambia de página y vuelve: el historial de la tabla empieza vacío.
+- «…» → «Exportar a Markdown»: el `.md` tiene una columna por propiedad, con las casillas como `[x]`/`[ ]` y las selecciones por su nombre. Ábrelo en un visor de Markdown: la tabla se ve bien aunque haya `|` en algún texto.
+
+## 15. Tablero (H6.5)
+- En una base con una propiedad de selección (p. ej. «Estado» con dos opciones): «+» junto a las pestañas → «Tablero». Aparece «Tablero» con una columna «Sin Estado» y una por opción, cada una con su número.
+- Arrastra una tarjeta a otra columna con el ratón: la columna se ilumina al pasar por encima y, al soltar, la tarjeta queda allí. Cambia a «Tabla»: la celda tiene el valor nuevo. Vuelve y pulsa Cmd+Z: la tarjeta vuelve a su columna.
+- Suelta una tarjeta fuera de cualquier columna: no cambia nada.
+- Clic en una tarjeta: se abre la fila como página. Tab hasta una tarjeta e Intro: lo mismo.
+- Clic derecho en una tarjeta → «Mover a» → otra columna: se mueve. El resto del menú es el de siempre (renombrar, papelera…).
+- «Nueva» al pie de una columna: aparece una tarjeta en ella con el nombre listo para escribir; Intro lo guarda. Cmd+Z la manda a la papelera.
+- «Nuevo grupo» al final (desplazando a la derecha si hace falta): escribe un nombre e Intro → nueva columna.
+- Clic en la cabecera de una columna (no en «Sin …»): menú con su nombre (se guarda al cerrar; Escape lo descarta), sus colores, «Mover a la izquierda/derecha» (cambia el orden de las columnas y de las opciones en la tabla) y «Borrar el grupo», que pide confirmación y dice cuántas tarjetas pasan a «Sin …»; «Cancelar» no borra.
+- «Agrupar» con dos propiedades de selección: cambiar de una a otra reagrupa las tarjetas. «Propiedades»: desmarca una y desaparece de las tarjetas. Un filtro deja en cada columna solo las tarjetas que lo cumplen.
+- En una base sin propiedad de selección, un tablero explica por qué está vacío y «Añadir la propiedad «Estado»» la crea.
+- Cierra y vuelve a abrir la app: el tablero sigue agrupado por la misma propiedad.
+
+## 16. Calendario en las fechas (H6.6)
+- Clic en una celda de fecha vacía: se abre el calendario en el mes actual, con hoy rodeado. «‹» y «›» cambian de mes; clic en un día lo guarda y cierra.
+- En una celda con fecha, el calendario se abre en su mes con su día marcado. «Quitar la fecha» la vacía; Cmd+Z la devuelve.
+- Escribe `19/10/2026` en el campo: el calendario salta a ese mes; Intro la guarda como `2026-10-19`. Escribe `30/02/2026`: aparece la explicación y no se guarda; Escape cierra sin guardar.
+- Con el teclado: flechas hasta la celda, Intro abre el calendario, Tab recorre los días, Intro elige.
+- Lo mismo en la página de una fila (propiedades bajo el título).
+- Pasada la medianoche (hora local), comprueba si «Hoy» marca el día correcto (usa UTC: en España, hasta la 1 o las 2 puede marcar el anterior).

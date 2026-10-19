@@ -12,8 +12,8 @@ use directories::{ProjectDirs, UserDirs};
 
 use crate::{
     db::Database,
-    markdown::page_to_markdown,
-    model::{Block, build_tree},
+    markdown::{database_to_markdown, page_to_markdown},
+    model::{Block, PageKind, build_tree},
     safe_path,
 };
 
@@ -35,6 +35,11 @@ pub fn export_root() -> Result<PathBuf> {
 /// Writes one page as Markdown into `dir` (created if needed), named after
 /// its title and never overwriting an existing file. Returns the file path.
 pub fn export_page(dir: &Path, title: &str, blocks: &[Block]) -> Result<PathBuf> {
+    export_markdown(dir, title, &page_to_markdown(title, blocks))
+}
+
+/// Writes ready Markdown (a page or a database) like [`export_page`].
+pub fn export_markdown(dir: &Path, title: &str, markdown: &str) -> Result<PathBuf> {
     fs::create_dir_all(dir)
         .with_context(|| format!("No se puede crear la carpeta {}", dir.display()))?;
     let mut taken: HashSet<String> = fs::read_dir(dir)
@@ -44,7 +49,7 @@ pub fn export_page(dir: &Path, title: &str, blocks: &[Block]) -> Result<PathBuf>
         .collect();
     let name = safe_path::unique_file_name(title, "md", &mut taken);
     let path = safe_path::join_inside(dir, &[&name])?;
-    write_atomic(&path, page_to_markdown(title, blocks).as_bytes())?;
+    write_atomic(&path, markdown.as_bytes())?;
     Ok(path)
 }
 
@@ -118,8 +123,20 @@ pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
             };
             let stem = safe_path::unique_stem(&row.page.title, "md", taken);
             let file = safe_path::join_inside(folder, &[&format!("{stem}.md")])?;
-            let blocks = db.list_blocks(&row.page.id)?;
-            write_atomic(&file, page_to_markdown(&row.page.title, &blocks).as_bytes())?;
+            let markdown = match row.page.kind {
+                // Its rows follow as subpages, in the folder below.
+                PageKind::Database => {
+                    let id = &row.page.id;
+                    database_to_markdown(
+                        &row.page.title,
+                        &db.database_properties(id)?,
+                        &db.database_rows(id)?,
+                        &db.database_values(id)?,
+                    )
+                }
+                PageKind::Page => page_to_markdown(&row.page.title, &db.list_blocks(&row.page.id)?),
+            };
+            write_atomic(&file, markdown.as_bytes())?;
             if row.has_children {
                 let sub = safe_path::join_inside(folder, &[&stem])?;
                 fs::create_dir(&sub)

@@ -75,10 +75,10 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(2.0);
 }
 
-/// Section title with a "+" at the right; returns whether "+" was clicked.
-fn section_header_with_add(ui: &mut egui::Ui, title: &str, tooltip: &str) -> bool {
+/// Section title with a "+" at the right; returns the "+" button.
+fn section_header_with_add(ui: &mut egui::Ui, title: &str, tooltip: &str) -> egui::Response {
     ui.add_space(theme::space::XS);
-    let clicked = ui
+    let button = ui
         .horizontal(|ui| {
             ui.add_space(theme::space::SM);
             ui.label(egui::RichText::new(title).small().weak());
@@ -88,13 +88,12 @@ fn section_header_with_add(ui: &mut egui::Ui, title: &str, tooltip: &str) -> boo
                 )
                 .on_hover_text(tooltip)
                 .accessible_name(tooltip)
-                .clicked()
             })
             .inner
         })
         .inner;
     ui.add_space(2.0);
-    clicked
+    button
 }
 
 /// What a sidebar row shows.
@@ -376,6 +375,12 @@ impl SilexApp {
         let id = row.page.id.clone();
         let mut actions = Vec::new();
         let renaming = self.rename.as_ref().is_some_and(|r| r.id == id);
+        let is_database = row.page.kind == PageKind::Database;
+        let icon = if is_database && icon == icons::PAGE {
+            icons::TABLE
+        } else {
+            icon
+        };
         let parts = RowParts {
             depth: row.depth,
             caret: (arrows && row.has_children).then(|| self.expanded.contains(&id)),
@@ -392,8 +397,13 @@ impl SilexApp {
         {
             actions.push(RowAction::Toggle(id.clone()));
         }
+        let plus_tip = if is_database {
+            "Nueva fila"
+        } else {
+            "Nueva subpágina"
+        };
         if let Some(plus) = out.plus.take()
-            && plus.on_hover_text("Nueva subpágina").clicked()
+            && plus.on_hover_text(plus_tip).clicked()
         {
             actions.push(RowAction::Subpage(id.clone()));
         }
@@ -473,7 +483,12 @@ impl SilexApp {
         if ui.button("Renombrar").clicked() {
             action = Some(RowAction::StartRename(owned()));
         }
-        if ui.button("Nueva subpágina").clicked() {
+        let child = if page.kind == PageKind::Database {
+            "Nueva fila"
+        } else {
+            "Nueva subpágina"
+        };
+        if ui.button(child).clicked() {
             action = Some(RowAction::Subpage(owned()));
         }
         let favorite_label = if is_favorite {
@@ -510,7 +525,9 @@ impl SilexApp {
                         action = Some(RowAction::Move(owned(), None));
                     }
                     for target in &self.pages {
+                        // A database is no destination (ADR 0006).
                         let valid = target.id != id
+                            && target.kind != PageKind::Database
                             && !blocked.contains(&target.id)
                             && page.parent_id.as_deref() != Some(target.id.as_str());
                         if valid && ui.button(display_title(&target.title)).clicked() {
@@ -651,10 +668,22 @@ impl SilexApp {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 1.0;
                         self.favorite_rows(ui);
-                        if section_header_with_add(ui, "Páginas", "Nueva página") {
-                            let result = self.create_root_page("Sin título");
+                        let add = section_header_with_add(ui, "Páginas", "Añadir");
+                        egui::Popup::menu(&add).show(|ui| {
+                            let page = ui.button((icons::icon(icons::PAGE), " Nueva página"));
+                            let base =
+                                ui.button((icons::icon(icons::TABLE), " Nueva base de datos"));
+                            let result = if page.clicked() {
+                                ui.close();
+                                self.create_root_page("Sin título")
+                            } else if base.clicked() {
+                                ui.close();
+                                self.create_database(None)
+                            } else {
+                                Ok(())
+                            };
                             self.report(result);
-                        }
+                        });
                         let rows = self.tree.clone();
                         self.page_rows(ui, &rows, true, "tree", icons::PAGE);
                     });

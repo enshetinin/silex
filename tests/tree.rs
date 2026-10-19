@@ -7,6 +7,7 @@ fn page(id: &str, parent: Option<&str>) -> Page {
         id: id.into(),
         parent_id: parent.map(Into::into),
         title: id.to_uppercase(),
+        kind: Default::default(),
     }
 }
 

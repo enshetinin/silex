@@ -7,12 +7,16 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use directories::ProjectDirs;
-use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
+use rusqlite::{Connection, MAIN_DB, OptionalExtension, params, types::Value};
 use uuid::Uuid;
 
-use crate::model::{Block, BlockKind, MAX_INDENT, NewBlock, Page, TrashItem};
+use crate::model::{
+    Block, BlockKind, DatabaseView, MAX_INDENT, NewBlock, Page, PageKind, TrashItem, ViewKind,
+};
+use crate::property::{CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues};
 use crate::search::{self, BlockMatch, Candidate, SearchHit};
 use crate::settings::Settings;
+use crate::view::ViewConfig;
 
 pub mod backup;
 
@@ -22,6 +26,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("db/migrations/0002_favorites.sql")),
     (3, include_str!("db/migrations/0003_block_kinds.sql")),
     (4, include_str!("db/migrations/0004_settings.sql")),
+    (5, include_str!("db/migrations/0005_databases.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -234,31 +239,19 @@ impl Database {
     /// are hidden and come back if the page is restored.
     pub fn list_favorites(&self) -> Result<Vec<Page>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_id, title FROM pages
+            "SELECT id, parent_id, title, kind FROM pages
              WHERE favorite_at IS NOT NULL AND deleted_at IS NULL
              ORDER BY favorite_at, id",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Page {
-                id: r.get(0)?,
-                parent_id: r.get(1)?,
-                title: r.get(2)?,
-            })
-        })?;
+        let rows = stmt.query_map([], |r| read_page(r, 0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn list_pages(&self) -> Result<Vec<Page>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_id, title FROM pages WHERE deleted_at IS NULL ORDER BY sort_order, created_at, id",
+            "SELECT id, parent_id, title, kind FROM pages WHERE deleted_at IS NULL ORDER BY sort_order, created_at, id",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Page {
-                id: r.get(0)?,
-                parent_id: r.get(1)?,
-                title: r.get(2)?,
-            })
-        })?;
+        let rows = stmt.query_map([], |r| read_page(r, 0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -286,6 +279,10 @@ impl Database {
         ensure!(live(id)?, "La página no existe o está en la papelera");
         if let Some(parent) = new_parent {
             ensure!(live(parent)?, "El destino no existe o está en la papelera");
+            ensure!(
+                page_kind(&tx, parent)? != Some(PageKind::Database),
+                "Una página no se puede mover dentro de una base de datos"
+            );
             // Walk up from the destination; UNION deduplicates, so it ends even on bad data.
             let creates_cycle: bool = tx.query_row(
                 "WITH RECURSIVE chain(id) AS (
@@ -369,6 +366,565 @@ impl Database {
         Ok(())
     }
 
+    /// Creates a database (ADR 0006): a page of kind `database` with its first
+    /// view, «Tabla», in one transaction. It goes last among its siblings.
+    /// A database cannot be created inside another one (it would be a row).
+    pub fn create_database(&mut self, title: &str, parent_id: Option<&str>) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        if let Some(parent) = parent_id {
+            match page_kind(&tx, parent)? {
+                None => bail!("El destino no existe o está en la papelera"),
+                Some(PageKind::Database) => {
+                    bail!("Una base de datos no se puede crear dentro de otra")
+                }
+                Some(PageKind::Page) => {}
+            }
+        }
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO pages (id, title, parent_id, kind, sort_order)
+             VALUES (?1, ?2, ?3, ?4, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages WHERE parent_id IS ?3))",
+            params![id, title, parent_id, PageKind::Database.as_str()],
+        )?;
+        tx.execute(
+            "INSERT INTO db_views (id, database_id, name, kind, position) VALUES (?1, ?2, ?3, ?4, 0)",
+            params![
+                Uuid::new_v4().to_string(),
+                id,
+                "Tabla",
+                ViewKind::Table.as_str()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Adds a row (a child page) at the end of a live database.
+    pub fn create_row(&mut self, database_id: &str, title: &str) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        ensure!(
+            page_kind(&tx, database_id)? == Some(PageKind::Database),
+            "La base de datos no existe o está en la papelera"
+        );
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO pages (id, title, parent_id, sort_order)
+             VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages WHERE parent_id = ?3))",
+            params![id, title, database_id],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Live rows of a database, in their manual order (as subpages are).
+    pub fn database_rows(&self, database_id: &str) -> Result<Vec<Page>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_id, title, kind FROM pages
+             WHERE parent_id = ?1 AND deleted_at IS NULL
+             ORDER BY sort_order, created_at, id",
+        )?;
+        let rows = stmt.query_map([database_id], |r| read_page(r, 0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Views of a database, in their order. An unknown view kind is skipped
+    /// (a newer Silex may add kinds), never an error that hides the data.
+    pub fn database_views(&self, database_id: &str) -> Result<Vec<DatabaseView>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, kind, config FROM db_views WHERE database_id = ?1 ORDER BY position, id",
+        )?;
+        let rows = stmt.query_map([database_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut views = Vec::new();
+        for row in rows {
+            let (id, name, kind, config) = row?;
+            if let Some(kind) = ViewKind::parse(&kind) {
+                // A damaged config reads as the default (ADR 0006).
+                let config = ViewConfig::from_json(&config);
+                views.push(DatabaseView {
+                    id,
+                    name,
+                    kind,
+                    config,
+                });
+            }
+        }
+        Ok(views)
+    }
+
+    /// Adds a view of `kind` (a table or a board, H6.5) at the end of a
+    /// live database's tabs, with `config` (empty for a new view, another
+    /// view's for a copy).
+    pub fn add_view(
+        &mut self,
+        database_id: &str,
+        name: &str,
+        kind: ViewKind,
+        config: &ViewConfig,
+    ) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        ensure!(
+            page_kind(&tx, database_id)? == Some(PageKind::Database),
+            "La base de datos no existe o está en la papelera"
+        );
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO db_views (id, database_id, name, kind, position, config)
+             VALUES (?1, ?2, ?3, ?4,
+                     (SELECT COALESCE(MAX(position), -1) + 1 FROM db_views WHERE database_id = ?2), ?5)",
+            params![id, database_id, name, kind.as_str(), config.to_json()],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn rename_view(&self, id: &str, name: &str) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE db_views SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        ensure!(affected == 1, "La vista no existe");
+        Ok(())
+    }
+
+    /// Moves a view one tab left (`Up`) or right (`Down`). Returns `false`
+    /// at the edge. The database's views are renumbered 0..n.
+    pub fn move_view(&mut self, id: &str, shift: Shift) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let database: String = tx
+            .query_row(
+                "SELECT database_id FROM db_views WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La vista no existe")?;
+        let mut tabs: Vec<String> = tx
+            .prepare("SELECT id FROM db_views WHERE database_id = ?1 ORDER BY position, id")?
+            .query_map([&database], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let index = tabs
+            .iter()
+            .position(|t| t == id)
+            .context("La vista no aparece en su base de datos")?;
+        let target = match shift {
+            Shift::Up => index.checked_sub(1),
+            Shift::Down => Some(index + 1).filter(|&i| i < tabs.len()),
+        };
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        tabs.swap(index, target);
+        for (position, tab) in tabs.iter().enumerate() {
+            tx.execute(
+                "UPDATE db_views SET position = ?2 WHERE id = ?1",
+                params![tab, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Deletes a view: only its settings (sort, filters, columns), never
+    /// rows or values. A database always keeps at least one view.
+    pub fn delete_view(&mut self, id: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let database: String = tx
+            .query_row(
+                "SELECT database_id FROM db_views WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La vista no existe")?;
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM db_views WHERE database_id = ?1",
+            [&database],
+            |r| r.get(0),
+        )?;
+        ensure!(
+            count > 1,
+            "Es la última vista de la base de datos: no se puede borrar"
+        );
+        tx.execute("DELETE FROM db_views WHERE id = ?1", [id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Stores a view's sort, filters and hidden properties.
+    pub fn set_view_config(&self, view_id: &str, config: &ViewConfig) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE db_views SET config = ?2 WHERE id = ?1",
+            params![view_id, config.to_json()],
+        )?;
+        ensure!(affected == 1, "La vista no existe");
+        Ok(())
+    }
+
+    /// Live properties of a database in column order, each with its select
+    /// options. «Nombre» is the row's title, not a property.
+    pub fn database_properties(&self, database_id: &str) -> Result<Vec<Property>> {
+        read_properties(&self.conn, database_id, Deleted::No)
+    }
+
+    /// Deleted properties of a database, most recently deleted first. They
+    /// keep their values and options and can be restored.
+    pub fn deleted_properties(&self, database_id: &str) -> Result<Vec<Property>> {
+        read_properties(&self.conn, database_id, Deleted::Yes)
+    }
+
+    /// Adds a property as the last column of a live database.
+    pub fn add_property(
+        &mut self,
+        database_id: &str,
+        name: &str,
+        kind: PropertyKind,
+    ) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        ensure!(
+            page_kind(&tx, database_id)? == Some(PageKind::Database),
+            "La base de datos no existe o está en la papelera"
+        );
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO db_properties (id, database_id, name, kind, position)
+             VALUES (?1, ?2, ?3, ?4,
+                     (SELECT COALESCE(MAX(position), -1) + 1 FROM db_properties WHERE database_id = ?2))",
+            params![id, database_id, name, kind.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn rename_property(&self, id: &str, name: &str) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE db_properties SET name = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, name],
+        )?;
+        ensure!(affected == 1, "La propiedad no existe o está borrada");
+        Ok(())
+    }
+
+    /// Moves a live property one column left (`Up`) or right (`Down`).
+    /// Returns `false` at the edge. Live properties are renumbered 0..n.
+    pub fn move_property(&mut self, id: &str, shift: Shift) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let database: String = tx
+            .query_row(
+                "SELECT database_id FROM db_properties WHERE id = ?1 AND deleted_at IS NULL",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La propiedad no existe o está borrada")?;
+        let mut columns: Vec<String> = tx
+            .prepare(
+                "SELECT id FROM db_properties WHERE database_id = ?1 AND deleted_at IS NULL
+                 ORDER BY position, id",
+            )?
+            .query_map([&database], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let index = columns
+            .iter()
+            .position(|c| c == id)
+            .context("La propiedad no aparece en su base de datos")?;
+        let target = match shift {
+            Shift::Up => index.checked_sub(1),
+            Shift::Down => Some(index + 1).filter(|&i| i < columns.len()),
+        };
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        columns.swap(index, target);
+        for (position, column) in columns.iter().enumerate() {
+            tx.execute(
+                "UPDATE db_properties SET position = ?2 WHERE id = ?1",
+                params![column, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Deletes a property logically (ADR 0006): it leaves the table, and its
+    /// values and options stay for [`Database::restore_property`].
+    pub fn delete_property(&self, id: &str) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE db_properties SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+        )?;
+        ensure!(affected == 1, "La propiedad no existe o ya está borrada");
+        Ok(())
+    }
+
+    /// Brings a deleted property back, with its values, as the last column.
+    pub fn restore_property(&mut self, id: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let database: String = tx
+            .query_row(
+                "SELECT database_id FROM db_properties WHERE id = ?1 AND deleted_at IS NOT NULL",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La propiedad no está borrada")?;
+        tx.execute(
+            "UPDATE db_properties SET deleted_at = NULL,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                 position = (SELECT COALESCE(MAX(position), -1) + 1 FROM db_properties
+                             WHERE database_id = ?2 AND deleted_at IS NULL)
+             WHERE id = ?1",
+            params![id, database],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds an option at the end of a live select property.
+    pub fn add_select_option(
+        &mut self,
+        property_id: &str,
+        name: &str,
+        color: OptionColor,
+    ) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        let kind: String = tx
+            .query_row(
+                "SELECT kind FROM db_properties WHERE id = ?1 AND deleted_at IS NULL",
+                [property_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La propiedad no existe o está borrada")?;
+        ensure!(
+            PropertyKind::parse(&kind) == Some(PropertyKind::Select),
+            "Solo las propiedades de selección tienen opciones"
+        );
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO db_select_options (id, property_id, name, color, position)
+             VALUES (?1, ?2, ?3, ?4,
+                     (SELECT COALESCE(MAX(position), -1) + 1 FROM db_select_options WHERE property_id = ?2))",
+            params![id, property_id, name, color.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// The values of a database's live rows for its live properties, in one
+    /// query. A value that does not fit its property (another column, a
+    /// missing option) reads as empty: see [`CellValue::from_columns`].
+    pub fn database_values(&self, database_id: &str) -> Result<TableValues> {
+        let mut stmt = self.conn.prepare(
+            "SELECT v.page_id, v.property_id, p.kind, v.text_value, v.number_value,
+                    v.bool_value, v.date_value, o.id
+             FROM db_properties p
+             JOIN db_values v ON v.property_id = p.id
+             JOIN pages r ON r.id = v.page_id
+             LEFT JOIN db_select_options o ON o.id = v.option_id AND o.property_id = p.id
+             WHERE p.database_id = ?1 AND p.deleted_at IS NULL
+               AND r.parent_id = ?1 AND r.deleted_at IS NULL",
+        )?;
+        let mut rows = stmt.query([database_id])?;
+        let mut values = TableValues::new();
+        while let Some(r) = rows.next()? {
+            if let Some(value) = read_cell(r, 2)? {
+                values
+                    .entry(r.get(0)?)
+                    .or_default()
+                    .insert(r.get(1)?, value);
+            }
+        }
+        Ok(values)
+    }
+
+    /// The values of one live row (property id → value) for the live
+    /// properties of its database: what its page shows above its blocks.
+    /// Empty for a page that is not a row.
+    pub fn row_values(&self, row_id: &str) -> Result<HashMap<String, CellValue>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT v.property_id, p.kind, v.text_value, v.number_value,
+                    v.bool_value, v.date_value, o.id
+             FROM pages r
+             JOIN db_properties p ON p.database_id = r.parent_id AND p.deleted_at IS NULL
+             JOIN db_values v ON v.page_id = r.id AND v.property_id = p.id
+             LEFT JOIN db_select_options o ON o.id = v.option_id AND o.property_id = p.id
+             WHERE r.id = ?1 AND r.deleted_at IS NULL",
+        )?;
+        let mut rows = stmt.query([row_id])?;
+        let mut values = HashMap::new();
+        while let Some(r) = rows.next()? {
+            if let Some(value) = read_cell(r, 1)? {
+                values.insert(r.get(0)?, value);
+            }
+        }
+        Ok(values)
+    }
+
+    pub fn rename_select_option(&self, id: &str, name: &str) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE db_select_options SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        ensure!(affected == 1, "La opción no existe");
+        Ok(())
+    }
+
+    pub fn set_option_color(&self, id: &str, color: OptionColor) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE db_select_options SET color = ?2 WHERE id = ?1",
+            params![id, color.as_str()],
+        )?;
+        ensure!(affected == 1, "La opción no existe");
+        Ok(())
+    }
+
+    /// Moves an option one place earlier (`Up`) or later (`Down`) among its
+    /// property's options: the order of select menus and of a board's
+    /// columns (H6.5). Returns `false` at the edge. The options are
+    /// renumbered 0..n.
+    pub fn move_select_option(&mut self, id: &str, shift: Shift) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let property: String = tx
+            .query_row(
+                "SELECT property_id FROM db_select_options WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La opción no existe")?;
+        let mut options: Vec<String> = tx
+            .prepare(
+                "SELECT id FROM db_select_options WHERE property_id = ?1 ORDER BY position, id",
+            )?
+            .query_map([&property], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let index = options
+            .iter()
+            .position(|o| o == id)
+            .context("La opción no aparece en su propiedad")?;
+        let target = match shift {
+            Shift::Up => index.checked_sub(1),
+            Shift::Down => Some(index + 1).filter(|&i| i < options.len()),
+        };
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        options.swap(index, target);
+        for (position, option) in options.iter().enumerate() {
+            tx.execute(
+                "UPDATE db_select_options SET position = ?2 WHERE id = ?1",
+                params![option, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Deletes a select option. The cells that had it become empty
+    /// (`ON DELETE SET NULL`, ADR 0006); the UI asks first.
+    pub fn delete_select_option(&self, id: &str) -> Result<()> {
+        let affected = self
+            .conn
+            .execute("DELETE FROM db_select_options WHERE id = ?1", [id])?;
+        ensure!(affected == 1, "La opción no existe");
+        Ok(())
+    }
+
+    /// Sets the value of one cell; `None` or an empty value (empty text, an
+    /// unticked box) clears it. The row must be a live row of the property's
+    /// database, the property live, and the value of its kind (a finite
+    /// number, an option of that property). Rejected values change nothing.
+    pub fn set_value(
+        &mut self,
+        row_id: &str,
+        property_id: &str,
+        value: Option<&CellValue>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let (database, kind): (String, String) = tx
+            .query_row(
+                "SELECT database_id, kind FROM db_properties WHERE id = ?1 AND deleted_at IS NULL",
+                [property_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .context("La propiedad no existe o está borrada")?;
+        let kind = PropertyKind::parse(&kind)
+            .with_context(|| format!("tipo de propiedad desconocido: {kind}"))?;
+        let is_row: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND parent_id = ?2 AND deleted_at IS NULL)",
+            params![row_id, database],
+            |r| r.get(0),
+        )?;
+        ensure!(
+            is_row,
+            "La fila no existe, está en la papelera o es de otra base de datos"
+        );
+        if let Some(value) = value {
+            ensure!(
+                value.kind() == kind,
+                "Un valor de tipo {} no cabe en una propiedad de tipo {}",
+                value.kind().label(),
+                kind.label()
+            );
+        }
+        match value.filter(|v| !v.is_empty()) {
+            None => {
+                tx.execute(
+                    "DELETE FROM db_values WHERE page_id = ?1 AND property_id = ?2",
+                    params![row_id, property_id],
+                )?;
+            }
+            Some(value) => {
+                let (mut text, mut number, mut flag, mut date, mut option) =
+                    (None, None, None, None, None);
+                match value {
+                    CellValue::Text(t) => text = Some(t.as_str()),
+                    CellValue::Number(n) => {
+                        ensure!(n.is_finite(), "El número no es válido");
+                        number = Some(*n);
+                    }
+                    CellValue::Checkbox(on) => flag = Some(i64::from(*on)),
+                    CellValue::Date(d) => date = Some(d.to_string()),
+                    CellValue::Select(id) => {
+                        let belongs: bool = tx.query_row(
+                            "SELECT EXISTS (SELECT 1 FROM db_select_options WHERE id = ?1 AND property_id = ?2)",
+                            params![id, property_id],
+                            |r| r.get(0),
+                        )?;
+                        ensure!(belongs, "La opción no es de esta propiedad");
+                        option = Some(id.as_str());
+                    }
+                }
+                tx.execute(
+                    "INSERT INTO db_values
+                         (page_id, property_id, text_value, number_value, bool_value, date_value, option_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT (page_id, property_id) DO UPDATE SET
+                         text_value = excluded.text_value,
+                         number_value = excluded.number_value,
+                         bool_value = excluded.bool_value,
+                         date_value = excluded.date_value,
+                         option_id = excluded.option_id,
+                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                    params![row_id, property_id, text, number, flag, date, option],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Creates a page with its blocks in one transaction (import): either the
     /// whole page exists afterwards or nothing was created.
     pub fn create_page_with_blocks(
@@ -408,15 +964,9 @@ impl Database {
     pub fn get_page(&self, id: &str) -> Result<Option<Page>> {
         self.conn
             .query_row(
-                "SELECT id, parent_id, title FROM pages WHERE id = ?1 AND deleted_at IS NULL",
+                "SELECT id, parent_id, title, kind FROM pages WHERE id = ?1 AND deleted_at IS NULL",
                 [id],
-                |r| {
-                    Ok(Page {
-                        id: r.get(0)?,
-                        parent_id: r.get(1)?,
-                        title: r.get(2)?,
-                    })
-                },
+                |r| read_page(r, 0),
             )
             .optional()
             .map_err(Into::into)
@@ -569,20 +1119,11 @@ impl Database {
     /// branch are not listed separately.
     pub fn list_trash(&self) -> Result<Vec<TrashItem>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_id, title, deleted_at FROM pages
+            "SELECT id, parent_id, title, kind, deleted_at FROM pages
              WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, title",
         )?;
         let trashed: Vec<(Page, String)> = stmt
-            .query_map([], |r| {
-                Ok((
-                    Page {
-                        id: r.get(0)?,
-                        parent_id: r.get(1)?,
-                        title: r.get(2)?,
-                    },
-                    r.get(3)?,
-                ))
-            })?
+            .query_map([], |r| Ok((read_page(r, 0)?, r.get(4)?)))?
             .collect::<rusqlite::Result<_>>()?;
         let stamp_of: HashMap<&str, &str> = trashed
             .iter()
@@ -673,7 +1214,7 @@ impl Database {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT p.id, p.parent_id, p.title FROM pages p
+            "SELECT DISTINCT p.id, p.parent_id, p.title, p.kind FROM pages p
              WHERE p.deleted_at IS NULL AND (
                  p.rowid IN (SELECT rowid FROM page_search WHERE page_search MATCH ?1)
                  OR p.id IN (
@@ -682,13 +1223,7 @@ impl Database {
                  )
              ) ORDER BY p.title",
         )?;
-        let rows = stmt.query_map([phrase], |r| {
-            Ok(Page {
-                id: r.get(0)?,
-                parent_id: r.get(1)?,
-                title: r.get(2)?,
-            })
-        })?;
+        let rows = stmt.query_map([phrase], |r| read_page(r, 0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -709,18 +1244,14 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
 
         let mut titles = tx.prepare(
-            "SELECT p.id, p.parent_id, p.title, bm25(page_search), highlight(page_search, 0, ?2, ?3)
+            "SELECT p.id, p.parent_id, p.title, p.kind, bm25(page_search), highlight(page_search, 0, ?2, ?3)
              FROM page_search JOIN pages p ON p.rowid = page_search.rowid
              WHERE page_search MATCH ?1 AND p.deleted_at IS NULL",
         )?;
         let rows = titles.query_map(params![query, start, end], |r| {
             Ok(Candidate {
-                page: Page {
-                    id: r.get(0)?,
-                    parent_id: r.get(1)?,
-                    title: r.get(2)?,
-                },
-                title: Some((r.get(3)?, r.get(4)?)),
+                page: read_page(r, 0)?,
+                title: Some((r.get(4)?, r.get(5)?)),
                 block: None,
             })
         })?;
@@ -731,19 +1262,15 @@ impl Database {
 
         // Best block first; on a tie, the one higher up in the page.
         let mut blocks = tx.prepare(
-            "SELECT p.id, p.parent_id, p.title, b.id, b.rowid, bm25(block_search) AS score
+            "SELECT p.id, p.parent_id, p.title, p.kind, b.id, b.rowid, bm25(block_search) AS score
              FROM block_search JOIN blocks b ON b.rowid = block_search.rowid
              JOIN pages p ON p.id = b.page_id
              WHERE block_search MATCH ?1 AND p.deleted_at IS NULL
              ORDER BY score, b.position, b.rowid",
         )?;
         let rows = blocks.query_map([&query], |r| {
-            let page = Page {
-                id: r.get(0)?,
-                parent_id: r.get(1)?,
-                title: r.get(2)?,
-            };
-            let block: (String, i64, f64) = (r.get(3)?, r.get(4)?, r.get(5)?);
+            let page = read_page(r, 0)?;
+            let block: (String, i64, f64) = (r.get(4)?, r.get(5)?, r.get(6)?);
             Ok((page, block))
         })?;
         for row in rows {
@@ -795,6 +1322,134 @@ impl Database {
         }
         Ok(hits)
     }
+}
+
+/// Which properties [`read_properties`] lists.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Deleted {
+    No,
+    Yes,
+}
+
+/// Properties of a database with their select options: the live ones in
+/// column order, or the deleted ones newest first. A property of an unknown
+/// kind (a newer Silex) is skipped, never an error that hides the table.
+fn read_properties(
+    conn: &Connection,
+    database_id: &str,
+    deleted: Deleted,
+) -> Result<Vec<Property>> {
+    let sql = match deleted {
+        Deleted::No => {
+            "SELECT id, name, kind FROM db_properties
+             WHERE database_id = ?1 AND deleted_at IS NULL ORDER BY position, id"
+        }
+        Deleted::Yes => {
+            "SELECT id, name, kind FROM db_properties
+             WHERE database_id = ?1 AND deleted_at IS NOT NULL ORDER BY deleted_at DESC, id"
+        }
+    };
+    let mut options: HashMap<String, Vec<SelectOption>> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT o.property_id, o.id, o.name, o.color FROM db_select_options o
+         JOIN db_properties p ON p.id = o.property_id
+         WHERE p.database_id = ?1 ORDER BY o.position, o.id",
+    )?;
+    let mut rows = stmt.query([database_id])?;
+    while let Some(r) = rows.next()? {
+        let color: String = r.get(3)?;
+        options.entry(r.get(0)?).or_default().push(SelectOption {
+            id: r.get(1)?,
+            name: r.get(2)?,
+            // The CHECK allows only known colors; never hide an option over one.
+            color: OptionColor::parse(&color).unwrap_or(OptionColor::Gray),
+        });
+    }
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query([database_id])?;
+    let mut properties = Vec::new();
+    while let Some(r) = rows.next()? {
+        let kind: String = r.get(2)?;
+        let Some(kind) = PropertyKind::parse(&kind) else {
+            continue;
+        };
+        let id: String = r.get(0)?;
+        properties.push(Property {
+            options: options.remove(&id).unwrap_or_default(),
+            id,
+            name: r.get(1)?,
+            kind,
+        });
+    }
+    Ok(properties)
+}
+
+/// A cell from the columns `kind, text_value, number_value, bool_value,
+/// date_value, option id` starting at `at`. `None` if it is empty or does
+/// not fit its property (see [`CellValue::from_columns`]); a property kind
+/// this version does not know reads as empty too.
+fn read_cell(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Option<CellValue>> {
+    let kind: String = r.get(at)?;
+    let Some(kind) = PropertyKind::parse(&kind) else {
+        return Ok(None);
+    };
+    let text = match r.get::<_, Value>(at + 1)? {
+        Value::Text(text) => Some(text),
+        _ => None,
+    };
+    let number = match r.get::<_, Value>(at + 2)? {
+        Value::Real(n) => Some(n),
+        Value::Integer(n) => Some(n as f64),
+        _ => None,
+    };
+    let flag = match r.get::<_, Value>(at + 3)? {
+        Value::Integer(n) => Some(n),
+        _ => None,
+    };
+    let date = match r.get::<_, Value>(at + 4)? {
+        Value::Text(date) => Some(date),
+        _ => None,
+    };
+    let option: Option<String> = r.get(at + 5)?;
+    Ok(CellValue::from_columns(
+        kind, text, number, flag, date, option,
+    ))
+}
+
+/// Kind of a live page; `None` if it is missing or in the trash.
+fn page_kind(conn: &Connection, id: &str) -> Result<Option<PageKind>> {
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT kind FROM pages WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match kind {
+        None => Ok(None),
+        Some(kind) => PageKind::parse(&kind)
+            .map(Some)
+            .with_context(|| format!("tipo de página desconocido: {kind}")),
+    }
+}
+
+/// Maps the page columns `id, parent_id, title, kind` starting at column
+/// `at`. An unknown kind is a conversion error, not a panic.
+fn read_page(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Page> {
+    let kind: String = r.get(at + 3)?;
+    let kind = PageKind::parse(&kind).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            at + 3,
+            rusqlite::types::Type::Text,
+            format!("tipo de página desconocido: {kind}").into(),
+        )
+    })?;
+    Ok(Page {
+        id: r.get(at)?,
+        parent_id: r.get(at + 1)?,
+        title: r.get(at + 2)?,
+        kind,
+    })
 }
 
 /// Maps a `blocks` row (id, page_id, kind, content, checked, position, indent).

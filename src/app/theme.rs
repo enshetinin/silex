@@ -10,6 +10,7 @@ use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Shadow,
     Stroke, TextStyle, Theme, Vec2,
 };
+use silex_desktop::property::OptionColor;
 
 /// Colors for one theme. Names describe the role, not the hue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +105,44 @@ pub const DARK: Palette = Palette {
     sidebar_muted: hex(0xA0A7B1),
     code_bg: hex(0x1A1E24),
 };
+
+/// Background and text of a select option's tag (H6.2), in the order of
+/// [`OptionColor::ALL`]: gray, blue, green, yellow, orange, red, purple, pink.
+const LIGHT_TAGS: [(Color32, Color32); 8] = [
+    (hex(0xECEEF1), hex(0x3F4651)),
+    (hex(0xDCEBFB), hex(0x1A4F85)),
+    (hex(0xDDF1E2), hex(0x1D5B30)),
+    (hex(0xFBF1C7), hex(0x6B4E00)),
+    (hex(0xFDE5D2), hex(0x8A3B0A)),
+    (hex(0xFCE0DE), hex(0x9A1F1A)),
+    (hex(0xECE2F8), hex(0x5A2E8A)),
+    (hex(0xFBE1EE), hex(0x8C2357)),
+];
+
+const DARK_TAGS: [(Color32, Color32); 8] = [
+    (hex(0x2B3038), hex(0xD0D5DC)),
+    (hex(0x17324F), hex(0xA9D2F7)),
+    (hex(0x173A26), hex(0xA6E0B8)),
+    (hex(0x3D3212), hex(0xF0D98A)),
+    (hex(0x43260F), hex(0xF5C095)),
+    (hex(0x4A1D1D), hex(0xF6B0AB)),
+    (hex(0x33244A), hex(0xD3BBF2)),
+    (hex(0x47203A), hex(0xF3B3D3)),
+];
+
+/// Background and text color of a select option's tag in the current theme.
+pub fn option_colors(ctx: &egui::Context, color: OptionColor) -> (Color32, Color32) {
+    let tags = if ctx.theme() == Theme::Dark {
+        &DARK_TAGS
+    } else {
+        &LIGHT_TAGS
+    };
+    let index = OptionColor::ALL
+        .iter()
+        .position(|c| *c == color)
+        .unwrap_or_default();
+    tags[index]
+}
 
 /// Spacing scale (px). Use these instead of ad-hoc numbers.
 pub mod space {
@@ -429,6 +468,20 @@ mod tests {
     #[test]
     fn dark_palette_meets_wcag_aa() {
         check("oscuro", &pairs(&DARK));
+    }
+
+    /// Option tags: their text on their background, and the tag against
+    /// the canvas and a hovered row is not required (the text carries it).
+    #[test]
+    fn option_tags_meet_wcag_aa() {
+        for (theme, tags) in [("claro", &LIGHT_TAGS), ("oscuro", &DARK_TAGS)] {
+            let pairs: Vec<_> = OptionColor::ALL
+                .iter()
+                .zip(tags.iter())
+                .map(|(color, (bg, fg))| (color.as_str(), *fg, *bg, TEXT))
+                .collect();
+            check(theme, &pairs);
+        }
     }
 
     #[test]

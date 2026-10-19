@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 4;
+const LATEST: i64 = 5;
 
 struct TempDir(PathBuf);
 
@@ -461,6 +461,136 @@ mod v4 {
         assert_eq!(db.schema_version()?, LATEST);
         assert_eq!(db.load_settings()?, Settings::default());
         assert_eq!(db.search_pages("mundo")?.len(), 1);
+        Ok(())
+    }
+}
+
+mod v5 {
+    use super::*;
+    use silex_desktop::model::{PageKind, ViewKind};
+
+    const SCHEMA_V3: &str = include_str!("../src/db/migrations/0003_block_kinds.sql");
+    const SCHEMA_V4: &str = include_str!("../src/db/migrations/0004_settings.sql");
+
+    /// A database exactly as Silex v4 left it (v2 content, block kinds, settings).
+    fn write_v4_database(path: &Path) -> anyhow::Result<()> {
+        write_v2_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V3)?;
+        conn.execute_batch(SCHEMA_V4)?;
+        conn.execute_batch(
+            "INSERT INTO settings (key, value) VALUES ('theme', 'dark');
+             PRAGMA user_version = 4;",
+        )?;
+        Ok(())
+    }
+
+    fn table_exists(path: &Path, table: &str) -> anyhow::Result<bool> {
+        let conn = Connection::open(path)?;
+        Ok(conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |r| r.get(0),
+        )?)
+    }
+
+    #[test]
+    fn v4_database_gets_databases_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v4_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        for table in [
+            "db_properties",
+            "db_select_options",
+            "db_values",
+            "db_views",
+        ] {
+            assert!(table_exists(&tmp.db(), table)?, "{table}");
+        }
+        // Existing pages are normal pages, with everything they had.
+        assert!(db.list_pages()?.iter().all(|p| p.kind == PageKind::Page));
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        assert_eq!(db.list_blocks("p2")?[0].content, "Harina de centeno 🌾");
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert_eq!(db.list_favorites()?.len(), 1);
+        assert_eq!(db.list_trash()?.len(), 1);
+        assert_eq!(
+            db.load_settings()?.theme,
+            silex_desktop::settings::ThemeMode::Dark
+        );
+        // A verified v4 copy was made before upgrading.
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1
+        );
+        // The new tables work, with their keys.
+        let base = db.create_database("Lecturas", Some("p1"))?;
+        db.create_row(&base, "Rayuela")?;
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        let broken: Vec<String> = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert!(broken.is_empty(), "{broken:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v5() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(db.get_page("p2")?.map(|p| p.kind), Some(PageKind::Page));
+        let base = db.create_database("Tareas", None)?;
+        assert_eq!(db.database_views(&base)?[0].kind, ViewKind::Table);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v4_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v4_database(&tmp.db())?;
+        // A table already named `db_views` makes the migration fail after
+        // `pages` got its new column: that change must be rolled back too.
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE db_views (x INTEGER);")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 5"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 4);
+        assert!(!has_column(&tmp.db(), "pages", "kind")?, "rolled back");
+        assert!(!table_exists(&tmp.db(), "db_properties")?);
+        assert!(
+            has_column(&tmp.db(), "db_views", "x")?,
+            "old table kept as is"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn v4_backup_restores_into_v5() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v4_database(&old_db)?;
+        let v4_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+
+        let mut db = Database::open(tmp.db())?;
+        let base = db.create_database("Se pierde al restaurar", None)?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v4_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.get_page(&base)?.is_none(), "the copy had no databases");
+        assert_eq!(db.search_pages("mundo")?.len(), 1);
+        let new = db.create_database("Después", None)?;
+        assert_eq!(db.database_views(&new)?.len(), 1);
         Ok(())
     }
 }
