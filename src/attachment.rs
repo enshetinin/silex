@@ -1,7 +1,8 @@
 //! Attachments (ADR 0007), without SQL or egui: the size limit, the type of
-//! a file from its content, image dimensions read from the header (nothing
-//! is decoded), names that are safe to show, and which files are never
-//! opened from Silex (programs and scripts).
+//! a file from its content, image dimensions read from the header, names
+//! that are safe to show, and which files are never opened from Silex
+//! (programs and scripts). Also the previews of images (H7.2), decoded with
+//! memory limits, and pasted images encoded as PNG.
 use std::{fs, io::Read, path::Path};
 
 use anyhow::{Context, Result, bail};
@@ -274,6 +275,76 @@ pub fn format_size(bytes: u64) -> String {
     format!("{text} {}", UNITS[unit])
 }
 
+/// Largest side of a decoded image (pixels): larger ones are refused,
+/// never decoded (a few bytes can claim a gigantic image).
+pub const MAX_IMAGE_SIDE: u32 = 8192;
+/// Most memory the decoder may use.
+const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+/// Largest side of a preview (pixels): enough for a sharp image in the
+/// page column on a high-density screen, and at most ~10 MB of RGBA.
+pub const PREVIEW_SIDE: u32 = 1600;
+
+/// The types shown as images in the page.
+pub fn has_preview(mime: &str) -> bool {
+    matches!(mime, "image/png" | "image/jpeg")
+}
+
+/// An image ready to show: RGBA pixels, row by row.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Preview {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+impl std::fmt::Debug for Preview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Preview({} × {})", self.width, self.height)
+    }
+}
+
+/// Decodes a PNG or JPEG for its preview, scaled down to fit
+/// [`PREVIEW_SIDE`]. Refused before decoding: other types, and images over
+/// [`MAX_IMAGE_SIDE`] or that would need more than 256 MB.
+pub fn decode_preview(mime: &str, data: &[u8]) -> Result<Preview> {
+    let format = match mime {
+        "image/png" => image::ImageFormat::Png,
+        "image/jpeg" => image::ImageFormat::Jpeg,
+        _ => bail!("Solo se muestran imágenes PNG y JPEG"),
+    };
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_IMAGE_SIDE);
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(data), format);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .map_err(|err| anyhow::anyhow!("No se puede mostrar la imagen: {err}"))?;
+    let decoded = if decoded.width().max(decoded.height()) > PREVIEW_SIDE {
+        decoded.thumbnail(PREVIEW_SIDE, PREVIEW_SIDE)
+    } else {
+        decoded
+    };
+    let rgba = decoded.to_rgba8();
+    Ok(Preview {
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
+    })
+}
+
+/// A pasted image (RGBA pixels) as a PNG file.
+pub fn encode_png(width: u32, height: u32, rgba: Vec<u8>) -> Result<Vec<u8>> {
+    let image = image::RgbaImage::from_raw(width, height, rgba)
+        .context("La imagen pegada no tiene el tamaño que dice")?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut png, image::ImageFormat::Png)
+        .context("No se pudo convertir la imagen pegada a PNG")?;
+    Ok(png.into_inner())
+}
+
 /// A broad family of file, for its icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
@@ -463,6 +534,53 @@ mod tests {
         })();
         fs::remove_dir_all(&dir)?;
         result
+    }
+
+    /// A real PNG of `w` × `h`, encoded by the same code as a pasted image.
+    fn real_png(w: u32, h: u32) -> Vec<u8> {
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % 256) as u8, 40, 200, 255])
+            .collect();
+        encode_png(w, h, rgba).expect("encode")
+    }
+
+    #[test]
+    fn pasted_images_become_pngs_and_previews_decode_them() -> anyhow::Result<()> {
+        let png = real_png(30, 20);
+        assert_eq!(sniff(&png), "image/png");
+        assert_eq!(image_size("image/png", &png), Some((30, 20)));
+        let preview = decode_preview("image/png", &png)?;
+        assert_eq!((preview.width, preview.height), (30, 20));
+        assert_eq!(preview.rgba.len(), 30 * 20 * 4);
+        assert_eq!(&preview.rgba[4..8], &[1, 40, 200, 255]);
+        // Wrong sizes and other types are explained, not panics.
+        assert!(encode_png(10, 10, vec![0; 3]).is_err());
+        assert!(decode_preview("image/gif", b"GIF89a").is_err());
+        assert!(decode_preview("image/png", b"\x89PNG\r\n\x1a\nbasura").is_err());
+        assert!(decode_preview("image/jpeg", &[0xFF, 0xD8, 0xFF, 0xE0]).is_err());
+        assert!(has_preview("image/jpeg") && !has_preview("image/gif"));
+        Ok(())
+    }
+
+    #[test]
+    fn large_previews_are_scaled_down_keeping_their_shape() -> anyhow::Result<()> {
+        let preview = decode_preview("image/png", &real_png(3200, 800))?;
+        assert_eq!((preview.width, preview.height), (PREVIEW_SIDE, 400));
+        Ok(())
+    }
+
+    #[test]
+    fn images_too_large_to_decode_are_refused_before_decoding() {
+        // A valid PNG header that claims 100 000 × 100 000 pixels.
+        let mut bomb = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        bomb.extend(100_000u32.to_be_bytes());
+        bomb.extend(100_000u32.to_be_bytes());
+        bomb.extend([8, 6, 0, 0, 0]);
+        let err = decode_preview("image/png", &bomb).expect_err("refused");
+        assert!(
+            format!("{err:#}").contains("No se puede mostrar"),
+            "{err:#}"
+        );
     }
 
     #[test]

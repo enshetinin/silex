@@ -531,6 +531,7 @@ impl SilexApp {
         self.handle_dropped_files(&ctx);
         // The search window has the keyboard while it is open.
         if self.search.is_none() {
+            self.take_pasted_image(&ctx);
             self.take_editor_key(&ctx);
             self.apply_pending_focus(&ctx);
             self.handle_selection_keys(&ctx);

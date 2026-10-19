@@ -217,3 +217,87 @@ fn the_worker_does_the_same_in_its_own_thread() -> anyhow::Result<()> {
     assert_eq!(Database::open(&db_path)?.attachment_data(&id)?, b"hola");
     Ok(())
 }
+
+#[test]
+fn pasted_images_are_stored_as_png_and_previews_decode() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let mut db = Database::open_in_memory()?;
+    let (width, height) = (4, 3);
+    let rgba: Vec<u8> = (0..width * height).flat_map(|_| [255, 0, 0, 255]).collect();
+    let request = Request::AddImage {
+        page: "p".into(),
+        after: None,
+        width,
+        height,
+        rgba,
+    };
+    let Outcome::Added { files, .. } = handle(&mut db, &tmp.folders(), request, &|_| Ok(())) else {
+        anyhow::bail!("not Added");
+    };
+    let stored = files[0].1.as_ref().expect("stored");
+    assert_eq!(stored.name, "Imagen pegada.png");
+    assert_eq!(stored.mime, "image/png");
+    assert_eq!((stored.width, stored.height), (Some(4), Some(3)));
+
+    let Outcome::Preview(id, preview) = handle(
+        &mut db,
+        &tmp.folders(),
+        Request::Preview(stored.id.clone()),
+        &|_| Ok(()),
+    ) else {
+        anyhow::bail!("not Preview");
+    };
+    assert_eq!(id, stored.id);
+    let preview = preview?;
+    assert_eq!((preview.width, preview.height), (4, 3));
+    assert_eq!(&preview.rgba[..4], &[255, 0, 0, 255]);
+
+    // Not an image: explained.
+    let ids = add(&mut db, &tmp, &[("nota.txt", b"hola")])?;
+    let Outcome::Preview(_, refused) = handle(
+        &mut db,
+        &tmp.folders(),
+        Request::Preview(ids[0].clone()),
+        &|_| Ok(()),
+    ) else {
+        anyhow::bail!("not Preview");
+    };
+    assert!(refused.is_err());
+    // A pasted image that does not match its size is not stored.
+    let request = Request::AddImage {
+        page: "p".into(),
+        after: None,
+        width: 100,
+        height: 100,
+        rgba: vec![0; 4],
+    };
+    let Outcome::Added { files, .. } = handle(&mut db, &tmp.folders(), request, &|_| Ok(())) else {
+        anyhow::bail!("not Added");
+    };
+    assert!(files[0].1.is_err());
+    Ok(())
+}
+
+/// Prints how long a large image takes to become a preview (run with
+/// `--release --ignored --nocapture`). It runs on the attach worker.
+#[test]
+#[ignore = "timing smoke test; run manually"]
+fn preview_timing_smoke() -> anyhow::Result<()> {
+    use silex_desktop::attachment::{decode_preview, encode_png};
+    for (w, h) in [(1200u32, 800u32), (4000, 3000), (8000, 6000)] {
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % 251) as u8, (i % 97) as u8, (i / w % 255) as u8, 255])
+            .collect();
+        let png = encode_png(w, h, rgba)?;
+        let t = std::time::Instant::now();
+        let preview = decode_preview("image/png", &png)?;
+        println!(
+            "{w} × {h} ({:.1} MB PNG) → {} × {}: {:?}",
+            png.len() as f64 / 1_048_576.0,
+            preview.width,
+            preview.height,
+            t.elapsed()
+        );
+    }
+    Ok(())
+}

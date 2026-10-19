@@ -92,6 +92,7 @@ CREATE TABLE attachments (
 - **Vista previa de imágenes** (pregunta 2): PNG y JPEG dentro del bloque, con un ancho máximo y su proporción, decodificadas en un hilo y guardadas como textura solo mientras se ven.
   - Decodificar con `image::Limits` (máx. 8192 × 8192 y 256 MB de memoria) evita las «bombas» de descompresión; una imagen que no cumple se muestra como archivo.
   - `image` 0.25 ya es dependencia de eframe con PNG; JPEG solo activa su formato `jpeg`, sin crates nuevos en `Cargo.lock`. Se comprobará al implementarlo.
+  - *Actualización (H7.2):* comprobado: el `Cargo.lock` solo gana la línea de la dependencia directa. La vista previa se reduce a 1600 px de lado como mucho y se muestra a un punto por píxel, hasta el ancho de la columna y 480 puntos de alto. Su espacio sale de las dimensiones guardadas, así que la página no salta cuando llega. «Solo mientras se ven» se concreta así: las texturas de la página abierta se guardan hasta 96 MB, y por encima se liberan las que no están a la vista. Al cambiar de página se liberan todas. Pegar imágenes no necesita `arboard`: egui 0.37 entrega `Event::PasteImage` cuando el portapapeles tiene una imagen y no texto.
 
 ### Seguridad (modelo de amenazas)
 - **Nombres:** el nombre original solo se muestra o pasa por `safe_path` (`safe_stem`, `unique_stem`, `join_inside`) al escribir en disco. Tests con `../`, rutas absolutas, `CON.txt`, nombres de 300 bytes, caracteres de control y Unicode.

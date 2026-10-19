@@ -51,6 +51,7 @@ fn frame(
                     show_handle: false,
                     focused: false,
                     attachment: None,
+                    preview: None,
                 },
             )
             .text_changed;
@@ -2925,5 +2926,127 @@ fn files_dropped_on_a_database_are_not_attached() -> anyhow::Result<()> {
     drop_frame(&mut app, &ctx, &[path]);
     let notice = app.notice.clone().unwrap_or_default();
     assert!(notice.contains("no una base de datos"), "{notice}");
+    Ok(())
+}
+
+// ---- H7.2: image previews and pasted images ----
+
+/// An RGBA image of `w` × `h` (a gradient), as egui pastes it.
+fn pasted_image(w: usize, h: usize) -> egui::Event {
+    let pixels = (0..w * h)
+        .map(|i| egui::Color32::from_rgb((i % 256) as u8, 120, 200))
+        .collect();
+    egui::Event::PasteImage(std::sync::Arc::new(egui::ColorImage::new([w, h], pixels)))
+}
+
+#[test]
+fn a_pasted_image_is_attached_and_previewed() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[])?;
+    let antes = app.blocks[0].id.clone();
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&antes)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![pasted_image(300, 200)]);
+    let file = file_block(&app);
+    assert_eq!(file.content, "Imagen pegada.png");
+    assert_eq!(app.blocks[1].id, file.id, "after the block being edited");
+    let id = file.attachment.clone().expect("its file");
+    let info = app.files.attachments.get(&id).cloned().expect("known");
+    assert_eq!(
+        (info.mime.as_str(), info.width, info.height),
+        ("image/png", Some(300), Some(200))
+    );
+
+    // Its preview is decoded once it is in sight.
+    for _ in 0..3 {
+        app_frame(&mut app, &ctx, vec![]);
+    }
+    assert!(matches!(
+        app.files.previews.get(&id),
+        Some(PreviewState::Ready(_))
+    ));
+    // The card holds the image (300 × 200 points) above its caption.
+    let card = ctx
+        .read_response(app.block_field_id(&file.id))
+        .map(|r| r.rect)
+        .expect("drawn");
+    assert_eq!(card.height(), 200.0 + 8.0 + 44.0);
+
+    // Cmd+Z takes the pasted image away, like any block.
+    ctx.memory_mut(|m| m.surrender_focus(app.block_field_id(&file.id)));
+    app_frame(&mut app, &ctx, undo());
+    assert!(app.blocks.iter().all(|b| b.kind != BlockKind::File));
+
+    // Another page: its previews are dropped.
+    let other = app.db.create_page("Otra", None)?;
+    app.reload_pages()?;
+    app.open_page(other)?;
+    assert!(app.files.previews.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_broken_image_says_why_and_stays_a_file() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-files")?;
+    // A PNG header with a size, and nothing an image decoder can read.
+    let mut broken = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    broken.extend(640u32.to_be_bytes());
+    broken.extend(480u32.to_be_bytes());
+    broken.extend([8, 6, 0, 0, 0, 1, 2, 3]);
+    let (mut app, ctx) = file_app(&tmp, &[("roto.png", &broken)])?;
+    let mut painted = Vec::new();
+    for _ in 0..3 {
+        painted = app_frame(&mut app, &ctx, vec![]);
+    }
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.starts_with("No se puede mostrar la imagen")),
+        "{painted:?}"
+    );
+    // Still a file: it opens and saves like any other.
+    assert!(painted.iter().any(|t| t.trim() == "Abrir"), "{painted:?}");
+    Ok(())
+}
+
+#[test]
+fn pasting_an_image_on_a_database_is_explained() -> anyhow::Result<()> {
+    let (mut app, ctx, _) = database_app()?;
+    app_frame(&mut app, &ctx, vec![pasted_image(2, 2)]);
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(notice.contains("no una base de datos"), "{notice}");
+    Ok(())
+}
+
+#[test]
+fn previews_out_of_sight_are_dropped_when_memory_is_short() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[])?;
+    app_frame(&mut app, &ctx, vec![pasted_image(40, 30)]);
+    for _ in 0..3 {
+        app_frame(&mut app, &ctx, vec![]);
+    }
+    let id = file_block(&app).attachment.expect("its file");
+    // A preview of an image no longer drawn (as if scrolled far away).
+    let texture = ctx.load_texture(
+        "lejos",
+        egui::ColorImage::new([50, 50], vec![egui::Color32::RED; 2500]),
+        egui::TextureOptions::LINEAR,
+    );
+    app.files
+        .previews
+        .insert("lejos".into(), PreviewState::Ready(texture));
+    // Within budget, both stay.
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(app.files.previews.contains_key("lejos"));
+    // Over budget: the one out of sight goes, the one in sight stays.
+    app.files.budget = Some(1);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(!app.files.previews.contains_key("lejos"));
+    assert!(matches!(
+        app.files.previews.get(&id),
+        Some(PreviewState::Ready(_))
+    ));
     Ok(())
 }

@@ -165,3 +165,11 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - Envía la página a la papelera y restáurala: los archivos siguen ahí. Haz una copia de seguridad, restáurala y abre un archivo.
 - «…» → «Exportar a Markdown»: junto al `.md` aparece `Título (adjuntos)/` con los archivos, y el `.md` los enlaza (ábrelo en un visor de Markdown: la imagen se ve y el PDF se abre).
 - Suelta un `.md` y un PDF a la vez: se importa la página y el PDF se adjunta a la que estaba abierta; el aviso cuenta las dos cosas.
+
+## 18. Imágenes (H7.2)
+- Arrastra una foto JPEG y un PNG: se ven dentro de la página, a su tamaño o al ancho de la columna, sin que la página salte cuando aparecen.
+- Una foto muy alta (vertical) no pasa de unos 480 puntos de alto; una panorámica ocupa el ancho de la columna.
+- Copia una captura de pantalla (Cmd+Mayús+Ctrl+4 en macOS) y pégala con Cmd+V en un párrafo: aparece «Imagen pegada.png» debajo. Cmd+Z la quita. Prueba también a copiar una imagen desde el navegador.
+- Cambia el nombre de un `.txt` a `.png` y arrástralo: se queda como archivo, sin vista previa.
+- Una página con muchas fotos grandes: al desplazarte, la app sigue fluida y la memoria no se dispara (Monitor de Actividad).
+- Tema oscuro: la imagen y su pie se ven bien.

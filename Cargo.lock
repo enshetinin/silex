@@ -1677,6 +1677,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -3137,6 +3139,7 @@ dependencies = [
  "directories",
  "eframe",
  "egui_kittest",
+ "image",
  "pulldown-cmark",
  "rusqlite",
  "serde_json",

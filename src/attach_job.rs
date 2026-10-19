@@ -15,7 +15,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::attachment::{Attachment, NewAttachment};
+use crate::attachment::{Attachment, NewAttachment, Preview, decode_preview, encode_png};
 use crate::db::Database;
 use crate::export::write_atomic;
 use crate::safe_path::{join_inside, unique_attachment_name};
@@ -67,7 +67,20 @@ pub enum Request {
     Save(String),
     /// Write a copy and show its folder (programs and scripts).
     Reveal(String),
+    /// Decode an image attachment for its preview (H7.2).
+    Preview(String),
+    /// Store a pasted image (RGBA pixels) as a PNG, like `Add`.
+    AddImage {
+        page: String,
+        after: Option<String>,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
 }
+
+/// The name of a pasted image.
+pub const PASTED_IMAGE_NAME: &str = "Imagen pegada.png";
 
 #[derive(Debug)]
 pub enum Outcome {
@@ -81,6 +94,8 @@ pub enum Outcome {
     Opened(Result<PathBuf>),
     Saved(Result<PathBuf>),
     Revealed(Result<PathBuf>),
+    /// An attachment's preview, by its id.
+    Preview(String, Result<Preview>),
 }
 
 /// Does one request with `db`. `open` opens a file with its app, or a
@@ -127,6 +142,27 @@ pub fn handle(
             open(folder)?;
             Ok(path)
         })()),
+        Request::Preview(id) => {
+            let preview = find(db, &id)
+                .and_then(|attachment| decode_preview(&attachment.mime, &db.attachment_data(&id)?));
+            Outcome::Preview(id, preview)
+        }
+        Request::AddImage {
+            page,
+            after,
+            width,
+            height,
+            rgba,
+        } => {
+            let stored = encode_png(width, height, rgba)
+                .and_then(|png| NewAttachment::from_bytes(PASTED_IMAGE_NAME, png))
+                .and_then(|file| db.add_attachment(&file));
+            Outcome::Added {
+                page,
+                after,
+                files: vec![(PASTED_IMAGE_NAME.to_owned(), stored)],
+            }
+        }
         Request::Save(id) => Outcome::Saved((|| {
             let attachment = find(db, &id)?;
             fs::create_dir_all(&folders.saved).with_context(|| {
@@ -230,6 +266,12 @@ fn failed(request: Request, err: anyhow::Error) -> Outcome {
                 })
                 .collect(),
         },
+        Request::AddImage { page, after, .. } => Outcome::Added {
+            page,
+            after,
+            files: vec![(PASTED_IMAGE_NAME.to_owned(), Err(anyhow!("{message}")))],
+        },
+        Request::Preview(id) => Outcome::Preview(id, Err(err)),
         Request::Open(_) => Outcome::Opened(Err(err)),
         Request::Save(_) => Outcome::Saved(Err(err)),
         Request::Reveal(_) => Outcome::Revealed(Err(err)),

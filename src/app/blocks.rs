@@ -215,6 +215,8 @@ pub(super) struct BlockView<'a> {
     pub(super) focused: bool,
     /// A file block's attachment (name, type, size), if known.
     pub(super) attachment: Option<&'a silex_desktop::attachment::Attachment>,
+    /// Its image preview, if it has one (H7.2).
+    pub(super) preview: Option<&'a PreviewState>,
 }
 
 /// One block, borderless: a hover handle in the left gutter (type and
@@ -252,7 +254,7 @@ pub(super) fn block_field(
             // A file block is a card, not text (ADR 0007). It keeps the
             // block's focus id, so the arrow keys reach it.
             if block.kind == BlockKind::File {
-                let (card, file_action) = file_card(ui, id, block, view.attachment);
+                let (card, file_action) = file_card(ui, id, block, view.attachment, view.preview);
                 if view.scroll_into_view {
                     card.scroll_to_me(None);
                 }
@@ -1170,11 +1172,27 @@ impl SilexApp {
                                     .attachment
                                     .as_ref()
                                     .and_then(|a| self.files.attachments.get(a)),
+                                preview: block
+                                    .attachment
+                                    .as_ref()
+                                    .and_then(|a| self.files.previews.get(a)),
                             };
                             if index > 0 {
                                 ui.add_space(heading_space(block.kind));
                             }
                             let out = block_field(ui, self.doc_generation, block, &view);
+                            // An image in sight: kept, or decoded if it has no preview (H7.2).
+                            if let Some(id) = &block.attachment
+                                && self.files.attachments.get(id).is_some_and(|a| {
+                                    silex_desktop::attachment::has_preview(&a.mime)
+                                })
+                                && ui.is_rect_visible(out.rect)
+                            {
+                                self.files.seen.insert(id.clone());
+                                if !self.files.previews.contains_key(id) {
+                                    self.files.wanted.push(id.clone());
+                                }
+                            }
                             if pointer.is_some_and(|p| out.rect.contains(p)) {
                                 hovered = Some(block.id.clone());
                             }

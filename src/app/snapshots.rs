@@ -1281,10 +1281,15 @@ fn attachments_app() -> anyhow::Result<SilexApp> {
         indent: 0,
         attachment: None,
     }];
-    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
-    png.extend(1200u32.to_be_bytes());
-    png.extend(800u32.to_be_bytes());
-    png.resize(245_000, 0);
+    // A real image (a soft gradient), so its preview shows (H7.2).
+    let (w, h) = (480u32, 260u32);
+    let rgba: Vec<u8> = (0..w * h)
+        .flat_map(|i| {
+            let (x, y) = (i % w, i / w);
+            [(60 + x * 120 / w) as u8, (140 + y * 80 / h) as u8, 210, 255]
+        })
+        .collect();
+    let png = silex_desktop::attachment::encode_png(w, h, rgba)?;
     let files = [
         ("billetes de avión.pdf", {
             let mut pdf = b"%PDF-1.7".to_vec();
@@ -1321,6 +1326,7 @@ fn file_blocks_have_names() -> anyhow::Result<()> {
         "Archivo «billetes de avión.pdf», 2,4 MB",
         "Abrir «billetes de avión.pdf»",
         "Guardar una copia de «mapa del centro.png»",
+        "Imagen «mapa del centro.png», 480 × 260, 3,4 KB",
         "Mostrar «instalar.sh» en la carpeta",
     ] {
         assert!(harness.query_by_label(label).is_some(), "{label}");
