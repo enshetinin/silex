@@ -254,6 +254,41 @@ pub fn slash_matches(query: &str) -> Vec<BlockKind> {
         .collect()
 }
 
+/// An entry of the slash menu: a block type, or attaching files (H7.3,
+/// ADR 0007), which opens the system's file dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlashItem {
+    Kind(BlockKind),
+    AttachFiles,
+}
+
+/// Words «Adjuntar archivos» answers to in the slash menu.
+const ATTACH_WORDS: &[&str] = &[
+    "archivo",
+    "adjuntar",
+    "adjunto",
+    "imagen",
+    "foto",
+    "pdf",
+    "documento",
+    "file",
+    "attach",
+];
+
+/// The slash menu for `query`: the matching types (see [`slash_matches`]),
+/// then «Adjuntar archivos» if it matches too.
+pub fn slash_items(query: &str) -> Vec<SlashItem> {
+    let mut items: Vec<SlashItem> = slash_matches(query)
+        .into_iter()
+        .map(SlashItem::Kind)
+        .collect();
+    let folded = fold(query);
+    if ATTACH_WORDS.iter().any(|w| w.starts_with(&folded)) {
+        items.push(SlashItem::AttachFiles);
+    }
+    items
+}
+
 /// Applies a slash command: removes "/query" (everything before the cursor)
 /// and changes the block type. Returns where the cursor goes.
 pub fn apply_slash(

@@ -83,6 +83,15 @@ pub(super) struct Files {
     pub(super) seen: std::collections::HashSet<String>,
     /// A smaller [`PREVIEW_BUDGET`], for tests.
     pub(super) budget: Option<usize>,
+    /// Open the file dialog after this frame (H7.3). The inner id is the
+    /// block «/archivo» was typed in: the files go after it, or in its
+    /// place if it was left empty.
+    pub(super) pick: Option<Option<String>>,
+    /// That block, while its files are on their way.
+    replace: Option<String>,
+    /// Chooses files; tests replace it (the default opens the system's
+    /// dialog, never in tests).
+    pub(super) picker: Option<fn() -> Vec<PathBuf>>,
     /// «Abrir», «Guardar una copia»… chosen this frame (action, block id),
     /// sent in `tick_files`, which has the egui context.
     pub(super) pending: Vec<(BlockAction, String)>,
@@ -102,6 +111,21 @@ fn default_folders() -> Result<Folders> {
         opened: root.join("abiertos"),
         saved: root.join("Exportaciones"),
     })
+}
+
+/// The system's dialog to choose files (`rfd`, ADR 0007). Tests never open
+/// one.
+#[cfg(not(test))]
+fn default_picker() -> Vec<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Adjuntar archivos")
+        .pick_files()
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn default_picker() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 /// Opens a file with its app, or a folder. Tests never open anything.
@@ -370,6 +394,29 @@ impl SilexApp {
         self.report(result);
     }
 
+    /// The file dialog («/archivo», «Adjuntar archivos…»). It is modal and
+    /// waits for the user, outside of the frame's drawing. Nothing chosen,
+    /// nothing done.
+    fn pick_files(&mut self, ctx: &egui::Context, replace: Option<String>) {
+        let paths = self.files.picker.unwrap_or(default_picker)();
+        if paths.is_empty() {
+            return;
+        }
+        let Some((page, mut after)) = self.attach_target() else {
+            return;
+        };
+        if let Some(block) = replace {
+            after = Some(block.clone());
+            self.files.replace = Some(block);
+        }
+        self.files.adding += paths.len();
+        let result = self.file_request(ctx, Request::Add { page, after, paths });
+        if result.is_err() {
+            self.files.adding = 0;
+        }
+        self.report(result);
+    }
+
     /// An image pasted with Cmd+V (egui sends it when the clipboard has an
     /// image and no text): stored as «Imagen pegada.png» after the block
     /// being edited (H7.2). Taken before any widget sees it.
@@ -435,6 +482,9 @@ impl SilexApp {
     /// Handles what the attachment work finished: new file blocks, opened
     /// or saved copies, and what failed.
     pub(super) fn tick_files(&mut self, ctx: &egui::Context) {
+        if let Some(replace) = self.files.pick.take() {
+            self.pick_files(ctx, replace);
+        }
         for (action, block) in std::mem::take(&mut self.files.pending) {
             self.file_action(ctx, action, &block);
         }
@@ -543,9 +593,21 @@ impl SilexApp {
         if added > 0 {
             if self.selected.as_deref() == Some(page) {
                 // In memory, like any edit: one undo step, saved by the autosave.
-                let at = after
+                let mut at = after
                     .and_then(|id| self.blocks.iter().position(|b| b.id == id))
                     .map_or(self.blocks.len(), |i| i + 1);
+                // «/archivo» in a block left empty: the files take its place.
+                let replace = self.files.replace.take();
+                if let Some(index) = at.checked_sub(1)
+                    && replace.is_some()
+                    && replace.as_deref() == after
+                    && self.blocks.get(index).is_some_and(|b| {
+                        b.kind == BlockKind::Paragraph && b.content.trim().is_empty()
+                    })
+                {
+                    self.blocks.remove(index);
+                    at = index;
+                }
                 let indent = at
                     .checked_sub(1)
                     .and_then(|i| self.blocks.get(i))

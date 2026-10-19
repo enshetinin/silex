@@ -173,3 +173,11 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - Cambia el nombre de un `.txt` a `.png` y arrástralo: se queda como archivo, sin vista previa.
 - Una página con muchas fotos grandes: al desplazarte, la app sigue fluida y la memoria no se dispara (Monitor de Actividad).
 - Tema oscuro: la imagen y su pie se ven bien.
+
+## 19. Diálogo de archivos (H7.3)
+- En un párrafo vacío escribe `/archivo` e Intro: se abre el diálogo del sistema. Elige dos archivos (Cmd+clic): aparecen donde estaba el párrafo, sin dejar un párrafo vacío encima.
+- Escribe `/pdf` o `/imagen`: el menú ofrece «Adjuntar archivos…».
+- Abre el diálogo y cancela: no cambia nada (solo desaparece `/archivo`).
+- Cmd+K → «adjuntar» → Intro, con el cursor en medio de la página: los archivos van tras ese bloque.
+- En una base de datos, la paleta no ofrece «Adjuntar archivos…».
+- Linux: prueba en GNOME o KDE (con portal) y, si puedes, en un escritorio sin portal; sin él, el aviso debe explicar el error y la app seguir funcionando.

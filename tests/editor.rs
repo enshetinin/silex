@@ -576,3 +576,19 @@ fn a_duplicated_file_block_shares_its_attachment() {
     // Copied as text, it is its name.
     assert_eq!(selection_text(&blocks, 0, 0), "informe.pdf");
 }
+
+// ---- Slash menu entries (H7.3) ----
+
+#[test]
+fn the_slash_menu_offers_attaching_files() {
+    use silex_desktop::editor::{SlashItem, slash_items};
+    let all = slash_items("");
+    assert_eq!(all.len(), BlockKind::ALL.len() + 1);
+    assert_eq!(all.last(), Some(&SlashItem::AttachFiles));
+    for query in ["arch", "ARCHIVO", "adj", "imagen", "pdf", "foto"] {
+        assert_eq!(slash_items(query), [SlashItem::AttachFiles], "{query}");
+    }
+    // «Título 1» and the like are not drowned by it.
+    assert_eq!(slash_items("h1"), [SlashItem::Kind(BlockKind::Heading1)]);
+    assert!(slash_items("zzz").is_empty());
+}

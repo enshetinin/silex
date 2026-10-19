@@ -125,5 +125,6 @@ CREATE TABLE attachments (
 1. Los adjuntos se guardan dentro de SQLite (alternativa 1), con un límite de 20 MB por archivo.
 2. Vista previa de imágenes PNG y JPEG, en H7.2, sin crates nuevos.
 3. Se acepta `rfd` para el diálogo de archivos (H7.3), con la comprobación de los paquetes de Linux.
+   - *Comprobado (H7.3):* `rfd` 0.17.2 solo añade `rfd` y `pollster` al `Cargo.lock`. En Linux usa el portal de escritorio por D-Bus con `libdbus` abierta en tiempo de ejecución (`dlopen`): si falta, el diálogo falla con un error, pero la app arranca. Wayland ya va por `dlopen` en eframe, así que los paquetes no necesitan ninguna biblioteca nueva del sistema.
 4. Los adjuntos sin usar nunca se borran solos: solo con «Liberar espacio» y confirmación (H7.4).
 5. Silex no abre ejecutables ni scripts: ofrece «Mostrar en la carpeta».

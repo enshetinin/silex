@@ -886,7 +886,10 @@ fn slash_command_changes_the_block_type() -> anyhow::Result<()> {
     let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
     type_into(&mut app, &ctx, "/h2");
     let menu = app.slash.clone().expect("menu open");
-    assert_eq!(menu.matches, [BlockKind::Heading2]);
+    assert_eq!(
+        menu.matches,
+        [silex_desktop::editor::SlashItem::Kind(BlockKind::Heading2)]
+    );
     app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
     assert_eq!(contents(&app), [(BlockKind::Heading2, 0, String::new())]);
     assert!(app.slash.is_none());
@@ -3048,5 +3051,113 @@ fn previews_out_of_sight_are_dropped_when_memory_is_short() -> anyhow::Result<()
         app.files.previews.get(&id),
         Some(PreviewState::Ready(_))
     ));
+    Ok(())
+}
+
+// ---- H7.3: the file dialog ----
+
+thread_local! {
+    /// What the fake file dialog answers in this test thread.
+    static PICKED: std::cell::RefCell<Vec<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn fake_picker() -> Vec<std::path::PathBuf> {
+    PICKED.with(|p| p.borrow().clone())
+}
+
+/// A page with «Antes» and an empty block below it, focused, and a fake
+/// file dialog that answers `picked`.
+fn picker_app(
+    tmp: &TempFolder,
+    picked: &[(&str, &[u8])],
+) -> anyhow::Result<(SilexApp, egui::Context, String)> {
+    let (mut app, ctx) = file_app(tmp, &[])?;
+    let mut paths = Vec::new();
+    for (name, content) in picked {
+        let path = tmp.0.join(name);
+        std::fs::write(&path, content)?;
+        paths.push(path);
+    }
+    PICKED.with(|p| *p.borrow_mut() = paths);
+    app.files.picker = Some(fake_picker);
+    let page = app.selected.clone().unwrap_or_default();
+    let empty = Block {
+        page_id: page,
+        ..block("vacio")
+    };
+    app.blocks.push(empty);
+    app.mark_dirty();
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id("vacio")));
+    app_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, "vacio".into()))
+}
+
+#[test]
+fn slash_archivo_attaches_in_place_of_the_empty_block() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx, _) = picker_app(&tmp, &[("acta.pdf", b"%PDF-1.4"), ("nota.txt", b"hola")])?;
+    app_frame(&mut app, &ctx, type_text("/archivo"));
+    let menu = app.slash.clone().expect("slash menu");
+    assert_eq!(
+        menu.matches,
+        [silex_desktop::editor::SlashItem::AttachFiles]
+    );
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let kinds: Vec<(BlockKind, String)> = app
+        .blocks
+        .iter()
+        .map(|b| (b.kind, b.content.clone()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (BlockKind::Paragraph, "Antes".to_owned()),
+            (BlockKind::File, "acta.pdf".to_owned()),
+            (BlockKind::File, "nota.txt".to_owned()),
+        ],
+        "the empty block gave its place"
+    );
+    assert_eq!(app.notice.as_deref(), Some("Se adjuntaron 2 archivos."));
+    Ok(())
+}
+
+#[test]
+fn a_cancelled_dialog_only_removes_the_command() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx, empty) = picker_app(&tmp, &[])?;
+    app_frame(&mut app, &ctx, type_text("/adj"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks.len(), 2);
+    let block = app
+        .blocks
+        .iter()
+        .find(|b| b.id == empty)
+        .expect("still there");
+    assert_eq!(block.content, "");
+    assert!(app.blocks.iter().all(|b| b.kind != BlockKind::File));
+    assert!(app.files.pick.is_none());
+    Ok(())
+}
+
+#[test]
+fn the_palette_attaches_files_after_the_block_being_edited() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx, _) = picker_app(&tmp, &[("plano.png", b"\x89PNG\r\n\x1a\n")])?;
+    let antes = app.blocks[0].id.clone();
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&antes)));
+    app_frame(&mut app, &ctx, vec![]);
+    app.run_command(&ctx, silex_desktop::palette::Command::AttachFiles)?;
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks[1].content, "plano.png", "right after «Antes»");
+    assert_eq!(
+        app.blocks.len(),
+        3,
+        "the empty block stays: it was not «/archivo»"
+    );
     Ok(())
 }

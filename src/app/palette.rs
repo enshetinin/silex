@@ -18,6 +18,7 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::RenamePage => icons::TEXT,
         Command::AddFavorite | Command::RemoveFavorite => icons::STAR,
         Command::ExportPage | Command::ExportWorkspace => icons::EXPORT,
+        Command::AttachFiles => icons::PAPERCLIP,
         Command::SaveNow => icons::SAVE,
         Command::TrashPage | Command::OpenTrash => icons::TRASH,
         Command::BackupNow | Command::RestoreBackup => icons::BACKUP,
@@ -82,6 +83,7 @@ impl SilexApp {
             (Command::AddFavorite, Some(id)) => self.set_favorite(&id, true)?,
             (Command::RemoveFavorite, Some(id)) => self.set_favorite(&id, false)?,
             (Command::ExportPage, Some(_)) => self.export_current_page()?,
+            (Command::AttachFiles, Some(_)) => self.files.pick = Some(None),
             // A save error is already shown by the status bar.
             (Command::SaveNow, _) => {
                 let _ = self.save_now();

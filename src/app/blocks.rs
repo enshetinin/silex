@@ -37,15 +37,15 @@ pub(super) enum EditorKey {
     Duplicate,
     /// Escape: leave the text and select the block.
     Select,
-    /// Enter in the slash menu: apply this type.
-    Slash(BlockKind),
+    /// Enter in the slash menu: apply this type, or attach files.
+    Slash(editor::SlashItem),
 }
 
 /// Slash menu shown under the focused block while "/word" is being typed.
 #[derive(Debug, Clone)]
 pub(super) struct SlashMenu {
     pub(super) block_id: String,
-    pub(super) matches: Vec<BlockKind>,
+    pub(super) matches: Vec<editor::SlashItem>,
     pub(super) selected: usize,
 }
 
@@ -493,7 +493,7 @@ pub(super) fn slash_menu_ui(
     ui: &mut egui::Ui,
     menu: &SlashMenu,
     block: egui::Rect,
-) -> Option<BlockKind> {
+) -> Option<editor::SlashItem> {
     let p = theme::current(ui.ctx());
     // Text starts after the gutter; rows are ~30 px plus the header.
     let left = block.left() + GUTTER + ui.spacing().item_spacing.x;
@@ -522,21 +522,27 @@ pub(super) fn slash_menu_ui(
                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
                     ui.set_width(240.0);
                     ui.label(
-                        egui::RichText::new("Convertir en… (↑ ↓ Intro, Esc para cerrar)")
+                        egui::RichText::new("Bloques (↑ ↓ Intro, Esc para cerrar)")
                             .small()
                             .color(p.text_muted),
                     );
-                    for (i, kind) in menu.matches.iter().enumerate() {
+                    for (i, item) in menu.matches.iter().enumerate() {
+                        let (icon, label) = match item {
+                            editor::SlashItem::Kind(kind) => (kind_icon(*kind), kind.label()),
+                            editor::SlashItem::AttachFiles => {
+                                (icons::PAPERCLIP, "Adjuntar archivos…")
+                            }
+                        };
                         let option = ui.add(egui::Button::selectable(
                             i == menu.selected,
-                            (icons::icon(kind_icon(*kind)), format!("  {}", kind.label())),
+                            (icons::icon(icon), format!("  {label}")),
                         ));
                         if i == menu.selected {
                             // Arrow keys can move past the visible part.
                             option.scroll_to_me(None);
                         }
                         if option.clicked() {
-                            clicked = Some(*kind);
+                            clicked = Some(*item);
                         }
                     }
                 });
@@ -820,9 +826,19 @@ impl SilexApp {
                 self.caret = None;
                 return;
             }
-            EditorKey::Slash(kind) => {
+            EditorKey::Slash(editor::SlashItem::Kind(kind)) => {
                 self.slash = None;
                 editor::apply_slash(&mut self.blocks, index, cursor, kind)
+            }
+            // «/archivo»: the text goes, the block stays, and the file
+            // dialog opens after this frame (H7.3). If the block is left
+            // empty, the files take its place.
+            EditorKey::Slash(editor::SlashItem::AttachFiles) => {
+                self.slash = None;
+                let kind = self.blocks[index].kind;
+                let caret = editor::apply_slash(&mut self.blocks, index, cursor, kind);
+                self.files.pick = Some(Some(block_id.clone()));
+                caret
             }
             EditorKey::MoveUp | EditorKey::MoveDown => {
                 let up = command == EditorKey::MoveUp;
@@ -989,7 +1005,7 @@ impl SilexApp {
         }
         let matches = editor::slash_query(&block.content, caret.char)
             .filter(|_| !dismissed && block.kind != BlockKind::Code)
-            .map(editor::slash_matches)
+            .map(editor::slash_items)
             .filter(|m| !m.is_empty());
         self.slash = matches.map(|matches| {
             let selected = self
