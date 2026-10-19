@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 5;
+const LATEST: i64 = 6;
 
 struct TempDir(PathBuf);
 
@@ -473,7 +473,7 @@ mod v5 {
     const SCHEMA_V4: &str = include_str!("../src/db/migrations/0004_settings.sql");
 
     /// A database exactly as Silex v4 left it (v2 content, block kinds, settings).
-    fn write_v4_database(path: &Path) -> anyhow::Result<()> {
+    pub(super) fn write_v4_database(path: &Path) -> anyhow::Result<()> {
         write_v2_database(path)?;
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA_V3)?;
@@ -485,7 +485,7 @@ mod v5 {
         Ok(())
     }
 
-    fn table_exists(path: &Path, table: &str) -> anyhow::Result<bool> {
+    pub(super) fn table_exists(path: &Path, table: &str) -> anyhow::Result<bool> {
         let conn = Connection::open(path)?;
         Ok(conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
@@ -591,6 +591,139 @@ mod v5 {
         assert_eq!(db.search_pages("mundo")?.len(), 1);
         let new = db.create_database("Después", None)?;
         assert_eq!(db.database_views(&new)?.len(), 1);
+        Ok(())
+    }
+}
+
+mod v6 {
+    use super::v5::{table_exists, write_v4_database};
+    use super::*;
+    use silex_desktop::attachment::NewAttachment;
+    use silex_desktop::model::BlockKind;
+
+    const SCHEMA_V5: &str = include_str!("../src/db/migrations/0005_databases.sql");
+
+    /// A database exactly as Silex v5 left it (v4 content plus a database).
+    fn write_v5_database(path: &Path) -> anyhow::Result<()> {
+        write_v4_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V5)?;
+        conn.execute_batch(
+            "INSERT INTO pages (id, title, kind, sort_order) VALUES ('base', 'Lecturas', 'database', 5);
+             INSERT INTO db_views (id, database_id, name, kind, position) VALUES ('v', 'base', 'Tabla', 'table', 0);
+             PRAGMA user_version = 5;",
+        )?;
+        Ok(())
+    }
+
+    fn file_block(db: &mut Database, page: &str) -> anyhow::Result<String> {
+        let file = NewAttachment::from_bytes("informe.pdf", b"%PDF-1.7 hola".to_vec())?;
+        let attachment = db.add_attachment(&file)?;
+        let mut blocks = db.list_blocks(page)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        blocks.push(silex_desktop::model::Block {
+            id: id.clone(),
+            page_id: page.into(),
+            kind: BlockKind::File,
+            content: attachment.name.clone(),
+            checked: false,
+            position: 0,
+            indent: 0,
+            attachment: Some(attachment.id),
+        });
+        let title = db.get_page(page)?.map(|p| p.title).unwrap_or_default();
+        db.save_document(page, &title, &blocks)?;
+        Ok(id)
+    }
+
+    #[test]
+    fn v5_database_gets_attachments_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v5_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(table_exists(&tmp.db(), "attachments")?);
+        assert!(has_column(&tmp.db(), "blocks", "attachment_id")?);
+        // Blocks keep their rowids (the search index points at them).
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        let blocks = db.list_blocks("p2")?;
+        assert_eq!(blocks[0].content, "Harina de centeno 🌾");
+        assert!(blocks.iter().all(|b| b.attachment.is_none()));
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert_eq!(db.list_favorites()?.len(), 1);
+        assert_eq!(db.list_trash()?.len(), 1);
+        assert_eq!(db.database_views("base")?.len(), 1);
+        // A verified v5 copy was made before upgrading.
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1
+        );
+        // A file block works, and is found by its name.
+        file_block(&mut db, "p2")?;
+        assert_eq!(db.search_pages("informe")?.len(), 1);
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        let broken: Vec<String> = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert!(broken.is_empty(), "{broken:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v6() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        file_block(&mut db, "p2")?;
+        assert_eq!(db.list_blocks("p2")?.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v5_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v5_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        // The index name is taken, so 0006 fails after `blocks` was rebuilt:
+        // the old table must come back as it was.
+        Connection::open(tmp.db())?
+            .execute_batch("CREATE INDEX blocks_attachment_idx ON pages(title);")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 6"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 5);
+        drop(conn);
+        assert!(!table_exists(&tmp.db(), "attachments")?);
+        assert!(!has_column(&tmp.db(), "blocks", "attachment_id")?);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        Ok(())
+    }
+
+    #[test]
+    fn v5_backup_restores_into_v6() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v5_database(&old_db)?;
+        let v5_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+
+        let mut db = Database::open(tmp.db())?;
+        let page = db.create_page("Se pierde al restaurar", None)?;
+        file_block(&mut db, &page)?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v5_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.get_page(&page)?.is_none(), "the copy had no attachments");
+        assert_eq!(db.search_pages("mundo")?.len(), 1);
+        file_block(&mut db, "p1")?;
         Ok(())
     }
 }

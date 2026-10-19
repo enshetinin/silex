@@ -1,6 +1,6 @@
 # ADR-0007 — Adjuntos locales
 
-**Estado:** propuesta (2026-10-19). Pendiente de las decisiones del propietario (al final).
+**Estado:** aceptada (2026-10-19), con las decisiones del propietario del final.
 
 ## Contexto
 El PRD pone en P1 los «adjuntos locales»: poder guardar en una página un PDF, una imagen o cualquier archivo, y abrirlo después, sin red. El roadmap (Hito 7) pide un ADR propio sobre almacenamiento, límites de tamaño, copias de seguridad y exportación, reutilizando `safe_path`.
@@ -34,7 +34,7 @@ Requisitos:
 3. **Híbrido:** en SQLite hasta cierto tamaño y en carpeta a partir de él. Suma la complejidad de las dos.
 4. **Solo enlaces a archivos del usuario** (guardar una ruta, sin copiar). Es trivial, pero no es «local-first»: el enlace se rompe al mover el archivo, no entra en las copias ni en la exportación, y deja rutas absolutas del equipo en la base.
 
-## Decisión propuesta
+## Decisión
 **Alternativa 1 (BLOB en SQLite) con un límite por archivo**, porque conserva todas las garantías de integridad existentes sin código nuevo de copias. Si el uso real pide archivos grandes, se reevaluará la alternativa 2 en un ADR nuevo. Pasar de 1 a 2 es una migración de datos acotada (sacar blobs a archivos); al revés también.
 
 ### Esquema (migración `0006_attachments.sql`, aditiva)
@@ -59,9 +59,10 @@ CREATE TABLE attachments (
 - **Añadir:**
   1. Un hilo `silex-attach` lee el archivo y comprueba el límite antes de leerlo entero.
   2. Detecta el tipo por la firma del contenido y, si es imagen, lee sus dimensiones.
-  3. Escribe adjunto y bloque en una transacción, con su propia conexión, como la búsqueda.
-  4. La interfaz recibe el resultado por un canal y recarga la página. Mientras tanto, un bloque provisional muestra «Añadiendo…».
+  3. Guarda **solo el adjunto**, en su transacción y con su propia conexión, como la búsqueda.
+  4. La interfaz recibe el resultado por un canal y añade el bloque al documento en memoria, como cualquier edición: el autoguardado lo escribe y Cmd+Z lo quita. Mientras tanto, la página muestra «Añadiendo N archivos…».
   5. Si falla, no se escribe nada y se explica por qué.
+  - *Actualización (H7.1):* el bloque no se escribe en el hilo, al contrario de lo que decía la propuesta. El autoguardado sincroniza la lista entera de bloques de la página, así que un bloque escrito desde otra conexión se borraría en el siguiente guardado, o pisaría lo que se escribe mientras tanto. Si la app se cierra entre los dos pasos, solo queda un adjunto sin usar (H7.4). Si se cambia de página mientras se guarda, los bloques se añaden al final de la página de origen, en la base.
 - **Borrar el bloque:** el adjunto **no** se borra. Así Cmd+Z puede devolver el bloque durante la sesión, y la papelera conserva los adjuntos de sus páginas.
 - **Adjuntos sin usar:** los que ningún bloque (vivo o en la papelera) usa. No se borran solos (pregunta 4). «Copias y exportación» muestra cuánto ocupan y ofrece «Liberar espacio» con confirmación, solo con el historial de deshacer vacío o tras guardarlo todo.
 - **Abrir:**
@@ -94,6 +95,7 @@ CREATE TABLE attachments (
 
 ### Seguridad (modelo de amenazas)
 - **Nombres:** el nombre original solo se muestra o pasa por `safe_path` (`safe_stem`, `unique_stem`, `join_inside`) al escribir en disco. Tests con `../`, rutas absolutas, `CON.txt`, nombres de 300 bytes, caracteres de control y Unicode.
+  - Al guardarlo se quitan también las marcas de dirección (U+202A–U+202E, U+2066–U+2069, U+200E/F), que harían que «factura\u{202E}fdp.exe» se leyera como «facturaexe.pdf».
 - **Contenido:** Silex nunca interpreta un adjunto, salvo decodificar PNG/JPEG con límites. El tipo se decide por la firma, no por la extensión, así que una «imagen» que no lo es se queda como archivo.
 - **Abrir:** solo con un clic o Intro del usuario sobre ese bloque, nunca al arrancar ni al pasar el ratón, y los ejecutables no se abren (ver Ciclo de vida).
 - **Tamaño:** el límite está en la base (`CHECK`) y en el hilo que lee, antes de cargar el archivo en memoria.
@@ -118,9 +120,9 @@ CREATE TABLE attachments (
 3. **H7.3 — Diálogo de archivos:** `/archivo` (si se acepta `rfd`).
 4. **H7.4 — Espacio:** tamaño de copias y adjuntos, y «Liberar espacio» de adjuntos sin usar.
 
-## Decisiones del propietario (pendientes)
-1. **¿Dónde se guardan?** Recomendado: dentro de SQLite (alternativa 1). ¿Y con qué límite por archivo? Propuesto: 20 MB.
-2. **¿Vista previa de imágenes?** Propuesto: sí, en H7.2, PNG y JPEG sin crates nuevos.
-3. **¿Se acepta `rfd`** para el diálogo de archivos (H7.3)? Sin él solo se puede arrastrar o pegar, y arrastrar no se puede hacer con el teclado.
-4. **¿Adjuntos sin usar?** Propuesto: nunca se borran solos, solo con «Liberar espacio» y confirmación.
-5. **¿Ejecutables y scripts?** Propuesto: no abrirlos nunca desde Silex y ofrecer «Mostrar en la carpeta». La otra opción es pedir confirmación.
+## Decisiones del propietario (2026-10-19)
+1. Los adjuntos se guardan dentro de SQLite (alternativa 1), con un límite de 20 MB por archivo.
+2. Vista previa de imágenes PNG y JPEG, en H7.2, sin crates nuevos.
+3. Se acepta `rfd` para el diálogo de archivos (H7.3), con la comprobación de los paquetes de Linux.
+4. Los adjuntos sin usar nunca se borran solos: solo con «Liberar espacio» y confirmación (H7.4).
+5. Silex no abre ejecutables ni scripts: ofrece «Mostrar en la carpeta».

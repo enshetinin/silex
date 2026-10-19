@@ -46,6 +46,7 @@ fn new_block_like(source: &Block, kind: BlockKind, id: String, content: String) 
         checked: false,
         position: 0,
         indent: source.indent,
+        attachment: None,
     }
 }
 
@@ -65,6 +66,10 @@ pub fn enter(
     new_id: impl FnOnce() -> String,
 ) -> Option<Caret> {
     let block = blocks.get(index)?;
+    // A file block has no text to split (ADR 0007).
+    if !block.kind.is_text() {
+        return None;
+    }
     let leaves_list = matches!(
         block.kind,
         BlockKind::Bulleted | BlockKind::Numbered | BlockKind::Todo | BlockKind::Quote
@@ -108,8 +113,13 @@ pub fn enter(
 /// Step by step, like Notion: a styled block first becomes plain text, an
 /// indented block is then outdented, and only a plain top-level block is
 /// merged into the previous one. Returns `None` when nothing happens.
+/// Text never merges with a file block (ADR 0007): those are deleted as
+/// blocks (selection or their menu).
 pub fn backspace_at_start(blocks: &mut Vec<Block>, index: usize) -> Option<Caret> {
     let block = blocks.get_mut(index)?;
+    if !block.kind.is_text() {
+        return None;
+    }
     if block.kind != BlockKind::Paragraph {
         block.kind = BlockKind::Paragraph;
         block.checked = false;
@@ -125,7 +135,7 @@ pub fn backspace_at_start(blocks: &mut Vec<Block>, index: usize) -> Option<Caret
             char: 0,
         });
     }
-    if index == 0 {
+    if index == 0 || !blocks[index - 1].kind.is_text() {
         return None;
     }
     let removed = blocks.remove(index);
@@ -140,7 +150,8 @@ pub fn backspace_at_start(blocks: &mut Vec<Block>, index: usize) -> Option<Caret
 
 /// Delete at the very end of block `index`: pulls the next block's text in.
 pub fn delete_at_end(blocks: &mut Vec<Block>, index: usize) -> Option<Caret> {
-    if index + 1 >= blocks.len() {
+    let mergeable = |i: usize| blocks.get(i).is_some_and(|b| b.kind.is_text());
+    if !mergeable(index) || !mergeable(index + 1) {
         return None;
     }
     let next = blocks.remove(index + 1);
@@ -226,6 +237,8 @@ fn aliases(kind: BlockKind) -> &'static [&'static str] {
         BlockKind::Numbered => &["numerada", "ol", "1.", "numero"],
         BlockKind::Quote => &["cita", "quote", ">"],
         BlockKind::Code => &["codigo", "code", "```"],
+        // Not offered: a file block is made by attaching a file.
+        BlockKind::File => &[],
     }
 }
 
@@ -250,6 +263,9 @@ pub fn apply_slash(
     kind: BlockKind,
 ) -> Option<Caret> {
     let block = blocks.get_mut(index)?;
+    if !block.kind.is_text() || !kind.is_text() {
+        return None;
+    }
     let cut = byte_index(&block.content, cursor);
     block.content.replace_range(..cut, "");
     block.kind = kind;

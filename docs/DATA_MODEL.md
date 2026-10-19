@@ -45,8 +45,19 @@
 - `src/property.rs` (sin SQL ni egui) define los tipos y cómo el texto escrito en una celda se convierte en valor: números con coma o punto decimal, sin separador de miles ni exponentes, siempre finitos; fechas reales entre 0001 y 9999 en `AAAA-MM-DD` o `D/M/AAAA`, guardadas como `AAAA-MM-DD`.
 - Probado: v4→v5 y v1→v5 conservando todo, un fallo a mitad (con `pages.kind` ya añadida) que deja la v4 intacta, y una copia v4 restaurada y actualizada.
 
+## Versión 6 — adjuntos (`0006_attachments.sql`, ADR 0007)
+- `attachments (id, name, mime, size, width, height, created_at, data)`: el archivo como BLOB, como mucho 20 MB (`CHECK (size BETWEEN 0 AND 20971520)` y `CHECK (length(data) = size)`). `data` es la última columna y solo se lee por id (`attachment_data`); `attachment` y `page_attachments` leen los metadatos.
+- `blocks` se reconstruye como en la 0003, conservando los `rowid` y con `rebuild` de `block_search`. Cambia en dos cosas:
+  - el tipo `file` en el `CHECK` de `kind`;
+  - `attachment_id TEXT REFERENCES attachments(id) ON DELETE RESTRICT`, con `CHECK ((kind = 'file') = (attachment_id IS NOT NULL))` e índice parcial `blocks_attachment_idx`.
+- El `content` de un bloque `file` es el nombre que se ve, así que la búsqueda lo encuentra sin tocar FTS5.
+- `save_document` compara y escribe `attachment_id`. Rechaza un bloque `file` sin archivo, uno de texto con archivo y un archivo que no existe (clave foránea), sin cambiar nada de la página. `add_block` y `create_page_with_blocks` no crean bloques `file`.
+- **Borrar un bloque no borra su adjunto:** deshacer puede devolverlo, y la papelera conserva los de sus páginas. Un adjunto en uso no se puede borrar (`RESTRICT`).
+- `src/attachment.rs` (sin SQL ni egui) decide el tipo por la firma del contenido y lee las dimensiones de PNG, JPEG y GIF de su cabecera, sin decodificar. También limpia los nombres y reconoce programas y scripts (por extensión, también con puntos finales, o por contenido).
+- Probado: v5→v6 y v1→v6 conservando los `rowid`, un fallo a mitad (con `blocks` ya reconstruida) que deja la v5 intacta, una copia v5 restaurada y actualizada, y las copias de seguridad con adjuntos.
+
 ## Evolución
-- Las migraciones publicadas (`0001`, `0002`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
+- Las migraciones publicadas (`0001`…`0006`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).
 - Antes de actualizar una base existente en disco se crea una copia verificada con el esquema antiguo. Si esa copia falla, no se migra.
 - Las copias de esquemas anteriores son válidas: la verificación acepta `1..=LATEST` y la restauración actualiza la base después de restaurar.

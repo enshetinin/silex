@@ -1262,3 +1262,106 @@ fn database_date_picker() -> anyhow::Result<()> {
         |harness| open_cell(harness, "Terminado, Rayuela: 2026-09-14"),
     )
 }
+
+// ---- H7.1: attachments ----
+
+/// A page with a paragraph, a PDF, an image and a script attached.
+fn attachments_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::attachment::NewAttachment;
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let page = db.create_page("Viaje a Lisboa", None)?;
+    let mut blocks = vec![Block {
+        id: "intro".into(),
+        page_id: page.clone(),
+        kind: BlockKind::Paragraph,
+        content: "Billetes y reservas del viaje.".into(),
+        checked: false,
+        position: 0,
+        indent: 0,
+        attachment: None,
+    }];
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend(1200u32.to_be_bytes());
+    png.extend(800u32.to_be_bytes());
+    png.resize(245_000, 0);
+    let files = [
+        ("billetes de avión.pdf", {
+            let mut pdf = b"%PDF-1.7".to_vec();
+            pdf.resize(2_516_582, b' ');
+            pdf
+        }),
+        ("mapa del centro.png", png),
+        ("instalar.sh", b"#!/bin/sh\necho hola".to_vec()),
+    ];
+    for (name, data) in files {
+        let attachment = db.add_attachment(&NewAttachment::from_bytes(name, data)?)?;
+        blocks.push(Block {
+            id: format!("file-{name}"),
+            page_id: page.clone(),
+            kind: BlockKind::File,
+            content: attachment.name.clone(),
+            checked: false,
+            position: 0,
+            indent: 0,
+            attachment: Some(attachment.id),
+        });
+    }
+    db.save_document(&page, "Viaje a Lisboa", &blocks)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+#[test]
+fn file_blocks_have_names() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(attachments_app()?);
+    assert_accessible(&harness, "file blocks");
+    for label in [
+        "Archivo «billetes de avión.pdf», 2,4 MB",
+        "Abrir «billetes de avión.pdf»",
+        "Guardar una copia de «mapa del centro.png»",
+        "Mostrar «instalar.sh» en la carpeta",
+    ] {
+        assert!(harness.query_by_label(label).is_some(), "{label}");
+    }
+    assert!(harness.query_by_label("Abrir «instalar.sh»").is_none());
+    // The block menu of a file: no «Convertir en».
+    harness
+        .get_by_label("Archivo «billetes de avión.pdf», 2,4 MB")
+        .hover();
+    harness.run();
+    click_button(&mut harness, "Acciones del bloque");
+    assert_accessible(&harness, "file block menu");
+    assert!(menu_item(&harness, "Convertir en").is_none());
+    assert!(menu_item(&harness, "Guardar una copia").is_some());
+    Ok(())
+}
+
+#[test]
+fn file_blocks() -> anyhow::Result<()> {
+    file_blocks_snapshot("file_blocks_light", eframe::egui::Theme::Light)
+}
+
+#[test]
+fn file_blocks_dark() -> anyhow::Result<()> {
+    file_blocks_snapshot("file_blocks_dark", eframe::egui::Theme::Dark)
+}
+
+fn file_blocks_snapshot(name: &str, theme: eframe::egui::Theme) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            attachments_app()?,
+        );
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}

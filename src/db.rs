@@ -10,6 +10,7 @@ use directories::ProjectDirs;
 use rusqlite::{Connection, MAIN_DB, OptionalExtension, params, types::Value};
 use uuid::Uuid;
 
+use crate::attachment::{Attachment, MAX_SIZE, NewAttachment};
 use crate::model::{
     Block, BlockKind, DatabaseView, MAX_INDENT, NewBlock, Page, PageKind, TrashItem, ViewKind,
 };
@@ -27,6 +28,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (3, include_str!("db/migrations/0003_block_kinds.sql")),
     (4, include_str!("db/migrations/0004_settings.sql")),
     (5, include_str!("db/migrations/0005_databases.sql")),
+    (6, include_str!("db/migrations/0006_attachments.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -933,6 +935,10 @@ impl Database {
         parent_id: Option<&str>,
         blocks: &[NewBlock],
     ) -> Result<String> {
+        ensure!(
+            blocks.iter().all(|b| b.kind.is_text()),
+            "Una página nueva no puede crearse con archivos adjuntos"
+        );
         let tx = self.conn.transaction()?;
         let page_id = Uuid::new_v4().to_string();
         tx.execute(
@@ -974,7 +980,7 @@ impl Database {
 
     pub fn list_blocks(&self, page_id: &str) -> Result<Vec<Block>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, page_id, kind, content, checked, position, indent
+            "SELECT id, page_id, kind, content, checked, position, indent, attachment_id
              FROM blocks WHERE page_id = ?1 ORDER BY position, rowid",
         )?;
         let rows = stmt.query_map([page_id], read_block)?;
@@ -982,6 +988,7 @@ impl Database {
     }
 
     pub fn add_block(&self, page_id: &str, kind: BlockKind) -> Result<String> {
+        ensure!(kind.is_text(), "Un archivo se añade con su adjunto");
         let id = Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO blocks (id, page_id, kind, position)
@@ -1013,6 +1020,11 @@ impl Database {
                 "Sangría no válida en el bloque {}",
                 block.id
             );
+            ensure!(
+                (block.kind == BlockKind::File) == block.attachment.is_some(),
+                "El bloque {} no encaja con su adjunto",
+                block.id
+            );
         }
 
         let tx = self.conn.transaction()?;
@@ -1026,7 +1038,7 @@ impl Database {
         }
         let stored: HashMap<String, Block> = {
             let mut stmt = tx.prepare(
-                "SELECT id, page_id, kind, content, checked, position, indent
+                "SELECT id, page_id, kind, content, checked, position, indent, attachment_id
                  FROM blocks WHERE page_id = ?1",
             )?;
             let rows = stmt.query_map([page_id], read_block)?;
@@ -1045,11 +1057,13 @@ impl Database {
                         && old.content == block.content
                         && old.checked == block.checked
                         && old.indent == block.indent
+                        && old.attachment == block.attachment
                         && old.position == position => {}
                 Some(_) => {
                     tx.execute(
                         "UPDATE blocks SET kind = ?2, content = ?3, checked = ?4, position = ?5,
-                             indent = ?6, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                             indent = ?6, attachment_id = ?7,
+                             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                          WHERE id = ?1",
                         params![
                             block.id,
@@ -1057,15 +1071,18 @@ impl Database {
                             block.content,
                             block.checked,
                             position,
-                            block.indent
+                            block.indent,
+                            block.attachment
                         ],
-                    )?;
+                    )
+                    .with_context(|| format!("No se pudo guardar el bloque {}", block.id))?;
                 }
                 // An id that exists in another page fails on the primary key.
                 None => {
                     tx.execute(
-                        "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent,
+                                             attachment_id)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         params![
                             block.id,
                             page_id,
@@ -1073,7 +1090,8 @@ impl Database {
                             block.content,
                             block.checked,
                             position,
-                            block.indent
+                            block.indent,
+                            block.attachment
                         ],
                     )
                     .with_context(|| format!("No se pudo guardar el bloque {}", block.id))?;
@@ -1082,6 +1100,75 @@ impl Database {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Stores a file (ADR 0007) and returns it as listed. Nothing uses it
+    /// until a block points at it (`save_document`). Called from the
+    /// attach worker's own connection: 20 MB take ~0,1 s.
+    pub fn add_attachment(&mut self, file: &NewAttachment) -> Result<Attachment> {
+        let size = file.data.len() as u64;
+        ensure!(
+            size <= MAX_SIZE,
+            "El archivo supera el límite de {}",
+            crate::attachment::format_size(MAX_SIZE)
+        );
+        let id = Uuid::new_v4().to_string();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO attachments (id, name, mime, size, width, height, data)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id,
+                file.name,
+                file.mime,
+                size as i64,
+                file.width,
+                file.height,
+                file.data
+            ],
+        )?;
+        tx.commit()?;
+        Ok(Attachment {
+            id,
+            name: file.name.clone(),
+            mime: file.mime.clone(),
+            size,
+            width: file.width,
+            height: file.height,
+        })
+    }
+
+    /// An attachment's details, without its data.
+    pub fn attachment(&self, id: &str) -> Result<Option<Attachment>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, mime, size, width, height FROM attachments WHERE id = ?1",
+                [id],
+                read_attachment,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// The attachments used by a page's blocks, without their data.
+    pub fn page_attachments(&self, page_id: &str) -> Result<Vec<Attachment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT a.id, a.name, a.mime, a.size, a.width, a.height
+             FROM blocks b JOIN attachments a ON a.id = b.attachment_id
+             WHERE b.page_id = ?1",
+        )?;
+        let rows = stmt.query_map([page_id], read_attachment)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The content of an attachment (to open, export or preview it).
+    pub fn attachment_data(&self, id: &str) -> Result<Vec<u8>> {
+        self.conn
+            .query_row("SELECT data FROM attachments WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .context("El archivo adjunto ya no existe")
     }
 
     /// Sends a page and all its live subpages to the trash as one branch.
@@ -1452,7 +1539,20 @@ fn read_page(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Page> {
     })
 }
 
-/// Maps a `blocks` row (id, page_id, kind, content, checked, position, indent).
+/// Maps an `attachments` row (id, name, mime, size, width, height).
+fn read_attachment(r: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
+    Ok(Attachment {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        mime: r.get(2)?,
+        size: r.get::<_, i64>(3)?.try_into().unwrap_or_default(),
+        width: r.get(4)?,
+        height: r.get(5)?,
+    })
+}
+
+/// Maps a `blocks` row (id, page_id, kind, content, checked, position,
+/// indent, attachment_id).
 /// An unknown kind is a conversion error, not a panic.
 fn read_block(r: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
     let kind: String = r.get(2)?;
@@ -1471,5 +1571,6 @@ fn read_block(r: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
         checked: r.get(4)?,
         position: r.get(5)?,
         indent: r.get(6)?,
+        attachment: r.get(7)?,
     })
 }

@@ -110,6 +110,7 @@ mod writing {
             checked: false,
             position: 0,
             indent: 0,
+            attachment: None,
         }]
     }
 
@@ -141,4 +142,35 @@ mod writing {
         assert_eq!(names(&tmp.0)?, ["a.md"]);
         Ok(())
     }
+}
+
+// ---- Attachment names (ADR 0007) ----
+
+#[test]
+fn attachment_names_are_safe_and_unique() -> anyhow::Result<()> {
+    use silex_desktop::safe_path::unique_attachment_name;
+    let mut taken = HashSet::new();
+    let mut name = |raw: &str| unique_attachment_name(raw, &mut taken);
+    assert_eq!(name("informe.pdf"), "informe.pdf");
+    assert_eq!(name("INFORME.pdf"), "INFORME (2).pdf");
+    assert_eq!(name("../../etc/passwd"), "___.._etc_passwd");
+    assert_eq!(name("CON.txt"), "_CON.txt");
+    assert_eq!(name("a:b*c?.png"), "a_b_c_.png");
+    assert_eq!(name("sin extensión"), "sin extensión");
+    assert_eq!(name("sin extensión"), "sin extensión (2)");
+    // An odd «extension» is part of the name, not kept as one.
+    assert_eq!(name("datos.tar gz"), "datos.tar gz");
+    assert_eq!(name(".bashrc"), "_bashrc");
+    assert_eq!(name("final."), "final");
+    assert_eq!(name(""), "Sin título");
+    let long = name(&format!("{}.pdf", "ñ".repeat(300)));
+    assert!(long.ends_with(".pdf") && long.len() < 200, "{long}");
+    // Every result is a single plain name inside its folder.
+    let root = Path::new("/tmp/silex");
+    for raw in ["../x.pdf", "/abs/y.png", "C:\\z.doc", "con", "nul.tar.gz"] {
+        let mut taken = HashSet::new();
+        let safe = unique_attachment_name(raw, &mut taken);
+        join_inside(root, &[&safe])?;
+    }
+    Ok(())
 }

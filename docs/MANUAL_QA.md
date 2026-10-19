@@ -152,3 +152,16 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - Con el teclado: flechas hasta la celda, Intro abre el calendario, Tab recorre los días, Intro elige.
 - Lo mismo en la página de una fila (propiedades bajo el título).
 - Pasada la medianoche (hora local), comprueba si «Hoy» marca el día correcto (usa UTC: en España, hasta la 1 o las 2 puede marcar el anterior).
+
+## 17. Adjuntos (H7.1)
+- Arrastra un PDF y una imagen a una página: aparece «Añadiendo…» y después una tarjeta por archivo, tras el bloque en el que estabas, con su icono, nombre y tamaño.
+- Pulsa Cmd+Z: desaparecen; Cmd+Mayús+Z: vuelven.
+- «Abrir»: se abre con la aplicación del sistema (Vista Previa, el visor de PDF…). Cambia la copia abierta y vuelve a abrirla desde Silex: tiene el contenido original (lo dice la ayuda del botón).
+- «Guardar una copia»: aparece en Documentos/Silex/Exportaciones; repítelo y sale «nombre (2)», sin pisar la primera.
+- Arrastra un script (`.sh`, `.command`, `.exe` en Windows): la tarjeta dice «Mostrar en la carpeta» y abre la carpeta, nunca el script.
+- Arrastra un archivo de más de 20 MB y una carpeta: el aviso explica por qué no se adjuntaron.
+- Con el teclado: ↓ desde el texto llega a la tarjeta (con el anillo de foco), Intro la abre, Retroceso la borra y Cmd+Z la devuelve. Retroceso al principio del párrafo de debajo no mezcla nada.
+- Busca (Cmd+K) una palabra del nombre del archivo: aparece la página.
+- Envía la página a la papelera y restáurala: los archivos siguen ahí. Haz una copia de seguridad, restáurala y abre un archivo.
+- «…» → «Exportar a Markdown»: junto al `.md` aparece `Título (adjuntos)/` con los archivos, y el `.md` los enlaza (ábrelo en un visor de Markdown: la imagen se ve y el PDF se abre).
+- Suelta un `.md` y un PDF a la vez: se importa la página y el PDF se adjunta a la que estaba abierta; el aviso cuenta las dos cosas.

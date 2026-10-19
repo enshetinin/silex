@@ -45,9 +45,14 @@ pub enum BlockKind {
     Numbered,
     Quote,
     Code,
+    /// An attachment (ADR 0007): its content is the name shown, and its
+    /// file is `Block::attachment`. Created only by attaching a file, never
+    /// by converting a text block, so it is not in [`BlockKind::ALL`].
+    File,
 }
 
 impl BlockKind {
+    /// The kinds a text block can take: the `/` menu and «Convertir en».
     pub const ALL: [BlockKind; 9] = [
         BlockKind::Paragraph,
         BlockKind::Heading1,
@@ -60,7 +65,7 @@ impl BlockKind {
         BlockKind::Code,
     ];
 
-    /// Name stored in SQLite (must match the CHECK in migration 0003).
+    /// Name stored in SQLite (must match the CHECK in migration 0006).
     pub fn as_str(self) -> &'static str {
         match self {
             BlockKind::Paragraph => "paragraph",
@@ -72,11 +77,20 @@ impl BlockKind {
             BlockKind::Numbered => "numbered",
             BlockKind::Quote => "quote",
             BlockKind::Code => "code",
+            BlockKind::File => "file",
         }
     }
 
     pub fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|k| k.as_str() == name)
+        Self::ALL
+            .into_iter()
+            .chain([BlockKind::File])
+            .find(|k| k.as_str() == name)
+    }
+
+    /// Whether the block is edited as text (every kind but a file).
+    pub fn is_text(self) -> bool {
+        self != BlockKind::File
     }
 
     /// Name shown in the UI.
@@ -91,6 +105,7 @@ impl BlockKind {
             BlockKind::Numbered => "Lista numerada",
             BlockKind::Quote => "Cita",
             BlockKind::Code => "Código",
+            BlockKind::File => "Archivo",
         }
     }
 
@@ -148,6 +163,9 @@ pub struct Block {
     pub position: i64,
     /// Nesting level, 0..=MAX_INDENT (flat list with indent, ADR 0003).
     pub indent: u8,
+    /// The attachment of a [`BlockKind::File`] block (ADR 0007); `None`
+    /// for every other kind.
+    pub attachment: Option<String>,
 }
 
 impl Block {

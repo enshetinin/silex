@@ -74,6 +74,10 @@ pub(super) enum BlockAction {
     MoveDown,
     Duplicate,
     Delete,
+    /// A file block (ADR 0007): open it, save a copy, show its folder.
+    OpenFile,
+    SaveFile,
+    RevealFile,
 }
 
 /// What a block reported while being drawn.
@@ -197,17 +201,20 @@ pub(super) fn kind_icon(kind: BlockKind) -> &'static str {
         BlockKind::Numbered => icons::LIST_NUMBERS,
         BlockKind::Quote => icons::QUOTE,
         BlockKind::Code => icons::CODE,
+        BlockKind::File => icons::PAPERCLIP,
     }
 }
 
 /// How a block is drawn this frame.
-pub(super) struct BlockView {
+pub(super) struct BlockView<'a> {
     pub(super) number: Option<usize>,
     pub(super) scroll_into_view: bool,
     pub(super) selected: bool,
     /// Show the handle (pointer over the row, or its menu open).
     pub(super) show_handle: bool,
     pub(super) focused: bool,
+    /// A file block's attachment (name, type, size), if known.
+    pub(super) attachment: Option<&'a silex_desktop::attachment::Attachment>,
 }
 
 /// One block, borderless: a hover handle in the left gutter (type and
@@ -217,7 +224,7 @@ pub(super) fn block_field(
     ui: &mut egui::Ui,
     generation: u64,
     block: &mut Block,
-    view: &BlockView,
+    view: &BlockView<'_>,
 ) -> BlockOutput {
     let p = theme::current(ui.ctx());
     let id = field_id(generation, "block", &block.id);
@@ -242,6 +249,22 @@ pub(super) fn block_field(
                 None
             };
             ui.add_space(f32::from(block.indent) * INDENT_WIDTH);
+            // A file block is a card, not text (ADR 0007). It keeps the
+            // block's focus id, so the arrow keys reach it.
+            if block.kind == BlockKind::File {
+                let (card, file_action) = file_card(ui, id, block, view.attachment);
+                if view.scroll_into_view {
+                    card.scroll_to_me(None);
+                }
+                let caret = card.has_focus().then(|| CaretInfo {
+                    block_id: block.id.clone(),
+                    char: 0,
+                    selection: false,
+                    first_row: true,
+                    last_row: true,
+                });
+                return (false, false, action.or(file_action), caret);
+            }
             // Height of the first line of body text (text margin included):
             // markers center on it, and it is the minimum height of a block
             // (the theme's 28 px interact height made every block too tall).
@@ -401,22 +424,40 @@ fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<
     egui::Popup::menu(&handle)
         .id(handle_menu_id(&block.id))
         .show(|ui| {
-            ui.menu_button((icons::icon(icons::TEXT), " Convertir en"), |ui| {
-                for kind in BlockKind::ALL {
-                    let current = kind == block.kind;
-                    if ui
-                        .selectable_label(
-                            current,
-                            (icons::icon(kind_icon(kind)), format!(" {}", kind.label())),
-                        )
-                        .clicked()
-                    {
-                        action = Some(BlockAction::Convert(kind));
+            if block.kind.is_text() {
+                ui.menu_button((icons::icon(icons::TEXT), " Convertir en"), |ui| {
+                    for kind in BlockKind::ALL {
+                        let current = kind == block.kind;
+                        if ui
+                            .selectable_label(
+                                current,
+                                (icons::icon(kind_icon(kind)), format!(" {}", kind.label())),
+                            )
+                            .clicked()
+                        {
+                            action = Some(BlockAction::Convert(kind));
+                            ui.close();
+                        }
+                    }
+                });
+                ui.separator();
+            } else {
+                for (icon, label, chosen) in [
+                    (icons::OPEN_EXTERNAL, " Abrir", BlockAction::OpenFile),
+                    (icons::DOWNLOAD, " Guardar una copia", BlockAction::SaveFile),
+                    (
+                        icons::FOLDER_OPEN,
+                        " Mostrar en la carpeta",
+                        BlockAction::RevealFile,
+                    ),
+                ] {
+                    if ui.button((icons::icon(icon), label)).clicked() {
+                        action = Some(chosen);
                         ui.close();
                     }
                 }
-            });
-            ui.separator();
+                ui.separator();
+            }
             for (icon, label, chosen) in [
                 (icons::ARROW_UP, " Mover arriba", BlockAction::MoveUp),
                 (icons::ARROW_DOWN, " Mover abajo", BlockAction::MoveDown),
@@ -601,8 +642,8 @@ impl SilexApp {
         }
         let code = block.kind == BlockKind::Code;
         // Several lines pasted into a (non-code) block become several blocks.
-        // A single line is left to the text field.
-        if !code {
+        // A single line is left to the text field. A file block takes no text.
+        if !code && block.kind.is_text() {
             let mut pasted = None;
             take_event(ctx, |event| match event {
                 egui::Event::Paste(text) if text.contains(['\n', '\r']) => {
@@ -618,7 +659,8 @@ impl SilexApp {
             }
         }
         let at_start = caret.char == 0;
-        let at_end = caret.char >= editor::block_char_len(block);
+        // A file block has no text: Delete is at its end.
+        let at_end = !block.kind.is_text() || caret.char >= editor::block_char_len(block);
         use egui::{Key, Modifiers as M};
         // The slash menu, when open, owns ↑ ↓ Enter and Escape.
         if let Some(menu) = self.slash.as_mut().filter(|m| m.block_id == block.id) {
@@ -664,6 +706,11 @@ impl SilexApp {
         ];
         for (command, key, modifiers, applies) in candidates {
             if applies && take_exact_key(ctx, key, modifiers) {
+                if !block.kind.is_text() {
+                    // A file card is not a text field: egui would also move
+                    // the focus to the nearest widget on its own.
+                    ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+                }
                 self.pending_key = Some((command, block.id.clone()));
                 return;
             }
@@ -703,6 +750,23 @@ impl SilexApp {
             return;
         };
         let field = self.block_field_id(&block_id);
+        // On a file block, Intro opens it and Backspace/Delete delete it
+        // (Cmd+Z brings it back); the other keys work as on text.
+        if !self.blocks[index].kind.is_text() {
+            match command {
+                EditorKey::Enter => {
+                    self.block_action(BlockAction::OpenFile, &block_id);
+                    return;
+                }
+                EditorKey::Backspace | EditorKey::Delete => {
+                    ctx.memory_mut(|m| m.surrender_focus(field));
+                    self.caret = None;
+                    self.delete_selection(index, index);
+                    return;
+                }
+                _ => {}
+            }
+        }
         let cursor = egui::text_edit::TextEditState::load(ctx, field)
             .and_then(|s| s.cursor.char_range())
             .map_or(0, |r| r.primary.index.0);
@@ -945,6 +1009,14 @@ impl SilexApp {
             return;
         };
         let changed = match action {
+            BlockAction::OpenFile | BlockAction::SaveFile | BlockAction::RevealFile => {
+                self.files.pending.push((action, id.to_owned()));
+                return;
+            }
+            // A file is not converted, and text does not become a file.
+            BlockAction::Convert(kind) if !kind.is_text() || !self.blocks[index].kind.is_text() => {
+                false
+            }
             BlockAction::Convert(kind) => {
                 let block = &mut self.blocks[index];
                 let changed = block.kind != kind;
@@ -1094,6 +1166,10 @@ impl SilexApp {
                                     == Some(block.id.as_str())
                                     || egui::Popup::is_id_open(&ctx, handle_menu_id(&block.id)),
                                 focused: focused == Some(field),
+                                attachment: block
+                                    .attachment
+                                    .as_ref()
+                                    .and_then(|a| self.files.attachments.get(a)),
                             };
                             if index > 0 {
                                 ui.add_space(heading_space(block.kind));
@@ -1131,6 +1207,20 @@ impl SilexApp {
                         if let Some((kind, id)) = clicked_kind {
                             self.pending_key = Some((EditorKey::Slash(kind), id));
                         }
+                        // Files being stored by the attach worker (ADR 0007).
+                        if self.files.adding > 0 {
+                            ui.add_space(theme::space::SM);
+                            ui.horizontal(|ui| {
+                                gutter_space(ui);
+                                let text = match self.files.adding {
+                                    1 => "Añadiendo 1 archivo…".to_owned(),
+                                    n => format!("Añadiendo {n} archivos…"),
+                                };
+                                ui.label(egui::RichText::new(text).color(p.text_muted));
+                            });
+                            ui.ctx()
+                                .request_repaint_after(std::time::Duration::from_millis(250));
+                        }
 
                         ui.add_space(theme::space::SM);
                         ui.horizontal(|ui| {
@@ -1158,6 +1248,7 @@ impl SilexApp {
                                     checked: false,
                                     position: 0,
                                     indent: 0,
+                                    attachment: None,
                                 };
                                 self.pending_focus = Some((block.id.clone(), 0));
                                 self.blocks.push(block);

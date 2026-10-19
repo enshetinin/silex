@@ -17,6 +17,7 @@ fn block(id: &str) -> Block {
         checked: false,
         position: 0,
         indent: 0,
+        attachment: None,
     }
 }
 
@@ -49,6 +50,7 @@ fn frame(
                     selected: false,
                     show_handle: false,
                     focused: false,
+                    attachment: None,
                 },
             )
             .text_changed;
@@ -1360,13 +1362,27 @@ fn dropping_markdown_files_imports_them_as_pages() -> anyhow::Result<()> {
         notice.contains("vieja.md") && notice.contains("UTF-8"),
         "{notice}"
     );
-    assert!(notice.contains("1 ignorado"), "{notice}");
+    assert!(notice.contains("Se adjuntó 1 archivo."), "{notice}");
+    // The other file was attached to the page open when it was dropped.
+    let first = app
+        .pages
+        .iter()
+        .find(|p| p.title == "Mi primera página")
+        .map(|p| p.id.clone())
+        .expect("first page");
+    let attached = app.db.list_blocks(&first)?;
+    assert!(
+        attached
+            .iter()
+            .any(|b| b.kind == BlockKind::File && b.content == "foto.png"),
+        "{attached:?}"
+    );
 
-    // Only non-Markdown files: nothing to import, just the message.
+    // Only non-Markdown files: nothing to import, attached to this page.
     drop_frame(&mut app, &ctx, &[other]);
     assert!(app.import_job.is_none());
-    let notice = app.notice.clone().unwrap_or_default();
-    assert!(notice.contains("1 ignorado"), "{notice}");
+    assert_eq!(app.notice.as_deref(), Some("Se adjuntó 1 archivo."));
+    assert_eq!(app.blocks.last().map(|b| b.kind), Some(BlockKind::File));
     Ok(())
 }
 
@@ -1483,6 +1499,7 @@ fn sidebar_width_is_stable_across_frames() -> anyhow::Result<()> {
                 checked: false,
                 position: 0,
                 indent: 0,
+                attachment: None,
             });
             egui::Popup::open_id(&ctx, super::blocks::handle_menu_id("b"));
         }
@@ -2709,5 +2726,204 @@ fn a_duplicated_board_is_a_board() -> anyhow::Result<()> {
     assert_eq!(copy.kind, ViewKind::Board);
     assert_eq!(copy.name, "Tablero (copia)");
     assert_eq!(copy.config.group_by.as_deref(), Some(estado.as_str()));
+    Ok(())
+}
+
+// ---- H7.1: attachments (ADR 0007) ----
+
+thread_local! {
+    /// What the app asked to open in this test thread.
+    static OPENED: std::cell::RefCell<Vec<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn record_open(path: &std::path::Path) -> anyhow::Result<()> {
+    OPENED.with(|o| o.borrow_mut().push(path.to_path_buf()));
+    Ok(())
+}
+
+fn opened() -> Vec<std::path::PathBuf> {
+    OPENED.with(|o| o.borrow().clone())
+}
+
+/// An app on a page with one paragraph («Antes»), its file folders in
+/// `tmp`, and `files` (name, content) dropped on it.
+fn file_app(
+    tmp: &TempFolder,
+    files: &[(&str, &[u8])],
+) -> anyhow::Result<(SilexApp, egui::Context)> {
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    app.files.folders = Some(silex_desktop::attach_job::Folders {
+        opened: tmp.0.join("abiertos"),
+        saved: tmp.0.join("Exportaciones"),
+    });
+    app.files.opener = Some(record_open);
+    let page = app.selected.clone().expect("a page");
+    app.blocks = vec![Block {
+        content: "Antes".into(),
+        page_id: page,
+        ..block("antes")
+    }];
+    app.mark_dirty();
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![]);
+    let mut paths = Vec::new();
+    for (name, content) in files {
+        let path = tmp.0.join(name);
+        std::fs::write(&path, content)?;
+        paths.push(path);
+    }
+    drop_frame(&mut app, &ctx, &paths);
+    // The new block takes the focus over two frames.
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx))
+}
+
+fn file_block(app: &SilexApp) -> Block {
+    app.blocks
+        .iter()
+        .find(|b| b.kind == BlockKind::File)
+        .cloned()
+        .expect("a file block")
+}
+
+#[test]
+fn a_dropped_file_is_a_block_that_opens_saves_and_undoes() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[("informe.pdf", b"%PDF-1.7")])?;
+    assert_eq!(app.notice.as_deref(), Some("Se adjuntó 1 archivo."));
+    assert_eq!(app.files.adding, 0, "nothing left in progress");
+    let file = file_block(&app);
+    assert_eq!(app.blocks.len(), 2, "after «Antes»");
+    assert_eq!(file.content, "informe.pdf");
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t == "informe.pdf  8 B"),
+        "{painted:?}"
+    );
+    // Saved like any block.
+    app.save_now()?;
+    let page = app.selected.clone().unwrap_or_default();
+    assert_eq!(
+        app.db.list_blocks(&page)?[1],
+        Block {
+            position: 1,
+            ..file.clone()
+        }
+    );
+
+    // Intro on the card opens a copy.
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&file.id)));
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(app.caret.as_ref().is_some_and(|c| c.block_id == file.id));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let copy = opened().last().cloned().expect("opened");
+    assert_eq!(std::fs::read(&copy)?, b"%PDF-1.7");
+    assert!(copy.starts_with(tmp.0.join("abiertos")));
+    assert_eq!(app.blocks.len(), 2, "Intro did not split anything");
+
+    // «Guardar una copia» writes it to the exports folder.
+    app.block_action(BlockAction::SaveFile, &file.id);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(tmp.0.join("Exportaciones").join("informe.pdf").exists());
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Se guardó una copia: «informe.pdf».")
+    );
+
+    // Backspace on the card deletes the block; Cmd+Z brings it back.
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&file.id)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    assert_eq!(app.blocks.len(), 1);
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, undo());
+    assert_eq!(
+        app.blocks.get(1).map(|b| b.id.clone()),
+        Some(file.id.clone())
+    );
+    // A file block is not converted into text.
+    app.block_action(BlockAction::Convert(BlockKind::Heading1), &file.id);
+    assert_eq!(file_block(&app).kind, BlockKind::File);
+    Ok(())
+}
+
+#[test]
+fn programs_are_shown_in_their_folder_never_opened() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[("instalar.sh", b"#!/bin/sh\necho hola")])?;
+    let file = file_block(&app);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t.trim() == "Mostrar en la carpeta"),
+        "{painted:?}"
+    );
+    assert!(!painted.iter().any(|t| t.trim() == "Abrir"), "{painted:?}");
+    let before = opened().len();
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&file.id)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let shown = opened();
+    assert_eq!(shown.len(), before + 1);
+    let folder = shown.last().cloned().unwrap_or_default();
+    assert!(folder.is_dir(), "a folder was shown, not the script run");
+    assert!(folder.join("instalar.sh").exists());
+    Ok(())
+}
+
+#[test]
+fn arrow_keys_reach_a_file_block_like_text() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[("foto.png", b"\x89PNG\r\n\x1a\n")])?;
+    let file = file_block(&app);
+    let antes = app.blocks[0].id.clone();
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&antes)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(ctx.memory(|m| m.has_focus(app.block_field_id(&file.id))));
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(ctx.memory(|m| m.has_focus(app.block_field_id(&antes))));
+    // ↓ on the card, the last block: the focus stays (egui would move it
+    // to the nearest button).
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&file.id)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(ctx.memory(|m| m.has_focus(app.block_field_id(&file.id))));
+    assert_eq!(file_block(&app).content, "foto.png");
+    Ok(())
+}
+
+#[test]
+fn files_being_added_are_shown_until_they_arrive() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[])?;
+    app.files.adding = 2;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t == "Añadiendo 2 archivos…"),
+        "{painted:?}"
+    );
+    app.files.adding = 0;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(!painted.iter().any(|t| t.starts_with("Añadiendo")));
+    Ok(())
+}
+
+#[test]
+fn files_dropped_on_a_database_are_not_attached() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx, _) = database_app()?;
+    let path = tmp.0.join("nota.txt");
+    std::fs::write(&path, "hola")?;
+    drop_frame(&mut app, &ctx, &[path]);
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(notice.contains("no una base de datos"), "{notice}");
     Ok(())
 }

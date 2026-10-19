@@ -18,6 +18,7 @@ mod database;
 mod date_picker;
 mod dialogs;
 mod document;
+mod files;
 pub mod icons;
 mod jobs;
 mod palette;
@@ -36,7 +37,7 @@ mod view_tabs;
 
 pub use self::startup::StartupError;
 use self::{
-    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, row_page::*, search::*,
+    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, row_page::*, search::*,
     sidebar::*, table_undo::*, view_menus::*, view_tabs::*,
 };
 
@@ -86,6 +87,9 @@ pub struct SilexApp {
     save: SaveState,
     /// Errors from actions other than saving (search, create, open).
     notice: Option<String>,
+    /// Notices still to come from one drop (import and attach): the second
+    /// is joined to the first instead of hiding it.
+    notice_group: u8,
     close_dialog: bool,
     /// Set once the user may leave: everything saved or changes discarded.
     allow_close: bool,
@@ -111,10 +115,10 @@ pub struct SilexApp {
     last_export: Option<PathBuf>,
     /// Markdown files being read on a worker thread.
     import_job: Option<silex_desktop::import::ImportJob>,
-    /// Non-Markdown files dropped with the current import (reported at the end).
-    import_ignored: usize,
     /// Whole-workspace export running on a worker thread.
     export_job: Option<silex_desktop::export::WorkspaceExportJob>,
+    /// Attachments of the open page and the work on files (ADR 0007).
+    files: Files,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -180,6 +184,7 @@ impl SilexApp {
             settings: Settings::default(),
             save: SaveState::default(),
             notice: None,
+            notice_group: 0,
             close_dialog: false,
             allow_close: false,
             backup_job: None,
@@ -194,8 +199,8 @@ impl SilexApp {
             pending_paste: None,
             last_export: None,
             import_job: None,
-            import_ignored: 0,
             export_job: None,
+            files: Files::default(),
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -228,6 +233,7 @@ impl SilexApp {
             self.slash_dismissed = None;
             self.selection = None;
             self.blocks = self.db.list_blocks(&id)?;
+            self.load_attachments(&id)?;
             self.database = None;
             if page.kind == PageKind::Database {
                 self.load_database(&id)?;
@@ -539,6 +545,7 @@ impl SilexApp {
         }
         self.tick_backups(&ctx);
         self.tick_import();
+        self.tick_files(&ctx);
         self.tick_workspace_export();
         Self::drop_hint(&ctx);
         let now = Instant::now();

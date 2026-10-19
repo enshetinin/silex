@@ -10,10 +10,13 @@ use std::{
 use anyhow::{Context, Result};
 use directories::{ProjectDirs, UserDirs};
 
+use std::collections::HashMap;
+
 use crate::{
+    attachment::FileKind,
     db::Database,
-    markdown::{database_to_markdown, page_to_markdown},
-    model::{Block, PageKind, build_tree},
+    markdown::{FileLink, database_to_markdown, page_to_markdown, page_to_markdown_with_files},
+    model::{Block, BlockKind, PageKind, build_tree},
     safe_path,
 };
 
@@ -36,6 +39,101 @@ pub fn export_root() -> Result<PathBuf> {
 /// its title and never overwriting an existing file. Returns the file path.
 pub fn export_page(dir: &Path, title: &str, blocks: &[Block]) -> Result<PathBuf> {
     export_markdown(dir, title, &page_to_markdown(title, blocks))
+}
+
+/// [`export_page`] for a page that may have attachments (ADR 0007): they
+/// are written to `Title (adjuntos)/` next to `Title.md` and linked from
+/// it. The Markdown is written last; if anything fails, the folder of
+/// attachments is removed.
+pub fn export_page_with_files(
+    db: &Database,
+    dir: &Path,
+    title: &str,
+    blocks: &[Block],
+) -> Result<PathBuf> {
+    if !blocks.iter().any(|b| b.kind == BlockKind::File) {
+        return export_page(dir, title, blocks);
+    }
+    fs::create_dir_all(dir)
+        .with_context(|| format!("No se puede crear la carpeta {}", dir.display()))?;
+    let mut taken: HashSet<String> = fs::read_dir(dir)
+        .with_context(|| format!("No se puede leer la carpeta {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_lowercase())
+        .collect();
+    let stem = safe_path::unique_stem(title, "md", &mut taken);
+    let mut written = None;
+    let result = (|| -> Result<PathBuf> {
+        let files = write_attachments(db, dir, &stem, blocks, &mut taken, &mut written)?;
+        let path = safe_path::join_inside(dir, &[&format!("{stem}.md")])?;
+        write_atomic(
+            &path,
+            page_to_markdown_with_files(title, blocks, &files).as_bytes(),
+        )?;
+        Ok(path)
+    })();
+    if result.is_err()
+        && let Some(folder) = written
+    {
+        let _ = fs::remove_dir_all(folder);
+    }
+    result
+}
+
+/// Writes the attachments of `blocks` into a new folder `«stem» (adjuntos)`
+/// inside `dir` (its name reserved in `taken`) and returns their links,
+/// relative to `dir`. Nothing is written when no block is a file. `folder`
+/// is set as soon as the folder exists, so the caller can remove it.
+fn write_attachments(
+    db: &Database,
+    dir: &Path,
+    stem: &str,
+    blocks: &[Block],
+    taken: &mut HashSet<String>,
+    folder: &mut Option<PathBuf>,
+) -> Result<HashMap<String, FileLink>> {
+    let ids: Vec<&String> = {
+        let mut seen = HashSet::new();
+        blocks
+            .iter()
+            .filter_map(|b| b.attachment.as_ref())
+            .filter(|id| seen.insert(id.as_str()))
+            .collect()
+    };
+    let mut links = HashMap::new();
+    if ids.is_empty() {
+        return Ok(links);
+    }
+    let base = format!("{stem} (adjuntos)");
+    let mut name = base.clone();
+    let mut n = 2;
+    while taken.contains(&name.to_lowercase()) {
+        name = format!("{base} {n}");
+        n += 1;
+    }
+    taken.insert(name.to_lowercase());
+    let path = safe_path::join_inside(dir, &[&name])?;
+    fs::create_dir(&path).with_context(|| format!("No se puede crear {}", path.display()))?;
+    *folder = Some(path.clone());
+    let mut names = HashSet::new();
+    for id in ids {
+        let Some(attachment) = db.attachment(id)? else {
+            continue;
+        };
+        let file = safe_path::unique_attachment_name(&attachment.name, &mut names);
+        write_atomic(
+            &safe_path::join_inside(&path, &[&file])?,
+            &db.attachment_data(id)?,
+        )?;
+        links.insert(
+            id.clone(),
+            FileLink {
+                path: format!("{name}/{file}"),
+                image: attachment.kind() == FileKind::Image,
+            },
+        );
+    }
+    Ok(links)
 }
 
 /// Writes ready Markdown (a page or a database) like [`export_page`].
@@ -97,8 +195,9 @@ pub struct WorkspaceExport {
 
 /// Exports every live page (not the trash) as Markdown into a new folder
 /// `root/Silex <stamp>`: each page is `Title.md`, and a page with subpages
-/// also gets a `Title/` folder next to it holding them. Names are safe on all
-/// systems and unique per folder.
+/// also gets a `Title/` folder next to it holding them, and a page with
+/// attachments a `Title (adjuntos)/` folder (ADR 0007). Names are safe on
+/// all systems and unique per folder.
 ///
 /// Everything is written into a hidden temporary folder that is renamed into
 /// place only at the end: an error leaves no partial export behind.
@@ -134,7 +233,12 @@ pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
                         &db.database_values(id)?,
                     )
                 }
-                PageKind::Page => page_to_markdown(&row.page.title, &db.list_blocks(&row.page.id)?),
+                PageKind::Page => {
+                    let blocks = db.list_blocks(&row.page.id)?;
+                    // Inside the temporary folder: removed with it on error.
+                    let files = write_attachments(db, folder, &stem, &blocks, taken, &mut None)?;
+                    page_to_markdown_with_files(&row.page.title, &blocks, &files)
+                }
             };
             write_atomic(&file, markdown.as_bytes())?;
             if row.has_children {

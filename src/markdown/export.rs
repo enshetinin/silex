@@ -1,4 +1,6 @@
 //! Blocks → CommonMark (+ GFM task lists).
+use std::collections::HashMap;
+
 use crate::model::{Block, BlockKind, Page, list_numbers};
 use crate::property::{CellValue, Property, PropertyKind, TableValues};
 
@@ -18,6 +20,27 @@ const ESCAPED: &[char] = &[
 /// - Newlines inside a block are hard breaks (`\` at the end of the line).
 /// - Empty paragraphs cannot be represented and are skipped.
 pub fn page_to_markdown(title: &str, blocks: &[Block]) -> String {
+    page_to_markdown_with_files(title, blocks, &HashMap::new())
+}
+
+/// Where an exported attachment was written, for its link (ADR 0007).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileLink {
+    /// Relative to the page's `.md`, with `/` separators. Written between
+    /// `<…>`, so it may have spaces; it must have no `<`, `>` or newline
+    /// (names from `safe_path` have none).
+    pub path: String,
+    /// Shown as an image (`![…]`) rather than a link.
+    pub image: bool,
+}
+
+/// [`page_to_markdown`], with file blocks as links to their exported copy
+/// (by attachment id). A file block without a link is just its name.
+pub fn page_to_markdown_with_files(
+    title: &str,
+    blocks: &[Block],
+    files: &HashMap<String, FileLink>,
+) -> String {
     let mut out = String::new();
     out.push_str("# ");
     out.push_str(&escape_line(&title.replace('\n', " "), false));
@@ -72,6 +95,26 @@ pub fn page_to_markdown(title: &str, blocks: &[Block]) -> String {
                 out.push('\n');
             }
             BlockKind::Code => push_code(&mut out, &leading, &block.content),
+            BlockKind::File => {
+                let name = escape_line(&block.content.replace('\n', " "), false);
+                let link = block.attachment.as_ref().and_then(|id| files.get(id));
+                out.push_str(&leading);
+                match link {
+                    Some(link) => {
+                        let path: String = link
+                            .path
+                            .chars()
+                            .filter(|c| !matches!(c, '<' | '>' | '\n' | '\r'))
+                            .collect();
+                        if link.image {
+                            out.push('!');
+                        }
+                        out.push_str(&format!("[{name}](<{path}>)"));
+                    }
+                    None => out.push_str(&name),
+                }
+                out.push('\n');
+            }
             BlockKind::Quote => {
                 let prefix = format!("{leading}> ");
                 push_text_lines(&mut out, &prefix, &prefix, &block.content);

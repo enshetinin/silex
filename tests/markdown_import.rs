@@ -74,6 +74,7 @@ fn to_blocks(blocks: &[NewBlock]) -> Vec<silex_desktop::model::Block> {
             checked: b.checked,
             position: 0,
             indent: b.indent,
+            attachment: None,
         })
         .collect()
 }

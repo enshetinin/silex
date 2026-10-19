@@ -27,7 +27,12 @@ impl SilexApp {
                 );
                 silex_desktop::export::export_markdown(dir, &self.title, &markdown)?
             }
-            None => silex_desktop::export::export_page(dir, &self.title, &self.blocks)?,
+            None => silex_desktop::export::export_page_with_files(
+                &self.db,
+                dir,
+                &self.title,
+                &self.blocks,
+            )?,
         };
         self.last_export = Some(path);
         Ok(())
@@ -125,7 +130,9 @@ impl SilexApp {
         }
     }
 
-    /// Files dropped on the window: `.md` files are imported in the background.
+    /// Files dropped on the window: `.md` files are imported as pages, and
+    /// any other file is attached to the open page (ADR 0007). Both in the
+    /// background.
     pub(super) fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -140,19 +147,22 @@ impl SilexApp {
         let (markdown, other): (Vec<PathBuf>, Vec<PathBuf>) = dropped
             .into_iter()
             .partition(|p| silex_desktop::import::is_markdown_path(p));
+        // Both kinds: two results, shown together.
+        self.notice_group = if markdown.is_empty() || other.is_empty() {
+            0
+        } else {
+            2
+        };
+        if !other.is_empty() {
+            self.attach_dropped(ctx, other);
+        }
         if markdown.is_empty() {
-            self.notice = Some(format!(
-                "Solo se importan archivos .md ({} ignorado(s)).",
-                other.len()
-            ));
             return;
         }
         if self.import_job.is_some() {
             self.notice = Some("Ya hay una importación en curso.".into());
             return;
         }
-        // Reported together with the result, so one message does not hide the other.
-        self.import_ignored = other.len();
         let repaint = ctx.clone();
         match silex_desktop::import::ImportJob::spawn(markdown, move || repaint.request_repaint()) {
             Ok(job) => self.import_job = Some(job),
@@ -191,16 +201,21 @@ impl SilexApp {
         })();
         self.report(outcome);
         let mut message = format!("Importada(s) {} página(s).", created.len());
-        let ignored = std::mem::take(&mut self.import_ignored);
-        if ignored > 0 {
-            message.push_str(&format!(
-                " Solo se importan archivos .md ({ignored} ignorado(s))."
-            ));
-        }
         if !errors.is_empty() {
             message.push_str(&format!(" No se importaron: {}", errors.join("; ")));
         }
-        self.notice = Some(message);
+        self.post_notice(message);
+    }
+
+    /// Shows a notice; the second of a drop's two results is added to the
+    /// first (see `notice_group`).
+    pub(super) fn post_notice(&mut self, message: String) {
+        let second = self.notice_group == 1;
+        self.notice_group = self.notice_group.saturating_sub(1);
+        self.notice = Some(match (second, self.notice.take()) {
+            (true, Some(first)) => format!("{first} {message}"),
+            _ => message,
+        });
     }
 
     /// Centered hint while files are dragged over the window.
@@ -213,7 +228,10 @@ impl SilexApp {
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.heading("Suelta archivos .md para importarlos");
+                    ui.heading("Suelta los archivos aquí");
+                    ui.label(
+                        "Los .md se importan como páginas; los demás se adjuntan a esta página (hasta 20 MB cada uno).",
+                    );
                 });
             });
     }

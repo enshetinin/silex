@@ -69,6 +69,33 @@ pub fn unique_file_name(title: &str, extension: &str, taken: &mut HashSet<String
     candidate
 }
 
+/// A safe, unique file name for an attachment (ADR 0007) named `name`:
+/// its extension is kept when it is short and plain (letters and digits,
+/// up to 16), the rest goes through [`safe_stem`], and " (2)", " (3)"… make
+/// it unique among `taken` (without case). The name is added to `taken`.
+pub fn unique_attachment_name(name: &str, taken: &mut HashSet<String>) -> String {
+    let name = name.trim().trim_end_matches(['.', ' ']);
+    let split = name.rsplit_once('.').filter(|(stem, ext)| {
+        !stem.trim().is_empty()
+            && (1..=16).contains(&ext.len())
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    });
+    match split {
+        Some((stem, extension)) => unique_file_name(stem, extension, taken),
+        None => {
+            let stem = safe_stem(name);
+            let mut candidate = stem.clone();
+            let mut n = 2;
+            while taken.contains(&candidate.to_lowercase()) {
+                candidate = format!("{stem} ({n})");
+                n += 1;
+            }
+            taken.insert(candidate.to_lowercase());
+            candidate
+        }
+    }
+}
+
 /// `root/part1/part2/…`, refusing anything that is not a single plain name
 /// (no `..`, no absolute paths, no separators): the result is always inside
 /// `root`.
