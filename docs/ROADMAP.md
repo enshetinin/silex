@@ -57,5 +57,5 @@
 
 ## Hito 7 — funcionalidades opcionales
 - [ ] Historial/versionado, enlaces bidireccionales, plantillas.
-- [ ] Adjuntos locales (P1 del PRD), con un ADR propio: almacenamiento, límites de tamaño, copias de seguridad y exportación, reutilizando `safe_path` (viene del Hito 4).
+- [ ] Adjuntos locales (P1 del PRD), con un ADR propio: almacenamiento, límites de tamaño, copias de seguridad y exportación, reutilizando `safe_path` (viene del Hito 4). *(ADR 0007 propuesto el 2026-10-19: BLOB en SQLite con límite por archivo, bloque `file`, migración 0006; pendiente de las decisiones del propietario. Sin código.)*
 - [ ] Evaluar cifrado y sincronización únicamente con ADR, threat model y pruebas.
