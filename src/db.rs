@@ -458,6 +458,103 @@ impl Database {
         Ok(views)
     }
 
+    /// Adds a table view at the end of a live database's tabs, with
+    /// `config` (empty for a new view, another view's for a copy).
+    pub fn add_view(
+        &mut self,
+        database_id: &str,
+        name: &str,
+        config: &ViewConfig,
+    ) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        ensure!(
+            page_kind(&tx, database_id)? == Some(PageKind::Database),
+            "La base de datos no existe o está en la papelera"
+        );
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO db_views (id, database_id, name, kind, position, config)
+             VALUES (?1, ?2, ?3, ?4,
+                     (SELECT COALESCE(MAX(position), -1) + 1 FROM db_views WHERE database_id = ?2), ?5)",
+            params![id, database_id, name, ViewKind::Table.as_str(), config.to_json()],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn rename_view(&self, id: &str, name: &str) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE db_views SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        ensure!(affected == 1, "La vista no existe");
+        Ok(())
+    }
+
+    /// Moves a view one tab left (`Up`) or right (`Down`). Returns `false`
+    /// at the edge. The database's views are renumbered 0..n.
+    pub fn move_view(&mut self, id: &str, shift: Shift) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let database: String = tx
+            .query_row(
+                "SELECT database_id FROM db_views WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La vista no existe")?;
+        let mut tabs: Vec<String> = tx
+            .prepare("SELECT id FROM db_views WHERE database_id = ?1 ORDER BY position, id")?
+            .query_map([&database], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let index = tabs
+            .iter()
+            .position(|t| t == id)
+            .context("La vista no aparece en su base de datos")?;
+        let target = match shift {
+            Shift::Up => index.checked_sub(1),
+            Shift::Down => Some(index + 1).filter(|&i| i < tabs.len()),
+        };
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        tabs.swap(index, target);
+        for (position, tab) in tabs.iter().enumerate() {
+            tx.execute(
+                "UPDATE db_views SET position = ?2 WHERE id = ?1",
+                params![tab, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Deletes a view: only its settings (sort, filters, columns), never
+    /// rows or values. A database always keeps at least one view.
+    pub fn delete_view(&mut self, id: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let database: String = tx
+            .query_row(
+                "SELECT database_id FROM db_views WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La vista no existe")?;
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM db_views WHERE database_id = ?1",
+            [&database],
+            |r| r.get(0),
+        )?;
+        ensure!(
+            count > 1,
+            "Es la última vista de la base de datos: no se puede borrar"
+        );
+        tx.execute("DELETE FROM db_views WHERE id = ?1", [id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Stores a view's sort, filters and hidden properties.
     pub fn set_view_config(&self, view_id: &str, config: &ViewConfig) -> Result<()> {
         let affected = self.conn.execute(

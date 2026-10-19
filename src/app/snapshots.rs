@@ -928,3 +928,72 @@ fn database_filter_menu() -> anyhow::Result<()> {
         },
     )
 }
+
+// ---- H6.3b: view tabs ----
+
+#[test]
+fn view_tabs_add_rename_and_delete_views() -> anyhow::Result<()> {
+    let (app, base, _) = database_app()?;
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Nueva vista");
+    assert!(harness.query_by_label("Vista «Tabla 2»").is_some());
+    let open = |h: &Harness<'_, SilexApp>| {
+        h.state()
+            .database
+            .as_ref()
+            .and_then(|d| d.views.get(d.view).map(|v| v.name.clone()))
+    };
+    assert_eq!(open(&harness).as_deref(), Some("Tabla 2"));
+
+    // A click on the open tab opens its menu, with its name ready.
+    click_button(&mut harness, "Vista «Tabla 2»");
+    assert_accessible(&harness, "view menu");
+    assert_steady(&mut harness, "Nombre de la vista");
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    harness
+        .get_by_label("Nombre de la vista")
+        .type_text("Pendientes");
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    let names: Vec<String> = harness
+        .state()
+        .db
+        .database_views(&base)?
+        .into_iter()
+        .map(|v| v.name)
+        .collect();
+    assert_eq!(names, ["Tabla", "Pendientes"]);
+
+    // Another tab switches; the menu of the open one deletes it, asking first.
+    click_button(&mut harness, "Vista «Tabla»");
+    assert_eq!(open(&harness).as_deref(), Some("Tabla"));
+    click_button(&mut harness, "Vista «Tabla»");
+    menu_item(&harness, "Borrar la vista")
+        .expect("delete")
+        .click();
+    harness.run();
+    assert_accessible(&harness, "confirm view delete");
+    assert!(harness.query_by_label_contains("las filas no").is_some());
+    click_button(&mut harness, "Borrar");
+    assert_eq!(harness.state().db.database_views(&base)?.len(), 1);
+    assert_eq!(open(&harness).as_deref(), Some("Pendientes"));
+
+    // The last view cannot be deleted.
+    click_button(&mut harness, "Vista «Pendientes»");
+    let delete = menu_item(&harness, "Borrar la vista").expect("delete");
+    assert!(delete.accesskit_node().is_disabled());
+    Ok(())
+}
+
+#[test]
+fn database_view_menu() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_view_menu_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            click_button(harness, "Nueva vista");
+            click_button(harness, "Vista «Tabla 2»");
+        },
+    )
+}

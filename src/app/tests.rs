@@ -2256,3 +2256,96 @@ fn hidden_columns_leave_the_table_and_the_arrow_keys() -> anyhow::Result<()> {
     assert!(painted.iter().any(|t| t == "Extensión"));
     Ok(())
 }
+
+// ---- H6.3b: several views ----
+
+fn view_names(app: &SilexApp) -> Vec<String> {
+    app.database
+        .as_ref()
+        .map(|d| d.views.iter().map(|v| v.name.clone()).collect())
+        .unwrap_or_default()
+}
+
+fn open_view(app: &SilexApp) -> String {
+    app.database
+        .as_ref()
+        .and_then(|d| d.views.get(d.view).map(|v| v.name.clone()))
+        .unwrap_or_default()
+}
+
+#[test]
+fn each_view_keeps_its_own_rules() -> anyhow::Result<()> {
+    use silex_desktop::view::{Filter, FilterOp, NAME};
+    let (mut app, ctx, _, _) = table_app(&[])?;
+    let base = app.selected.clone().unwrap_or_default();
+    app.db.create_row(&base, "Pedro Páramo")?;
+    app.reload_pages()?;
+
+    app.add_view()?;
+    assert_eq!(view_names(&app), ["Tabla", "Tabla 2"]);
+    assert_eq!(open_view(&app), "Tabla 2", "a new view opens");
+    change_view(&mut app, |c| {
+        c.filters.push(Filter {
+            property: NAME.into(),
+            op: FilterOp::Contains,
+            value: "pedro".into(),
+        });
+    });
+    assert_eq!(shown_titles(&app), ["Pedro Páramo"]);
+
+    app.switch_view(0)?;
+    assert_eq!(
+        shown_titles(&app),
+        ["Rayuela", "Pedro Páramo"],
+        "the first view has no filter"
+    );
+    // The filter was saved when leaving its view.
+    assert_eq!(app.db.database_views(&base)?[1].config.filters.len(), 1);
+
+    // A copy keeps the rules of what it copies.
+    app.duplicate_view(1)?;
+    assert_eq!(view_names(&app), ["Tabla", "Tabla 2", "Tabla 2 (copia)"]);
+    assert_eq!(shown_titles(&app), ["Pedro Páramo"]);
+    app.rename_view(
+        &app.database
+            .as_ref()
+            .map(|d| d.views[2].id.clone())
+            .unwrap_or_default(),
+        "Pedro",
+    )?;
+    assert_eq!(open_view(&app), "Pedro");
+
+    // The database opens again on the view last open.
+    let notas = app.db.create_page("Notas", None)?;
+    app.reload_pages()?;
+    app.open_page(notas)?;
+    app.open_page(base.clone())?;
+    assert_eq!(open_view(&app), "Pedro");
+
+    // Deleting the open view shows the one now in its place.
+    let tabla2 = app
+        .database
+        .as_ref()
+        .map(|d| d.views[1].id.clone())
+        .unwrap_or_default();
+    app.switch_view(1)?;
+    app.delete_view(&tabla2)?;
+    assert_eq!(view_names(&app), ["Tabla", "Pedro"]);
+    assert_eq!(open_view(&app), "Pedro");
+    assert!(app.notice.take().is_some_and(|n| n.contains("Tabla 2")));
+    let pedro = app
+        .database
+        .as_ref()
+        .map(|d| d.views[1].id.clone())
+        .unwrap_or_default();
+    app.delete_view(&pedro)?;
+    let last = app
+        .database
+        .as_ref()
+        .map(|d| d.views[0].id.clone())
+        .unwrap_or_default();
+    assert!(app.delete_view(&last).is_err(), "the last view stays");
+    assert_eq!(view_names(&app), ["Tabla"]);
+    app_frame(&mut app, &ctx, vec![]);
+    Ok(())
+}

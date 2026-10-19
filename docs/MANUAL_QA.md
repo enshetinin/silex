@@ -114,3 +114,11 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - «Columnas»: desmarca «Notas» → desaparece de la tabla (y las flechas la saltan); sigue en la página de una fila. Cabecera de una propiedad → «Ocultar en esta vista» hace lo mismo. «Mostrar todas» las devuelve.
 - Cierra y vuelve a abrir la app: filtros, orden y columnas ocultas siguen ahí.
 - Los menús no cambian de tamaño ni se mueven mientras están abiertos; elegir una columna u operador no los cierra.
+
+## 13. Varias vistas (H6.3b)
+- «+» junto a «Tabla»: aparece «Tabla 2» y se abre. Ponle un filtro; vuelve a «Tabla»: no tiene ese filtro. Vuelve a «Tabla 2»: sigue ahí.
+- Clic en la pestaña abierta: menú con su nombre listo para cambiar (Intro o clic fuera lo guardan; Escape no). «Duplicar la vista» crea una copia con sus reglas. «Mover a la izquierda/derecha» cambia el orden de las pestañas.
+- Clic derecho en una pestaña que no está abierta: abre su menú sin cambiar de vista.
+- «Borrar la vista»: pide confirmación y dice que las filas no se pierden; «Cancelar» no borra. Con una sola vista, «Borrar la vista» está desactivado.
+- Abre otra página y vuelve a la base: se abre en la última vista usada. Cierra la app y vuelve: las vistas, sus nombres y reglas siguen (se abre en la primera).
+

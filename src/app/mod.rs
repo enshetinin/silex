@@ -29,10 +29,12 @@ mod startup;
 mod tests;
 pub mod theme;
 mod view_menus;
+mod view_tabs;
 
 pub use self::startup::StartupError;
 use self::{
-    blocks::*, cells::*, database::*, dialogs::*, row_page::*, search::*, sidebar::*, view_menus::*,
+    blocks::*, cells::*, database::*, dialogs::*, row_page::*, search::*, sidebar::*,
+    view_menus::*, view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
@@ -61,6 +63,9 @@ pub struct SilexApp {
     database: Option<DatabaseState>,
     /// The open page's properties, when it is a row of a database.
     row_page: Option<RowPage>,
+    /// The view last open in each database (database id → view id), so it
+    /// opens again on that view; for this session only.
+    last_views: std::collections::HashMap<String, String>,
     /// The keyboard shortcuts window (from the command palette).
     shortcuts_dialog: bool,
     rename: Option<Rename>,
@@ -160,6 +165,7 @@ impl SilexApp {
             search: None,
             database: None,
             row_page: None,
+            last_views: std::collections::HashMap::new(),
             shortcuts_dialog: false,
             rename: None,
             selected: None,

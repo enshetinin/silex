@@ -70,6 +70,10 @@ pub(super) struct DatabaseState {
     pub(super) typing_filter: bool,
     /// The inline list open in a view menu (column, operator…).
     pub(super) view_picker: Option<String>,
+    /// A view's new name, typed in its tab's menu; saved when it closes.
+    pub(super) view_rename: Option<(String, String)>,
+    /// The view waiting for «Borrar» to be confirmed.
+    pub(super) view_delete: Option<String>,
 }
 
 impl DatabaseState {
@@ -162,7 +166,7 @@ fn property_menu_id(property: &str) -> egui::Id {
 }
 
 /// What the user did in the table this frame, applied after drawing.
-enum TableAction {
+pub(super) enum TableAction {
     Open(String),
     AddRow,
     Row(RowAction),
@@ -175,6 +179,13 @@ enum TableAction {
     DeleteOption(String),
     /// Hide a property's column in the view on show.
     HideProperty(String),
+    /// Views as tabs (H6.3b): by index in `views`, or by id.
+    SwitchView(usize),
+    AddView,
+    DuplicateView(usize),
+    RenameView(String, String),
+    MoveView(String, Shift),
+    DeleteView(String),
 }
 
 impl SilexApp {
@@ -205,8 +216,15 @@ impl SilexApp {
             view_dirty: false,
             typing_filter: false,
             view_picker: None,
+            view_rename: None,
+            view_delete: None,
         });
+        // The view last open in this session, else the first.
+        let last = self.last_views.get(id).cloned();
         if let Some(state) = self.database.as_mut() {
+            state.view = last
+                .and_then(|last| state.views.iter().position(|v| v.id == last))
+                .unwrap_or(0);
             state.apply_view();
         }
         Ok(())
@@ -439,6 +457,12 @@ impl SilexApp {
                 self.db.delete_select_option(&id)?;
                 self.reload_properties()?;
             }
+            TableAction::SwitchView(index) => self.switch_view(index)?,
+            TableAction::AddView => self.add_view()?,
+            TableAction::DuplicateView(index) => self.duplicate_view(index)?,
+            TableAction::RenameView(id, name) => self.rename_view(&id, &name)?,
+            TableAction::MoveView(id, shift) => self.move_view(&id, shift)?,
+            TableAction::DeleteView(id) => self.delete_view(&id)?,
             TableAction::HideProperty(id) => {
                 if let Some(state) = self.database.as_mut()
                     && let Some(view) = state.views.get_mut(state.view)
@@ -488,26 +512,13 @@ impl SilexApp {
         let mut actions = Vec::new();
         let mut cells = Vec::new();
 
-        // View tabs (one «Tabla» view until H6.3) and the row count. Their
-        // content lines up with the cells' text, at CELL_PAD from each edge.
+        // View tabs (H6.3b) and, on the right, the row count and the view's
+        // menus. Their content lines up with the cells' text, at CELL_PAD
+        // from each edge.
         let mut selected_tab = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().button_padding.x = CELL_PAD;
-            for (index, view) in state.views.iter().enumerate() {
-                let selected = index == 0;
-                let color = if selected { p.text } else { p.text_muted };
-                let tab = ui.add(
-                    egui::Button::new((
-                        icons::icon(icons::TABLE).color(color),
-                        egui::RichText::new(&view.name).color(color),
-                    ))
-                    .frame_when_inactive(false)
-                    .selected(selected),
-                );
-                if selected {
-                    selected_tab = Some(tab.rect);
-                }
-            }
+            selected_tab = view_tabs(ui, state, &mut actions);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Also at the end of the header, which may be out of sight
                 // in a wide table.

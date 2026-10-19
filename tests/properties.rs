@@ -454,3 +454,52 @@ fn a_views_config_is_stored_and_survives_damage() -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
+
+// ---- H6.3b: several views per database ----
+
+#[test]
+fn views_are_added_renamed_moved_and_deleted_but_never_the_last() -> anyhow::Result<()> {
+    use silex_desktop::view::{FilterOp, ViewConfig};
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let first = db.database_views(&base)?[0].id.clone();
+    let names = |db: &Database| -> anyhow::Result<Vec<String>> {
+        Ok(db
+            .database_views(&base)?
+            .into_iter()
+            .map(|v| v.name)
+            .collect())
+    };
+
+    // A copy keeps the settings of the view it copies.
+    let mut config = ViewConfig::default();
+    config.set_hidden("x", true);
+    config.filters.push(silex_desktop::view::Filter {
+        property: silex_desktop::view::NAME.into(),
+        op: FilterOp::Contains,
+        value: "a".into(),
+    });
+    let copy = db.add_view(&base, "Tabla (copia)", &config)?;
+    let empty = db.add_view(&base, "Tabla 2", &ViewConfig::default())?;
+    assert_eq!(names(&db)?, ["Tabla", "Tabla (copia)", "Tabla 2"]);
+    assert_eq!(db.database_views(&base)?[1].config, config);
+
+    db.rename_view(&empty, "Pendientes")?;
+    assert!(db.move_view(&empty, Shift::Up)?);
+    assert!(!db.move_view(&first, Shift::Up)?, "already first");
+    assert_eq!(names(&db)?, ["Tabla", "Pendientes", "Tabla (copia)"]);
+
+    db.delete_view(&copy)?;
+    db.delete_view(&first)?;
+    assert_eq!(names(&db)?, ["Pendientes"]);
+    let err = db.delete_view(&empty).expect_err("the last view stays");
+    assert!(format!("{err:#}").contains("última"), "{err:#}");
+    assert_eq!(names(&db)?, ["Pendientes"]);
+
+    // Unknown ids and pages that are not databases are refused.
+    assert!(db.rename_view("no-existe", "x").is_err());
+    assert!(db.delete_view("no-existe").is_err());
+    let page = db.create_page("Notas", None)?;
+    assert!(db.add_view(&page, "x", &ViewConfig::default()).is_err());
+    Ok(())
+}
