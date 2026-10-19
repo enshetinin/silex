@@ -126,9 +126,13 @@ pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
             let markdown = match row.page.kind {
                 // Its rows follow as subpages, in the folder below.
                 PageKind::Database => {
-                    let rows = db.database_rows(&row.page.id)?;
-                    let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
-                    database_to_markdown(&row.page.title, &titles)
+                    let id = &row.page.id;
+                    database_to_markdown(
+                        &row.page.title,
+                        &db.database_properties(id)?,
+                        &db.database_rows(id)?,
+                        &db.database_values(id)?,
+                    )
                 }
                 PageKind::Page => page_to_markdown(&row.page.title, &db.list_blocks(&row.page.id)?),
             };

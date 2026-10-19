@@ -122,3 +122,13 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - «Borrar la vista»: pide confirmación y dice que las filas no se pierden; «Cancelar» no borra. Con una sola vista, «Borrar la vista» está desactivado.
 - Abre otra página y vuelve a la base: se abre en la última vista usada. Cierra la app y vuelve: las vistas, sus nombres y reglas siguen (se abre en la primera).
 
+## 14. Deshacer en la tabla y exportación (H6.4)
+- Cambia un número, marca una casilla y elige una opción; pulsa Cmd+Z tres veces (sin estar escribiendo): vuelven los valores anteriores, uno a uno. Cmd+Mayús+Z los rehace. Los botones de la barra superior hacen lo mismo.
+- Renombra una fila en su celda (Intro) y Cmd+Z: vuelve el nombre anterior.
+- «Nueva fila» y Cmd+Z: la fila va a la papelera (aparece en ella). Cmd+Mayús+Z la devuelve.
+- Clic derecho en una fila → «Enviar a la papelera» y Cmd+Z: vuelve con sus valores.
+- Borra una propiedad y Cmd+Z: vuelve con sus valores.
+- Escribiendo en una celda, Cmd+Z deshace solo el texto del campo.
+- Cambia de página y vuelve: el historial de la tabla empieza vacío.
+- «…» → «Exportar a Markdown»: el `.md` tiene una columna por propiedad, con las casillas como `[x]`/`[ ]` y las selecciones por su nombre. Ábrelo en un visor de Markdown: la tabla se ve bien aunque haya `|` en algún texto.
+

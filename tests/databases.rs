@@ -5,6 +5,7 @@ use silex_desktop::db::Database;
 use silex_desktop::export::export_workspace;
 use silex_desktop::markdown::database_to_markdown;
 use silex_desktop::model::{Page, PageKind, ViewKind, build_tree, without_database_rows};
+use silex_desktop::property::{CellValue, Date, OptionColor, PropertyKind, TableValues};
 
 fn titles(pages: &[Page]) -> Vec<&str> {
     pages.iter().map(|p| p.title.as_str()).collect()
@@ -168,14 +169,71 @@ fn a_database_exports_as_a_table_with_its_rows_as_subpages() -> anyhow::Result<(
     result
 }
 
+fn row(id: &str, title: &str) -> Page {
+    Page {
+        id: id.into(),
+        parent_id: Some("db".into()),
+        title: title.into(),
+        kind: PageKind::Page,
+    }
+}
+
 #[test]
 fn database_markdown_keeps_each_row_on_one_line() {
+    let none = TableValues::new();
     assert_eq!(
-        database_to_markdown("Vacía", &[]),
+        database_to_markdown("Vacía", &[], &[], &none),
         "# Vacía\n\n| Nombre |\n| --- |\n"
     );
+    let rows = [row("1", "una\nlínea"), row("2", "*negrita*"), row("3", "")];
     assert_eq!(
-        database_to_markdown("Base", &["una\nlínea", "*negrita*", ""]),
+        database_to_markdown("Base", &[], &rows, &none),
         "# Base\n\n| Nombre |\n| --- |\n| una línea |\n| \\*negrita\\* |\n|  |\n"
     );
+}
+
+#[test]
+fn database_markdown_has_a_column_per_property() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let rayuela = db.create_row(&base, "Rayuela")?;
+    db.create_row(&base, "Ficciones")?;
+    let autor = db.add_property(&base, "Autor | nombre", PropertyKind::Text)?;
+    let paginas = db.add_property(&base, "Páginas", PropertyKind::Number)?;
+    let leido = db.add_property(&base, "Leído", PropertyKind::Checkbox)?;
+    let fin = db.add_property(&base, "Fin", PropertyKind::Date)?;
+    let estado = db.add_property(&base, "Estado", PropertyKind::Select)?;
+    let terminado = db.add_select_option(&estado, "Terminado", OptionColor::Green)?;
+    let borrada = db.add_property(&base, "Notas", PropertyKind::Text)?;
+    db.set_value(
+        &rayuela,
+        &autor,
+        Some(&CellValue::Text("Cortázar\ny otros".into())),
+    )?;
+    db.set_value(&rayuela, &paginas, Some(&CellValue::Number(736.5)))?;
+    db.set_value(&rayuela, &leido, Some(&CellValue::Checkbox(true)))?;
+    db.set_value(
+        &rayuela,
+        &fin,
+        Some(&CellValue::Date(Date::parse("2026-09-14").expect("date"))),
+    )?;
+    db.set_value(&rayuela, &estado, Some(&CellValue::Select(terminado)))?;
+    db.set_value(&rayuela, &borrada, Some(&CellValue::Text("oculta".into())))?;
+    db.delete_property(&borrada)?;
+
+    let markdown = database_to_markdown(
+        "Lecturas",
+        &db.database_properties(&base)?,
+        &db.database_rows(&base)?,
+        &db.database_values(&base)?,
+    );
+    assert_eq!(
+        markdown,
+        "# Lecturas\n\n\
+         | Nombre | Autor \\| nombre | Páginas | Leído | Fin | Estado |\n\
+         | --- | --- | --- | --- | --- | --- |\n\
+         | Rayuela | Cortázar y otros | 736,5 | [x] | 2026-09-14 | Terminado |\n\
+         | Ficciones |  |  | [ ] |  |  |\n"
+    );
+    Ok(())
 }

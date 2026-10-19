@@ -2349,3 +2349,95 @@ fn each_view_keeps_its_own_rules() -> anyhow::Result<()> {
     app_frame(&mut app, &ctx, vec![]);
     Ok(())
 }
+
+// ---- H6.4: undo in the table ----
+
+#[test]
+fn the_table_undoes_and_redoes_its_changes() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, row, ids) = table_app(&[(PropertyKind::Number, "Páginas")])?;
+    let paginas = ids[0].clone();
+    let base = app.selected.clone().unwrap_or_default();
+
+    // A cell: back to empty, then forward again.
+    app.set_cell(&row, &paginas, Some(CellValue::Number(736.0)))?;
+    app.set_cell(&row, &paginas, Some(CellValue::Number(737.0)))?;
+    app.undo_table();
+    assert_eq!(
+        stored(&app, &row, &paginas)?,
+        Some(CellValue::Number(736.0))
+    );
+    app.undo_table();
+    assert_eq!(stored(&app, &row, &paginas)?, None);
+    app.redo_table();
+    assert_eq!(
+        stored(&app, &row, &paginas)?,
+        Some(CellValue::Number(736.0))
+    );
+
+    // A name typed in its cell.
+    ctx.memory_mut(|m| m.request_focus(row_name_id(&row)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::End, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text(" (1963)".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let title = |app: &SilexApp| app.db.get_page(&row).ok().flatten().map(|p| p.title);
+    assert_eq!(title(&app).as_deref(), Some("Rayuela (1963)"));
+    // Cmd+Z with nothing focused is for the table.
+    ctx.memory_mut(|m| m.surrender_focus(row_name_id(&row)));
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(title(&app).as_deref(), Some("Rayuela"));
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND | M::SHIFT)]);
+    assert_eq!(title(&app).as_deref(), Some("Rayuela (1963)"));
+
+    // A new row goes to the trash and comes back.
+    app.add_row(&base)?;
+    assert_eq!(row_titles(&app).len(), 2);
+    app.undo_table();
+    assert_eq!(row_titles(&app).len(), 1);
+    assert_eq!(app.trash_count, 1);
+    app.redo_table();
+    assert_eq!(row_titles(&app).len(), 2);
+
+    // A row sent to the trash from the table comes back with its values.
+    app.apply_table_action(&base, TableAction::Row(RowAction::Trash(row.clone())))?;
+    assert!(app.db.get_page(&row)?.is_none());
+    app.undo_table();
+    assert!(app.db.get_page(&row)?.is_some());
+    assert_eq!(
+        stored(&app, &row, &paginas)?,
+        Some(CellValue::Number(736.0))
+    );
+
+    // A deleted property comes back.
+    app.delete_property(&paginas)?;
+    app.undo_table();
+    assert_eq!(app.db.database_properties(&base)?.len(), 1);
+    assert_eq!(
+        stored(&app, &row, &paginas)?,
+        Some(CellValue::Number(736.0))
+    );
+    // A new change clears what could be redone.
+    app.set_cell(&row, &paginas, Some(CellValue::Number(1.0)))?;
+    assert!(app.database.as_ref().is_some_and(|d| !d.history.can_redo()));
+    Ok(())
+}
+
+#[test]
+fn cmd_z_while_typing_in_a_cell_undoes_the_text_not_the_table() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, row, ids) = table_app(&[(PropertyKind::Text, "Autor")])?;
+    app.set_cell(&row, &ids[0], Some(CellValue::Text("Cortázar".into())))?;
+    press_cell(&mut app, &ctx, cell_id(&row, &ids[0]));
+    app_frame(&mut app, &ctx, vec![key(Key::End, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("x".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    // The table's change is still there to undo.
+    assert!(app.database.as_ref().is_some_and(|d| d.history.can_undo()));
+    assert_eq!(
+        stored(&app, &row, &ids[0])?,
+        Some(CellValue::Text("Cortázar".into()))
+    );
+    Ok(())
+}

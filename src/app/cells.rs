@@ -611,8 +611,34 @@ impl SilexApp {
     }
 
     /// Stores a cell's value (`None` empties it) and updates the table and
-    /// the row's page, whichever shows it.
+    /// the row's page, whichever shows it. A change in the open table can
+    /// be undone there (H6.4).
     pub(super) fn set_cell(
+        &mut self,
+        row: &str,
+        property: &str,
+        value: Option<CellValue>,
+    ) -> Result<()> {
+        let in_table = self
+            .database
+            .as_ref()
+            .is_some_and(|d| d.rows.iter().any(|r| r.id == row));
+        let before = self.cell_info(row, property).and_then(|(_, _, v)| v);
+        let after = value.clone().filter(|v| !v.is_empty());
+        self.store_cell(row, property, value)?;
+        if in_table && before != after {
+            self.record_table(TableOp::Cell {
+                row: row.to_owned(),
+                property: property.to_owned(),
+                before,
+                after,
+            });
+        }
+        Ok(())
+    }
+
+    /// Stores a cell's value and shows it, without recording it (undo).
+    pub(super) fn store_cell(
         &mut self,
         row: &str,
         property: &str,

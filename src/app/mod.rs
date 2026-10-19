@@ -25,6 +25,7 @@ mod sidebar;
 #[cfg(test)]
 mod snapshots;
 mod startup;
+mod table_undo;
 #[cfg(test)]
 mod tests;
 pub mod theme;
@@ -34,7 +35,7 @@ mod view_tabs;
 pub use self::startup::StartupError;
 use self::{
     blocks::*, cells::*, database::*, dialogs::*, row_page::*, search::*, sidebar::*,
-    view_menus::*, view_tabs::*,
+    table_undo::*, view_menus::*, view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
@@ -392,7 +393,10 @@ impl SilexApp {
         // Exact Alt only: Alt+Shift+↑/↓ moves blocks instead.
         let previous = take_exact_key(ctx, Key::ArrowUp, M::ALT);
         let next = take_exact_key(ctx, Key::ArrowDown, M::ALT);
-        let document = self.document_has_focus(ctx);
+        // In a database's table (not typing in a field), Cmd+Z undoes the
+        // table's changes (H6.4); elsewhere, the document's.
+        let table = self.table_has_focus(ctx);
+        let document = table || self.document_has_focus(ctx);
         let redo = document
             && (pressed(Sc::new(M::COMMAND | M::SHIFT, Key::Z))
                 || pressed(Sc::new(M::COMMAND, Key::Y)));
@@ -415,11 +419,12 @@ impl SilexApp {
             if rename && let Some(id) = self.selected.clone() {
                 self.start_rename(&id);
             }
-            if undo {
-                self.undo();
-            }
-            if redo {
-                self.redo();
+            match (undo, redo, table) {
+                (true, _, true) => self.undo_table(),
+                (true, _, false) => self.undo(),
+                (_, true, true) => self.redo_table(),
+                (_, true, false) => self.redo(),
+                _ => {}
             }
             Ok(())
         })();

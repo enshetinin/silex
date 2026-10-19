@@ -1279,27 +1279,42 @@ impl SilexApp {
                 {
                     action = Some(RowAction::Favorite(page_id.to_owned(), !is_favorite));
                 }
+                // In a database, the buttons undo the table's changes (H6.4).
+                let table = self.database.as_ref().map(|d| &d.history);
+                let (can_undo, can_redo) = match table {
+                    Some(history) => (history.can_undo(), history.can_redo()),
+                    None => (self.history.can_undo(), self.history.can_redo()),
+                };
+                let table = table.is_some();
                 if ui
                     .add_enabled(
-                        self.history.can_redo(),
+                        can_redo,
                         ghost(icons::icon(icons::REDO).color(p.text_muted)),
                     )
                     .on_hover_text("Rehacer")
                     .accessible_name("Rehacer")
                     .clicked()
                 {
-                    self.redo();
+                    if table {
+                        self.redo_table();
+                    } else {
+                        self.redo();
+                    }
                 }
                 if ui
                     .add_enabled(
-                        self.history.can_undo(),
+                        can_undo,
                         ghost(icons::icon(icons::UNDO).color(p.text_muted)),
                     )
                     .on_hover_text("Deshacer")
                     .accessible_name("Deshacer")
                     .clicked()
                 {
-                    self.undo();
+                    if table {
+                        self.undo_table();
+                    } else {
+                        self.undo();
+                    }
                 }
                 ui.add_space(theme::space::SM);
                 self.status_bar(ui);

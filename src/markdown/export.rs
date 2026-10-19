@@ -1,5 +1,6 @@
 //! Blocks → CommonMark (+ GFM task lists).
-use crate::model::{Block, BlockKind, list_numbers};
+use crate::model::{Block, BlockKind, Page, list_numbers};
+use crate::property::{CellValue, Property, PropertyKind, TableValues};
 
 /// Characters escaped anywhere in text: CommonMark inline syntax, entities,
 /// and GFM extensions other renderers may enable (strikethrough, tables).
@@ -143,19 +144,53 @@ fn push_code(out: &mut String, leading: &str, content: &str) {
     out.push('\n');
 }
 
-/// Renders a database (ADR 0006): `# title`, then a GFM table with one row
-/// per entry. H6.1 has only the «Nombre» column; the rows themselves are
-/// exported as subpages. Cell text is escaped like block text (`|`
-/// included), and line breaks become spaces, since a table row is one line.
-pub fn database_to_markdown(title: &str, rows: &[&str]) -> String {
+/// A database as a GFM table (ADR 0006, H6.4): «Nombre» and one column
+/// per live property, every live row in its manual order (an export of the
+/// data, not of a view). A select is its option's name, a checkbox `[x]`
+/// or `[ ]`, a date `AAAA-MM-DD`, a number as shown in the app. Each row
+/// stays on one line and the text is escaped, so `|` cannot split a cell.
+pub fn database_to_markdown(
+    title: &str,
+    properties: &[Property],
+    rows: &[Page],
+    values: &TableValues,
+) -> String {
+    let cell = |text: &str| escape_line(&text.replace(['\n', '\r'], " "), false);
     let mut out = String::new();
     out.push_str("# ");
-    out.push_str(&escape_line(&title.replace('\n', " "), false));
-    out.push_str("\n\n| Nombre |\n| --- |\n");
+    out.push_str(&cell(title));
+    out.push_str("\n\n| Nombre |");
+    for property in properties {
+        out.push(' ');
+        out.push_str(&cell(&property.name));
+        out.push_str(" |");
+    }
+    out.push_str("\n| --- |");
+    for _ in properties {
+        out.push_str(" --- |");
+    }
+    out.push('\n');
     for row in rows {
         out.push_str("| ");
-        out.push_str(&escape_line(&row.replace(['\n', '\r'], " "), false));
-        out.push_str(" |\n");
+        out.push_str(&cell(&row.title));
+        out.push_str(" |");
+        let cells = values.get(&row.id);
+        for property in properties {
+            let value = cells.and_then(|c| c.get(&property.id));
+            let text = match (property.kind, value) {
+                // Written as is: brackets would otherwise be escaped.
+                (PropertyKind::Checkbox, v) => {
+                    let on = matches!(v, Some(CellValue::Checkbox(true)));
+                    (if on { "[x]" } else { "[ ]" }).to_owned()
+                }
+                (_, Some(value)) => cell(&value.display(property)),
+                (_, None) => String::new(),
+            };
+            out.push(' ');
+            out.push_str(&text);
+            out.push_str(" |");
+        }
+        out.push('\n');
     }
     out
 }

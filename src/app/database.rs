@@ -74,6 +74,8 @@ pub(super) struct DatabaseState {
     pub(super) view_rename: Option<(String, String)>,
     /// The view waiting for «Borrar» to be confirmed.
     pub(super) view_delete: Option<String>,
+    /// What can be undone in this table (H6.4).
+    pub(super) history: TableHistory,
 }
 
 impl DatabaseState {
@@ -218,6 +220,7 @@ impl SilexApp {
             view_picker: None,
             view_rename: None,
             view_delete: None,
+            history: TableHistory::default(),
         });
         // The view last open in this session, else the first.
         let last = self.last_views.get(id).cloned();
@@ -302,10 +305,28 @@ impl SilexApp {
         if state.dirty.is_empty() {
             return Ok(());
         }
+        let mut renamed = Vec::new();
         for row in state.rows.iter().filter(|r| state.dirty.contains(&r.id)) {
             self.db.rename_page(&row.id, &row.title)?;
+            // The page list still has the name it had (undo, H6.4).
+            let before = self
+                .pages
+                .iter()
+                .find(|p| p.id == row.id)
+                .map(|p| p.title.clone())
+                .unwrap_or_default();
+            if before != row.title {
+                renamed.push(TableOp::Name {
+                    row: row.id.clone(),
+                    before,
+                    after: row.title.clone(),
+                });
+            }
         }
         state.dirty.clear();
+        for op in renamed {
+            state.history.record(op);
+        }
         // The sidebar, the search and the breadcrumbs use these titles.
         self.pages = self.db.list_pages()?;
         self.rebuild_tree();
@@ -326,6 +347,7 @@ impl SilexApp {
         };
         let id = self.db.add_property(&database, name, kind)?;
         self.reload_properties()?;
+        self.record_table(TableOp::AddProperty(id.clone()));
         Ok(id)
     }
 
@@ -339,8 +361,9 @@ impl SilexApp {
             .unwrap_or_default();
         self.db.delete_property(id)?;
         self.reload_properties()?;
+        self.record_table(TableOp::DeleteProperty(id.to_owned()));
         self.notice = Some(format!(
-            "Se borró la propiedad «{name}». Puedes restaurarla con sus valores desde «…» → «Propiedades borradas»."
+            "Se borró la propiedad «{name}». Cmd+Z la devuelve, y también «…» → «Propiedades borradas»."
         ));
         Ok(())
     }
@@ -367,8 +390,9 @@ impl SilexApp {
             {
                 state.order.push(index);
             }
-            state.focus = Some((row, 0));
+            state.focus = Some((row.clone(), 0));
         }
+        self.record_table(TableOp::AddRow(row));
         Ok(())
     }
 
@@ -405,7 +429,7 @@ impl SilexApp {
         }
     }
 
-    fn apply_table_action(&mut self, database: &str, action: TableAction) -> Result<()> {
+    pub(super) fn apply_table_action(&mut self, database: &str, action: TableAction) -> Result<()> {
         match action {
             TableAction::Open(row) => self.open_page(row)?,
             TableAction::AddRow => self.add_row(database)?,
@@ -414,6 +438,10 @@ impl SilexApp {
                 if let Some(state) = self.database.as_mut() {
                     state.focus = Some((id, 0));
                 }
+            }
+            TableAction::Row(RowAction::Trash(id)) => {
+                self.apply(RowAction::Trash(id.clone()))?;
+                self.record_table(TableOp::TrashRow(id));
             }
             TableAction::Row(other) => self.apply(other)?,
             TableAction::AddProperty(kind, name) => {

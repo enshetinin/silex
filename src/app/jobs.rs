@@ -19,8 +19,12 @@ impl SilexApp {
         let _ = self.save_now();
         let path = match &self.database {
             Some(state) => {
-                let titles: Vec<&str> = state.rows.iter().map(|r| r.title.as_str()).collect();
-                let markdown = silex_desktop::markdown::database_to_markdown(&self.title, &titles);
+                let markdown = silex_desktop::markdown::database_to_markdown(
+                    &self.title,
+                    &state.properties,
+                    &state.rows,
+                    &state.values,
+                );
                 silex_desktop::export::export_markdown(dir, &self.title, &markdown)?
             }
             None => silex_desktop::export::export_page(dir, &self.title, &self.blocks)?,
