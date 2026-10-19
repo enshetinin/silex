@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use crate::{
     attachment::FileKind,
     db::Database,
-    markdown::{FileLink, database_to_markdown, page_to_markdown, page_to_markdown_with_files},
+    markdown::{FileLink, database_to_markdown, page_to_markdown, page_to_markdown_with},
     model::{Block, BlockKind, PageKind, build_tree},
     safe_path,
 };
@@ -62,14 +62,17 @@ pub fn export_page_with_files(
         .map(|e| e.file_name().to_string_lossy().to_lowercase())
         .collect();
     let stem = safe_path::unique_stem(title, "md", &mut taken);
+    let folder = files_folder(&stem, blocks, &mut taken);
     let mut written = None;
     let result = (|| -> Result<PathBuf> {
-        let files = write_attachments(db, dir, &stem, blocks, &mut taken, &mut written)?;
+        let files = match &folder {
+            Some(name) => write_attachments(db, dir, name, blocks, &mut written)?,
+            None => HashMap::new(),
+        };
         let path = safe_path::join_inside(dir, &[&format!("{stem}.md")])?;
-        write_atomic(
-            &path,
-            page_to_markdown_with_files(title, blocks, &files).as_bytes(),
-        )?;
+        // A page alone: the pages it links to are not exported (ADR 0008).
+        let markdown = page_to_markdown_with(title, blocks, &files, &HashMap::new());
+        write_atomic(&path, markdown.as_bytes())?;
         Ok(path)
     })();
     if result.is_err()
@@ -80,16 +83,32 @@ pub fn export_page_with_files(
     result
 }
 
-/// Writes the attachments of `blocks` into a new folder `«stem» (adjuntos)`
-/// inside `dir` (its name reserved in `taken`) and returns their links,
-/// relative to `dir`. Nothing is written when no block is a file. `folder`
-/// is set as soon as the folder exists, so the caller can remove it.
+/// The name of the folder for the attachments of `blocks`, `«stem»
+/// (adjuntos)`, made unique and reserved in `taken`; `None` when no block
+/// is a file.
+fn files_folder(stem: &str, blocks: &[Block], taken: &mut HashSet<String>) -> Option<String> {
+    if !blocks.iter().any(|b| b.attachment.is_some()) {
+        return None;
+    }
+    let base = format!("{stem} (adjuntos)");
+    let mut name = base.clone();
+    let mut n = 2;
+    while taken.contains(&name.to_lowercase()) {
+        name = format!("{base} {n}");
+        n += 1;
+    }
+    taken.insert(name.to_lowercase());
+    Some(name)
+}
+
+/// Writes the attachments of `blocks` into the new folder `name` inside
+/// `dir` and returns their links, relative to `dir`. `folder` is set as
+/// soon as the folder exists, so the caller can remove it.
 fn write_attachments(
     db: &Database,
     dir: &Path,
-    stem: &str,
+    name: &str,
     blocks: &[Block],
-    taken: &mut HashSet<String>,
     folder: &mut Option<PathBuf>,
 ) -> Result<HashMap<String, FileLink>> {
     let ids: Vec<&String> = {
@@ -101,18 +120,7 @@ fn write_attachments(
             .collect()
     };
     let mut links = HashMap::new();
-    if ids.is_empty() {
-        return Ok(links);
-    }
-    let base = format!("{stem} (adjuntos)");
-    let mut name = base.clone();
-    let mut n = 2;
-    while taken.contains(&name.to_lowercase()) {
-        name = format!("{base} {n}");
-        n += 1;
-    }
-    taken.insert(name.to_lowercase());
-    let path = safe_path::join_inside(dir, &[&name])?;
+    let path = safe_path::join_inside(dir, &[name])?;
     fs::create_dir(&path).with_context(|| format!("No se puede crear {}", path.display()))?;
     *folder = Some(path.clone());
     let mut names = HashSet::new();
@@ -210,21 +218,22 @@ pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
     // Depth-first rows with depth; never loops, orphans come at the root.
     let rows = build_tree(&pages, &everything);
 
+    // First every name, so links can point at pages written later.
+    let plan = plan_workspace(db, &rows)?;
+    let targets: HashMap<String, PathBuf> = plan
+        .iter()
+        .map(|p| (p.id.clone(), p.folder.join(format!("{}.md", p.stem))))
+        .collect();
+
     let tmp = root.join(format!(".silex-export-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&tmp).with_context(|| format!("No se puede escribir en {}", root.display()))?;
     let written = (|| -> Result<usize> {
-        // One (folder, names taken) per depth.
-        let mut stack: Vec<(PathBuf, HashSet<String>)> = vec![(tmp.clone(), HashSet::new())];
-        for row in &rows {
-            stack.truncate(row.depth + 1);
-            let Some((folder, taken)) = stack.last_mut() else {
-                anyhow::bail!("Árbol de páginas incoherente");
-            };
-            let stem = safe_path::unique_stem(&row.page.title, "md", taken);
-            let file = safe_path::join_inside(folder, &[&format!("{stem}.md")])?;
-            let markdown = match row.page.kind {
+        for (row, planned) in rows.iter().zip(&plan) {
+            let folder = join_relative(&tmp, &planned.folder)?;
+            let file = safe_path::join_inside(&folder, &[&format!("{}.md", planned.stem)])?;
+            let markdown = match (&row.page.kind, &planned.blocks) {
                 // Its rows follow as subpages, in the folder below.
-                PageKind::Database => {
+                (PageKind::Database, _) => {
                     let id = &row.page.id;
                     database_to_markdown(
                         &row.page.title,
@@ -233,19 +242,28 @@ pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
                         &db.database_values(id)?,
                     )
                 }
-                PageKind::Page => {
-                    let blocks = db.list_blocks(&row.page.id)?;
+                (PageKind::Page, blocks) => {
                     // Inside the temporary folder: removed with it on error.
-                    let files = write_attachments(db, folder, &stem, &blocks, taken, &mut None)?;
-                    page_to_markdown_with_files(&row.page.title, &blocks, &files)
+                    let files = match &planned.files {
+                        Some(name) => write_attachments(db, &folder, name, blocks, &mut None)?,
+                        None => HashMap::new(),
+                    };
+                    let links: HashMap<String, String> = blocks
+                        .iter()
+                        .filter_map(|b| b.link.as_ref())
+                        .filter_map(|id| {
+                            let to = targets.get(id)?;
+                            Some((id.clone(), relative_link(&planned.folder, to)))
+                        })
+                        .collect();
+                    page_to_markdown_with(&row.page.title, blocks, &files, &links)
                 }
             };
             write_atomic(&file, markdown.as_bytes())?;
             if row.has_children {
-                let sub = safe_path::join_inside(folder, &[&stem])?;
+                let sub = safe_path::join_inside(&folder, &[&planned.stem])?;
                 fs::create_dir(&sub)
                     .with_context(|| format!("No se puede crear {}", sub.display()))?;
-                stack.push((sub, HashSet::new()));
             }
         }
         Ok(rows.len())
@@ -269,6 +287,77 @@ pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
         return Err(err).with_context(|| format!("No se pudo finalizar {}", dir.display()));
     }
     Ok(WorkspaceExport { dir, pages })
+}
+
+/// Where one page goes in a workspace export, decided before writing.
+struct Planned {
+    id: String,
+    /// Its folder, relative to the export's root.
+    folder: PathBuf,
+    stem: String,
+    /// Its attachments' folder, inside `folder`.
+    files: Option<String>,
+    /// Its blocks (empty for a database).
+    blocks: Vec<Block>,
+}
+
+/// Names every page of `rows` (depth-first) as the export writes them:
+/// unique per folder, `Title.md` next to its `Title/` and `Title
+/// (adjuntos)/` folders.
+fn plan_workspace(db: &Database, rows: &[crate::model::TreeRow]) -> Result<Vec<Planned>> {
+    // One (folder, names taken) per depth.
+    let mut stack: Vec<(PathBuf, HashSet<String>)> = vec![(PathBuf::new(), HashSet::new())];
+    let mut plan = Vec::with_capacity(rows.len());
+    for row in rows {
+        stack.truncate(row.depth + 1);
+        let Some((folder, taken)) = stack.last_mut() else {
+            anyhow::bail!("Árbol de páginas incoherente");
+        };
+        let stem = safe_path::unique_stem(&row.page.title, "md", taken);
+        let blocks = match row.page.kind {
+            PageKind::Page => db.list_blocks(&row.page.id)?,
+            PageKind::Database => Vec::new(),
+        };
+        let files = files_folder(&stem, &blocks, taken);
+        let folder = folder.clone();
+        if row.has_children {
+            stack.push((folder.join(&stem), HashSet::new()));
+        }
+        plan.push(Planned {
+            id: row.page.id.clone(),
+            folder,
+            stem,
+            files,
+            blocks,
+        });
+    }
+    Ok(plan)
+}
+
+/// `root` joined with each part of `relative` (names made by `safe_path`),
+/// never leaving `root`.
+fn join_relative(root: &Path, relative: &Path) -> Result<PathBuf> {
+    let parts: Vec<String> = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    safe_path::join_inside(root, &parts)
+}
+
+/// The link from a file in folder `from` to the file `to` (both relative
+/// to the same root), with `/`: «../Otra/Página.md».
+pub fn relative_link(from: &Path, to: &Path) -> String {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> = vec!["..".to_owned(); from.len() - common];
+    parts.extend(
+        to[common..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+    parts.join("/")
 }
 
 /// Workspace export on a worker thread with its own database connection.

@@ -6,5 +6,5 @@
 mod export;
 mod import;
 
-pub use export::{FileLink, database_to_markdown, page_to_markdown, page_to_markdown_with_files};
+pub use export::{FileLink, database_to_markdown, page_to_markdown, page_to_markdown_with};
 pub use import::{ImportedPage, markdown_to_page};

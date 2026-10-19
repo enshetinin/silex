@@ -111,6 +111,7 @@ mod writing {
             position: 0,
             indent: 0,
             attachment: None,
+            link: None,
         }]
     }
 

@@ -11,6 +11,7 @@ fn b(id: &str, kind: BlockKind, indent: u8, content: &str) -> Block {
         position: 0,
         indent,
         attachment: None,
+        link: None,
     }
 }
 
@@ -583,12 +584,37 @@ fn a_duplicated_file_block_shares_its_attachment() {
 fn the_slash_menu_offers_attaching_files() {
     use silex_desktop::editor::{SlashItem, slash_items};
     let all = slash_items("");
-    assert_eq!(all.len(), BlockKind::ALL.len() + 1);
-    assert_eq!(all.last(), Some(&SlashItem::AttachFiles));
+    assert_eq!(all.len(), BlockKind::ALL.len() + 2);
+    assert_eq!(
+        all[BlockKind::ALL.len()..],
+        [SlashItem::LinkPage, SlashItem::AttachFiles]
+    );
+    for query in ["enlace", "pag", "LINK", "vinc"] {
+        assert_eq!(slash_items(query), [SlashItem::LinkPage], "{query}");
+    }
     for query in ["arch", "ARCHIVO", "adj", "imagen", "pdf", "foto"] {
         assert_eq!(slash_items(query), [SlashItem::AttachFiles], "{query}");
     }
     // «Título 1» and the like are not drowned by it.
     assert_eq!(slash_items("h1"), [SlashItem::Kind(BlockKind::Heading1)]);
     assert!(slash_items("zzz").is_empty());
+}
+
+#[test]
+fn text_never_merges_with_a_link_block() {
+    let mut blocks = vec![
+        b("a", BlockKind::Paragraph, 0, "antes"),
+        silex_desktop::model::Block {
+            kind: BlockKind::PageLink,
+            link: Some("otra".into()),
+            ..b("l", BlockKind::Paragraph, 0, "Otra página")
+        },
+        b("c", BlockKind::Paragraph, 0, "después"),
+    ];
+    let before = blocks.clone();
+    assert_eq!(backspace_at_start(&mut blocks, 2), None);
+    assert_eq!(delete_at_end(&mut blocks, 0), None);
+    assert_eq!(enter(&mut blocks, 1, 0, || "x".into()), None);
+    assert_eq!(apply_slash(&mut blocks, 1, 0, BlockKind::Heading1), None);
+    assert_eq!(blocks, before);
 }

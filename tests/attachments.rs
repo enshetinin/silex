@@ -40,6 +40,7 @@ fn block(page: &str, kind: BlockKind, content: &str, attachment: Option<String>)
         position: 0,
         indent: 0,
         attachment,
+        link: None,
     }
 }
 

@@ -1,6 +1,6 @@
 # ADR-0008 — Enlaces entre páginas y backlinks
 
-**Estado:** propuesta (2026-10-19). Pendiente de las decisiones del propietario (al final).
+**Estado:** aceptada (2026-10-19), con las decisiones del propietario del final.
 
 ## Contexto
 El PRD pone en P1 los «enlaces internos, backlinks»: desde una página se enlaza a otra, y cada página muestra qué páginas la enlazan. El roadmap lo agrupa en el Hito 7 con el historial y las plantillas, que irán en ADRs propios.
@@ -23,21 +23,24 @@ Requisitos:
 3. **Enlace en línea con el id**, `[[Título|uuid]]` dentro del texto. No se rompe, pero el `TextEdit` mostraría el UUID al editar. Esconderlo exige pintar texto distinto del que se edita: el cursor, la selección, copiar y el IME recorrerían caracteres invisibles. Es el problema del formato en línea, que el ADR 0003 dejó fuera a propósito.
 4. **Enlaces en línea con rangos aparte** (tabla `block_links` con posiciones de inicio y fin). El texto queda limpio, pero cada pulsación desplaza los rangos y deshacer, pegar o dividir un bloque los tendría que mantener. Es un editor de texto enriquecido a medias.
 
-## Decisión propuesta
+## Decisión
 **Alternativa 1:** el enlace es un bloque. Es la única que cumple los requisitos con el editor actual, reutiliza el patrón del bloque `file` y deja los enlaces en línea para cuando exista formato en línea (con su propio ADR).
 
 ### Esquema (migración `0007_page_links.sql`, aditiva)
 - **`blocks` se reconstruye** como en la 0003 y la 0006 (conservando los `rowid` y con `rebuild` de `block_search`):
   - el tipo `page_link` en el `CHECK` de `kind`;
-  - `link_page_id TEXT REFERENCES pages(id) ON DELETE SET NULL`, con `CHECK ((kind = 'page_link') = (link_page_id IS NOT NULL))`. Las páginas nunca se borran físicamente: el `SET NULL` solo es una red de seguridad, y entonces el bloque se lee como «Página que ya no existe»;
+  - `link_page_id TEXT REFERENCES pages(id) ON DELETE SET NULL`, con `CHECK (kind = 'page_link' OR link_page_id IS NULL)`. Las páginas nunca se borran físicamente: el `SET NULL` solo es una red de seguridad, y entonces el bloque se lee como «Página que ya no existe»;
+    - *Actualización (H7.5):* la propuesta decía `CHECK ((kind = 'page_link') = (link_page_id IS NOT NULL))`, pero ese `CHECK` haría fallar el `SET NULL` y, con él, el borrado de la página. El `CHECK` solo impide que un bloque que no es un enlace apunte a una página;
   - índice parcial `blocks_link_idx ON blocks(link_page_id) WHERE link_page_id IS NOT NULL`, que hace barata la consulta de backlinks.
 - **El `content`** de un bloque de enlace es el título del destino cuando se creó o renombró. Sirve a la búsqueda y a la exportación; lo que se muestra es siempre el título actual, leído de `pages`.
 - **Al renombrar una página** se actualiza el `content` de los bloques que la enlazan, en la misma transacción que el renombrado. Así la búsqueda por el título nuevo encuentra también las páginas que la enlazan.
+  - *Actualización (H7.5):* también al cambiar el título desde la propia página (`save_document`). Además, al guardar un enlace su `content` se toma del título actual del destino, así que un documento abierto con un título viejo no lo restablece.
 - **Tests:** v6→v7, v1→v7, un fallo a mitad que deja la v6 intacta, y una copia v6 restaurada y actualizada.
 
 ### Comportamiento
 - **Crear un enlace:**
   - escribir `[[` en un bloque de texto, o `/enlace` (también «página», «link») en el menú `/`, abre un buscador de páginas bajo el bloque (↑ ↓ Intro, Esc), que reutiliza la búsqueda de títulos;
+    - *Actualización (H7.5):* el buscador es una ventana con su propio campo, la misma para los tres caminos. Filtra los títulos sin acentos ni mayúsculas: primero los que empiezan por lo escrito, luego los que lo contienen.
   - «Enlazar a una página…» en la paleta (Cmd+K);
   - el bloque va tras el bloque en edición. Si `[[` o `/enlace` dejaron el bloque vacío, el enlace ocupa su lugar (como `/archivo`, H7.3).
 - **El bloque de enlace** es una tarjeta enfocable con el icono de la página (o de la base de datos), su título actual y su ruta («Proyecto › Diseño») en gris. Un clic o Intro abre la página destino, y Retroceso/Supr la borran (Cmd+Z la devuelve), como el bloque `file`.
@@ -67,9 +70,9 @@ Requisitos:
 1. **H7.5 — Enlaces:** migración 0007 con sus tests; crear enlaces (`[[`, `/enlace`, paleta) con el buscador de páginas; tarjeta de enlace (abrir, papelera, accesible); título al día al renombrar; exportación Markdown.
 2. **H7.6 — Backlinks:** sección «Enlazada desde» en páginas y filas; prueba de rendimiento con 1000 páginas y 10 000 enlaces.
 
-## Decisiones del propietario (pendientes)
-1. **¿Enlace como bloque** (alternativa 1, recomendada) aunque no pueda ir en medio de una frase?
-2. **¿Cómo se crean?** Propuesto: `[[`, `/enlace` y la paleta, con un buscador de páginas por título.
-3. **¿Enlaces a páginas en la papelera?** Propuesto: la tarjeta lo dice y abrirla ofrece restaurarla.
-4. **¿Backlinks de páginas en la papelera?** Propuesto: no se muestran (vuelven al restaurar la página que enlaza).
-5. **¿Exportación de una página suelta?** Propuesto: el título del destino como texto, sin enlace.
+## Decisiones del propietario (2026-10-19)
+1. El enlace es un bloque (alternativa 1), aunque no pueda ir en medio de una frase.
+2. Se crean con `[[`, `/enlace` y la paleta, con un buscador de páginas por título.
+3. Un enlace a una página en la papelera lo dice, y abrirlo ofrece restaurarla.
+4. Los backlinks de páginas en la papelera no se muestran.
+5. Al exportar una página suelta, el destino se escribe como texto, sin enlace.

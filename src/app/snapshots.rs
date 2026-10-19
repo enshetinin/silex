@@ -1280,6 +1280,7 @@ fn attachments_app() -> anyhow::Result<SilexApp> {
         position: 0,
         indent: 0,
         attachment: None,
+        link: None,
     }];
     // A real image (a soft gradient), so its preview shows (H7.2).
     let (w, h) = (480u32, 260u32);
@@ -1310,6 +1311,7 @@ fn attachments_app() -> anyhow::Result<SilexApp> {
             position: 0,
             indent: 0,
             attachment: Some(attachment.id),
+            link: None,
         });
     }
     db.save_document(&page, "Viaje a Lisboa", &blocks)?;
@@ -1430,5 +1432,99 @@ fn backups_menu() -> anyhow::Result<()> {
     harness.run();
     click_button(&mut harness, "Copias y exportación");
     harness.snapshot("backups_menu_light");
+    Ok(())
+}
+
+// ---- H7.5: links between pages ----
+
+/// «Diario» with a paragraph, a link to «Diseño de la interfaz» (inside
+/// «Proyecto Silex») and one to «Recetas», which is in the trash.
+fn links_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    let mut app = demo_app()?;
+    let find = |app: &SilexApp, title: &str| {
+        app.pages
+            .iter()
+            .find(|p| p.title == title)
+            .map(|p| p.id.clone())
+            .unwrap_or_default()
+    };
+    let diseno = find(&app, "Diseño de la interfaz");
+    let recetas = find(&app, "Recetas");
+    let diario = app.db.create_page("Diario", None)?;
+    let block = |id: &str, kind: BlockKind, content: &str, link: Option<&str>| Block {
+        id: id.into(),
+        page_id: diario.clone(),
+        kind,
+        content: content.into(),
+        checked: false,
+        position: 0,
+        indent: 0,
+        attachment: None,
+        link: link.map(str::to_owned),
+    };
+    let blocks = [
+        block("p", BlockKind::Paragraph, "Hoy revisé el diseño:", None),
+        block("l1", BlockKind::PageLink, "", Some(&diseno)),
+        block("l2", BlockKind::PageLink, "", Some(&recetas)),
+    ];
+    app.db.save_document(&diario, "Diario", &blocks)?;
+    app.db.trash_page(&recetas)?;
+    app.reload_pages()?;
+    app.open_page(diario)?;
+    Ok(app)
+}
+
+#[test]
+fn link_cards_and_the_picker_have_names() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(links_app()?);
+    assert_accessible(&harness, "links");
+    assert!(
+        harness
+            .query_by_label("Enlace a «Diseño de la interfaz»")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("Enlace a «Recetas», en la papelera")
+            .is_some()
+    );
+    harness.state_mut().open_link_picker(None, None);
+    harness.run();
+    assert_accessible(&harness, "link picker");
+    assert!(harness.query_by_label("Página a enlazar").is_some());
+    // In the sidebar and in the picker.
+    assert!(harness.query_all_by_label("Ideas sueltas").count() >= 2);
+    Ok(())
+}
+
+#[test]
+fn page_links() -> anyhow::Result<()> {
+    links_snapshot("page_links_light", false)
+}
+
+#[test]
+fn link_picker() -> anyhow::Result<()> {
+    links_snapshot("link_picker_light", true)
+}
+
+fn links_snapshot(name: &str, picker: bool) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), links_app()?);
+    harness.run();
+    if picker {
+        harness.state_mut().open_link_picker(None, None);
+        harness.run();
+        harness.get_by_label("Página a enlazar").type_text("dise");
+        harness.run();
+    }
+    harness.snapshot(name);
     Ok(())
 }

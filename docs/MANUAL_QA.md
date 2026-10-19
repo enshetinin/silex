@@ -189,3 +189,13 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - Borra un archivo de la página y, sin cambiar de página, libera espacio: ese archivo no se borra (Cmd+Z lo devuelve y se abre).
 - Tras liberar espacio, la búsqueda (Cmd+K) sigue encontrando todo, y crear y restaurar una copia funciona.
 - «Cancelar» en la confirmación no borra nada.
+
+## 21. Enlaces entre páginas (H7.5)
+- En un párrafo vacío escribe `[[`: se abre «Enlazar a una página». Escribe parte de un título (sin tildes también vale), elige con ↑ ↓ e Intro: el enlace ocupa el lugar del párrafo. Cmd+Z lo quita.
+- Escribe `[[` en medio de un párrafo con texto: los corchetes desaparecen y el enlace va debajo.
+- `/enlace` e Intro, y Cmd+K → «enlazar»: abren lo mismo. Esc cierra sin cambiar nada.
+- Clic en la tarjeta (o ↓ hasta ella e Intro): se abre la página enlazada.
+- Renombra la página enlazada desde la barra lateral y desde su título: la tarjeta muestra el título nuevo, y Cmd+K con el título nuevo encuentra también la página que enlaza.
+- Envía la página enlazada a la papelera: la tarjeta la muestra tachada «en la papelera». Ábrela: pregunta si restaurarla; «Restaurar y abrir» la devuelve y la abre.
+- «Exportar todo a Markdown»: en la carpeta exportada, abre el `.md` de una página con enlaces en un visor de Markdown: el enlace abre el `.md` de la otra página, también en subcarpetas.
+- «…» → «Exportar a Markdown» de una sola página: los enlaces salen como texto.

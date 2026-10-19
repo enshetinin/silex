@@ -57,8 +57,16 @@
 - Espacio (H7.4, sin migración): `space_usage` suma tamaños y páginas libres sin leer ningún blob, y `delete_unused_attachments(keep)` borra en una transacción los adjuntos que no usa ningún bloque (de páginas vivas o en la papelera), salvo los de `keep`. Después, `compact` devuelve el espacio al disco.
 - Probado: v5→v6 y v1→v6 conservando los `rowid`, un fallo a mitad (con `blocks` ya reconstruida) que deja la v5 intacta, una copia v5 restaurada y actualizada, y las copias de seguridad con adjuntos.
 
+## Versión 7 — enlaces entre páginas (`0007_page_links.sql`, ADR 0008)
+- `blocks` se reconstruye por tercera vez (como en la 0003 y la 0006, conservando los `rowid` y con `rebuild` de `block_search`). Cambia en dos cosas:
+  - el tipo `page_link` en el `CHECK` de `kind`;
+  - `link_page_id TEXT REFERENCES pages(id) ON DELETE SET NULL`, con `CHECK (kind = 'page_link' OR link_page_id IS NULL)` e índice parcial `blocks_link_idx`, que sirve para los backlinks.
+- El `content` de un enlace es el título de su destino, para la búsqueda y la exportación. `save_document` lo toma del título actual al guardar, y `rename_page` y `save_document` (al cambiar el título de la página) actualizan los enlaces que apuntan a ella, en la misma transacción.
+- `page_link_targets` lee los destinos de los enlaces de una página, también los que están en la papelera.
+- Probado: v6→v7 y v1→v7 conservando los `rowid` y los adjuntos, un fallo a mitad que deja la v6 intacta, y una copia v6 restaurada y actualizada.
+
 ## Evolución
-- Las migraciones publicadas (`0001`…`0006`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
+- Las migraciones publicadas (`0001`…`0007`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).
 - Antes de actualizar una base existente en disco se crea una copia verificada con el esquema antiguo. Si esa copia falla, no se migra.
 - Las copias de esquemas anteriores son válidas: la verificación acepta `1..=LATEST` y la restauración actualiza la base después de restaurar.

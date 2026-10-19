@@ -78,6 +78,8 @@ pub(super) enum BlockAction {
     OpenFile,
     SaveFile,
     RevealFile,
+    /// A link (ADR 0008): open its page.
+    OpenLink,
 }
 
 /// What a block reported while being drawn.
@@ -202,6 +204,7 @@ pub(super) fn kind_icon(kind: BlockKind) -> &'static str {
         BlockKind::Quote => icons::QUOTE,
         BlockKind::Code => icons::CODE,
         BlockKind::File => icons::PAPERCLIP,
+        BlockKind::PageLink => icons::LINK,
     }
 }
 
@@ -217,6 +220,8 @@ pub(super) struct BlockView<'a> {
     pub(super) attachment: Option<&'a silex_desktop::attachment::Attachment>,
     /// Its image preview, if it has one (H7.2).
     pub(super) preview: Option<&'a PreviewState>,
+    /// A link's page, as its card shows it (H7.5).
+    pub(super) link: Option<LinkState>,
 }
 
 /// One block, borderless: a hover handle in the left gutter (type and
@@ -253,8 +258,11 @@ pub(super) fn block_field(
             ui.add_space(f32::from(block.indent) * INDENT_WIDTH);
             // A file block is a card, not text (ADR 0007). It keeps the
             // block's focus id, so the arrow keys reach it.
-            if block.kind == BlockKind::File {
-                let (card, file_action) = file_card(ui, id, block, view.attachment, view.preview);
+            if !block.kind.is_text() {
+                let (card, file_action) = match &view.link {
+                    Some(state) if block.kind == BlockKind::PageLink => link_card(ui, id, state),
+                    _ => file_card(ui, id, block, view.attachment, view.preview),
+                };
                 if view.scroll_into_view {
                     card.scroll_to_me(None);
                 }
@@ -443,6 +451,15 @@ fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<
                     }
                 });
                 ui.separator();
+            } else if block.kind == BlockKind::PageLink {
+                if ui
+                    .button((icons::icon(icons::OPEN_EXTERNAL), " Abrir la página"))
+                    .clicked()
+                {
+                    action = Some(BlockAction::OpenLink);
+                    ui.close();
+                }
+                ui.separator();
             } else {
                 for (icon, label, chosen) in [
                     (icons::OPEN_EXTERNAL, " Abrir", BlockAction::OpenFile),
@@ -532,6 +549,7 @@ pub(super) fn slash_menu_ui(
                             editor::SlashItem::AttachFiles => {
                                 (icons::PAPERCLIP, "Adjuntar archivos…")
                             }
+                            editor::SlashItem::LinkPage => (icons::LINK, "Enlazar a una página…"),
                         };
                         let option = ui.add(egui::Button::selectable(
                             i == menu.selected,
@@ -763,7 +781,12 @@ impl SilexApp {
         if !self.blocks[index].kind.is_text() {
             match command {
                 EditorKey::Enter => {
-                    self.block_action(BlockAction::OpenFile, &block_id);
+                    let open = if self.blocks[index].kind == BlockKind::PageLink {
+                        BlockAction::OpenLink
+                    } else {
+                        BlockAction::OpenFile
+                    };
+                    self.block_action(open, &block_id);
                     return;
                 }
                 EditorKey::Backspace | EditorKey::Delete => {
@@ -833,6 +856,17 @@ impl SilexApp {
             // «/archivo»: the text goes, the block stays, and the file
             // dialog opens after this frame (H7.3). If the block is left
             // empty, the files take its place.
+            // «/enlace»: the text goes and the page picker opens; the link
+            // takes the block's place if it was left empty.
+            EditorKey::Slash(editor::SlashItem::LinkPage) => {
+                self.slash = None;
+                let kind = self.blocks[index].kind;
+                let caret = editor::apply_slash(&mut self.blocks, index, cursor, kind);
+                let empty = self.blocks[index].content.trim().is_empty()
+                    && self.blocks[index].kind == BlockKind::Paragraph;
+                self.open_link_picker(Some(block_id.clone()), empty.then(|| block_id.clone()));
+                caret
+            }
             EditorKey::Slash(editor::SlashItem::AttachFiles) => {
                 self.slash = None;
                 let kind = self.blocks[index].kind;
@@ -1031,6 +1065,11 @@ impl SilexApp {
                 self.files.pending.push((action, id.to_owned()));
                 return;
             }
+            BlockAction::OpenLink => {
+                let result = self.open_link(id);
+                self.report(result);
+                return;
+            }
             // A file is not converted, and text does not become a file.
             BlockAction::Convert(kind) if !kind.is_text() || !self.blocks[index].kind.is_text() => {
                 false
@@ -1192,6 +1231,8 @@ impl SilexApp {
                                     .attachment
                                     .as_ref()
                                     .and_then(|a| self.files.previews.get(a)),
+                                link: (block.kind == BlockKind::PageLink)
+                                    .then(|| link_state(&self.pages, &self.links.targets, block)),
                             };
                             if index > 0 {
                                 ui.add_space(heading_space(block.kind));
@@ -1283,6 +1324,7 @@ impl SilexApp {
                                     position: 0,
                                     indent: 0,
                                     attachment: None,
+                                    link: None,
                                 };
                                 self.pending_focus = Some((block.id.clone(), 0));
                                 self.blocks.push(block);

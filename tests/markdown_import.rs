@@ -75,6 +75,7 @@ fn to_blocks(blocks: &[NewBlock]) -> Vec<silex_desktop::model::Block> {
             position: 0,
             indent: b.indent,
             attachment: None,
+            link: None,
         })
         .collect()
 }

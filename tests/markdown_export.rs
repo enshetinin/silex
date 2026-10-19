@@ -13,6 +13,7 @@ fn b(kind: BlockKind, indent: u8, content: &str) -> Block {
         position: 0,
         indent,
         attachment: None,
+        link: None,
     }
 }
 

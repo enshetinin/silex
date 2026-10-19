@@ -16,6 +16,8 @@ pub enum Command {
     ExportPage,
     /// The file dialog, to attach files to the open page (H7.3).
     AttachFiles,
+    /// The page picker, to link another page (H7.5).
+    LinkPage,
     SaveNow,
     TrashPage,
     OpenTrash,
@@ -52,7 +54,7 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 22] = [
+    pub const ALL: [Command; 23] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
@@ -62,6 +64,7 @@ impl Command {
         Command::RemoveFavorite,
         Command::ExportPage,
         Command::AttachFiles,
+        Command::LinkPage,
         Command::SaveNow,
         Command::TrashPage,
         Command::OpenTrash,
@@ -88,6 +91,7 @@ impl Command {
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
             Command::AttachFiles => "Adjuntar archivos…",
+            Command::LinkPage => "Enlazar a una página…",
             Command::SaveNow => "Guardar ahora",
             Command::TrashPage => "Enviar la página a la papelera",
             Command::OpenTrash => "Abrir la papelera",
@@ -124,6 +128,7 @@ impl Command {
                 "documento",
                 "file",
             ],
+            Command::LinkPage => &["enlace", "vincular", "mencionar", "referencia", "link"],
             Command::SaveNow => &["save"],
             Command::TrashPage => &["borrar", "eliminar", "quitar", "delete"],
             Command::OpenTrash => &["restaurar", "borradas", "eliminadas", "recuperar", "trash"],
@@ -154,7 +159,7 @@ impl Command {
             Command::NewSubpage => cx.page_open && !cx.database_open,
             Command::NewRow => cx.database_open,
             // A database shows its table, not blocks.
-            Command::AttachFiles => cx.page_open && !cx.database_open,
+            Command::AttachFiles | Command::LinkPage => cx.page_open && !cx.database_open,
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
             Command::AddFavorite => cx.page_open && !cx.favorite,
             Command::RemoveFavorite => cx.page_open && cx.favorite,
@@ -358,6 +363,7 @@ mod tests {
         assert_eq!(matching_commands("anadir", &cx()), [Command::AddFavorite]);
         assert_eq!(matching_commands("adjuntar", &cx()), [Command::AttachFiles]);
         assert_eq!(matching_commands("pdf", &cx()), [Command::AttachFiles]);
+        assert_eq!(matching_commands("enlazar", &cx()), [Command::LinkPage]);
         assert!(matching_commands("receta", &cx()).is_empty());
     }
 

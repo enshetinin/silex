@@ -10,6 +10,7 @@ fn block(kind: BlockKind, indent: u8) -> Block {
         position: 0,
         indent,
         attachment: None,
+        link: None,
     }
 }
 

@@ -29,6 +29,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (4, include_str!("db/migrations/0004_settings.sql")),
     (5, include_str!("db/migrations/0005_databases.sql")),
     (6, include_str!("db/migrations/0006_attachments.sql")),
+    (7, include_str!("db/migrations/0007_page_links.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -359,13 +360,18 @@ impl Database {
     }
 
     /// Renames a live page. The FTS index follows through its trigger.
+    /// Renames a live page, and the links that point at it (ADR 0008:
+    /// their text is its title, for search and export), in one transaction.
     pub fn rename_page(&self, id: &str, title: &str) -> Result<()> {
-        let affected = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let affected = tx.execute(
             "UPDATE pages SET title = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1 AND deleted_at IS NULL",
             params![id, title],
         )?;
         ensure!(affected == 1, "La página no existe o está en la papelera");
+        retitle_links(&tx, id, title)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -981,7 +987,8 @@ impl Database {
 
     pub fn list_blocks(&self, page_id: &str) -> Result<Vec<Block>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, page_id, kind, content, checked, position, indent, attachment_id
+            "SELECT id, page_id, kind, content, checked, position, indent, attachment_id,
+                    link_page_id
              FROM blocks WHERE page_id = ?1 ORDER BY position, rowid",
         )?;
         let rows = stmt.query_map([page_id], read_block)?;
@@ -1026,6 +1033,13 @@ impl Database {
                 "El bloque {} no encaja con su adjunto",
                 block.id
             );
+            // A link may have lost its page (`ON DELETE SET NULL`), but only
+            // a link points at one.
+            ensure!(
+                block.kind == BlockKind::PageLink || block.link.is_none(),
+                "El bloque {} no es un enlace",
+                block.id
+            );
         }
 
         let tx = self.conn.transaction()?;
@@ -1037,9 +1051,11 @@ impl Database {
         if affected != 1 {
             bail!("La página ya no existe o está en la papelera");
         }
+        retitle_links(&tx, page_id, title)?;
         let stored: HashMap<String, Block> = {
             let mut stmt = tx.prepare(
-                "SELECT id, page_id, kind, content, checked, position, indent, attachment_id
+                "SELECT id, page_id, kind, content, checked, position, indent, attachment_id,
+                        link_page_id
                  FROM blocks WHERE page_id = ?1",
             )?;
             let rows = stmt.query_map([page_id], read_block)?;
@@ -1051,6 +1067,24 @@ impl Database {
         }
         for (index, block) in blocks.iter().enumerate() {
             let position = index as i64;
+            // A link's text is its page's current title (ADR 0008), whatever
+            // the open document still holds.
+            let linked;
+            let block = match &block.link {
+                Some(target) => {
+                    let title: Option<String> = tx
+                        .query_row("SELECT title FROM pages WHERE id = ?1", [target], |r| {
+                            r.get(0)
+                        })
+                        .optional()?;
+                    linked = Block {
+                        content: title.unwrap_or_else(|| block.content.clone()),
+                        ..block.clone()
+                    };
+                    &linked
+                }
+                None => block,
+            };
             match stored.get(&block.id) {
                 // Unchanged rows are skipped so FTS is only touched when needed.
                 Some(old)
@@ -1059,11 +1093,12 @@ impl Database {
                         && old.checked == block.checked
                         && old.indent == block.indent
                         && old.attachment == block.attachment
+                        && old.link == block.link
                         && old.position == position => {}
                 Some(_) => {
                     tx.execute(
                         "UPDATE blocks SET kind = ?2, content = ?3, checked = ?4, position = ?5,
-                             indent = ?6, attachment_id = ?7,
+                             indent = ?6, attachment_id = ?7, link_page_id = ?8,
                              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                          WHERE id = ?1",
                         params![
@@ -1073,7 +1108,8 @@ impl Database {
                             block.checked,
                             position,
                             block.indent,
-                            block.attachment
+                            block.attachment,
+                            block.link
                         ],
                     )
                     .with_context(|| format!("No se pudo guardar el bloque {}", block.id))?;
@@ -1082,8 +1118,8 @@ impl Database {
                 None => {
                     tx.execute(
                         "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent,
-                                             attachment_id)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                             attachment_id, link_page_id)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         params![
                             block.id,
                             page_id,
@@ -1092,7 +1128,8 @@ impl Database {
                             block.checked,
                             position,
                             block.indent,
-                            block.attachment
+                            block.attachment,
+                            block.link
                         ],
                     )
                     .with_context(|| format!("No se pudo guardar el bloque {}", block.id))?;
@@ -1234,6 +1271,36 @@ impl Database {
         tx.execute("DELETE FROM settings WHERE key = ?1", [COMPACTING])?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The pages the links of `page_id` point at, live or in the trash
+    /// (ADR 0008).
+    pub fn page_link_targets(&self, page_id: &str) -> Result<Vec<LinkTarget>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT p.id, p.title, p.kind, p.deleted_at IS NOT NULL
+             FROM blocks b JOIN pages p ON p.id = b.link_page_id
+             WHERE b.page_id = ?1",
+        )?;
+        let rows = stmt.query_map([page_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
+            ))
+        })?;
+        let mut targets = Vec::new();
+        for row in rows {
+            let (id, title, kind, trashed) = row?;
+            targets.push(LinkTarget {
+                id,
+                title,
+                // An unknown kind (a newer Silex) shows as a page.
+                kind: PageKind::parse(&kind).unwrap_or(PageKind::Page),
+                trashed,
+            });
+        }
+        Ok(targets)
     }
 
     /// An attachment's details, without its data.
@@ -1667,8 +1734,28 @@ fn read_attachment(r: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
     })
 }
 
+/// Keeps the text of the links to `page` equal to its title (ADR 0008).
+fn retitle_links(tx: &Connection, page: &str, title: &str) -> Result<()> {
+    tx.execute(
+        "UPDATE blocks SET content = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE link_page_id = ?1 AND content <> ?2",
+        params![page, title],
+    )?;
+    Ok(())
+}
+
+/// A page a link points at, as its card shows it (ADR 0008).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkTarget {
+    pub id: String,
+    pub title: String,
+    pub kind: PageKind,
+    /// In the trash: the link says so, and opening it offers to restore.
+    pub trashed: bool,
+}
+
 /// Maps a `blocks` row (id, page_id, kind, content, checked, position,
-/// indent, attachment_id).
+/// indent, attachment_id, link_page_id).
 /// An unknown kind is a conversion error, not a panic.
 fn read_block(r: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
     let kind: String = r.get(2)?;
@@ -1688,5 +1775,6 @@ fn read_block(r: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
         position: r.get(5)?,
         indent: r.get(6)?,
         attachment: r.get(7)?,
+        link: r.get(8)?,
     })
 }

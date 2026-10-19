@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 6;
+const LATEST: i64 = 7;
 
 struct TempDir(PathBuf);
 
@@ -604,7 +604,7 @@ mod v6 {
     const SCHEMA_V5: &str = include_str!("../src/db/migrations/0005_databases.sql");
 
     /// A database exactly as Silex v5 left it (v4 content plus a database).
-    fn write_v5_database(path: &Path) -> anyhow::Result<()> {
+    pub(super) fn write_v5_database(path: &Path) -> anyhow::Result<()> {
         write_v4_database(path)?;
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA_V5)?;
@@ -630,6 +630,7 @@ mod v6 {
             position: 0,
             indent: 0,
             attachment: Some(attachment.id),
+            link: None,
         });
         let title = db.get_page(page)?.map(|p| p.title).unwrap_or_default();
         db.save_document(page, &title, &blocks)?;
@@ -724,6 +725,135 @@ mod v6 {
         assert!(db.get_page(&page)?.is_none(), "the copy had no attachments");
         assert_eq!(db.search_pages("mundo")?.len(), 1);
         file_block(&mut db, "p1")?;
+        Ok(())
+    }
+}
+
+mod v7 {
+    use super::v5::table_exists;
+    use super::v6::write_v5_database;
+    use super::*;
+    use silex_desktop::model::{Block, BlockKind};
+
+    const SCHEMA_V6: &str = include_str!("../src/db/migrations/0006_attachments.sql");
+
+    /// A database exactly as Silex v6 left it (v5 content plus a file block).
+    fn write_v6_database(path: &Path) -> anyhow::Result<()> {
+        write_v5_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V6)?;
+        conn.execute_batch(
+            "INSERT INTO attachments (id, name, mime, size, data) VALUES ('a1', 'acta.pdf', 'application/pdf', 3, x'010203');
+             INSERT INTO blocks (id, page_id, kind, content, position, attachment_id)
+                 VALUES ('f1', 'p1', 'file', 'acta.pdf', 5, 'a1');
+             PRAGMA user_version = 6;",
+        )?;
+        Ok(())
+    }
+
+    fn link(page: &str, to: &str) -> Block {
+        Block {
+            id: uuid::Uuid::new_v4().to_string(),
+            page_id: page.into(),
+            kind: BlockKind::PageLink,
+            content: String::new(),
+            checked: false,
+            position: 0,
+            indent: 0,
+            attachment: None,
+            link: Some(to.into()),
+        }
+    }
+
+    #[test]
+    fn v6_database_gets_links_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v6_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(has_column(&tmp.db(), "blocks", "link_page_id")?);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        // The file block keeps its attachment.
+        let blocks = db.list_blocks("p1")?;
+        let file = blocks.iter().find(|b| b.id == "f1").expect("file block");
+        assert_eq!(file.attachment.as_deref(), Some("a1"));
+        assert_eq!(db.attachment_data("a1")?, [1, 2, 3]);
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v6 copy first"
+        );
+        // A link works.
+        let mut blocks = db.list_blocks("p1")?;
+        blocks.push(link("p1", "p2"));
+        db.save_document("p1", "Recetas", &blocks)?;
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        let broken: Vec<String> = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert!(broken.is_empty(), "{broken:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v7() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        let mut blocks = db.list_blocks("p2")?;
+        blocks.push(link("p2", "p1"));
+        db.save_document("p2", "Pan de masa madre", &blocks)?;
+        assert_eq!(
+            db.list_blocks("p2")?.last().map(|b| b.content.clone()),
+            Some("Recetas".into())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v6_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v6_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        // The index name is taken, so 0007 fails after `blocks` was rebuilt.
+        Connection::open(tmp.db())?
+            .execute_batch("CREATE INDEX blocks_link_idx ON pages(title);")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 7"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 6);
+        drop(conn);
+        assert!(!has_column(&tmp.db(), "blocks", "link_page_id")?);
+        assert!(table_exists(&tmp.db(), "attachments")?);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        Ok(())
+    }
+
+    #[test]
+    fn v6_backup_restores_into_v7() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v6_database(&old_db)?;
+        let v6_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        let page = db.create_page("Se pierde al restaurar", None)?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v6_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.get_page(&page)?.is_none());
+        assert_eq!(db.attachment_data("a1")?, [1, 2, 3]);
+        let mut blocks = db.list_blocks("p1")?;
+        blocks.push(link("p1", "p2"));
+        db.save_document("p1", "Recetas", &blocks)?;
         Ok(())
     }
 }

@@ -18,6 +18,7 @@ fn block(id: &str) -> Block {
         position: 0,
         indent: 0,
         attachment: None,
+        link: None,
     }
 }
 
@@ -52,6 +53,7 @@ fn frame(
                     focused: false,
                     attachment: None,
                     preview: None,
+                    link: None,
                 },
             )
             .text_changed;
@@ -1504,6 +1506,7 @@ fn sidebar_width_is_stable_across_frames() -> anyhow::Result<()> {
                 position: 0,
                 indent: 0,
                 attachment: None,
+                link: None,
             });
             egui::Popup::open_id(&ctx, super::blocks::handle_menu_id("b"));
         }
@@ -3190,5 +3193,181 @@ fn freeing_space_keeps_what_undo_can_bring_back() -> anyhow::Result<()> {
     app.history.clear();
     app.start_free_space(&ctx)?;
     assert!(app.db.attachment(&attachment)?.is_none());
+    Ok(())
+}
+
+// ---- H7.5: links between pages ----
+
+/// «Recetas» (with «Pan» inside) and «Diario», open, with «Hoy» and an
+/// empty block below it, focused. Returns (app, ctx, recetas, empty block).
+fn links_app() -> anyhow::Result<(SilexApp, egui::Context, String, String)> {
+    let db = Database::open_in_memory()?;
+    let recetas = db.create_page("Recetas", None)?;
+    db.create_page("Pan", Some(&recetas))?;
+    let diario = db.create_page("Diario", None)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(diario.clone())?;
+    app.blocks = vec![
+        Block {
+            content: "Hoy".into(),
+            page_id: diario.clone(),
+            ..block("hoy")
+        },
+        Block {
+            page_id: diario,
+            ..block("vacio")
+        },
+    ];
+    app.mark_dirty();
+    let ctx = egui::Context::default();
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id("vacio")));
+    app_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, recetas, "vacio".into()))
+}
+
+fn link_block(app: &SilexApp) -> Block {
+    app.blocks
+        .iter()
+        .find(|b| b.kind == BlockKind::PageLink)
+        .cloned()
+        .expect("a link block")
+}
+
+#[test]
+fn double_brackets_link_a_page_in_place_of_the_empty_block() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, recetas, empty) = links_app()?;
+    app_frame(&mut app, &ctx, type_text("[["));
+    let picker = app.links.picker.clone().expect("the page picker opens");
+    assert_eq!(picker.replace.as_deref(), Some(empty.as_str()));
+    assert!(
+        app.blocks.iter().all(|b| !b.content.contains("[[")),
+        "brackets gone"
+    );
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("rece"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.links.picker.is_none());
+    let kinds: Vec<BlockKind> = app.blocks.iter().map(|b| b.kind).collect();
+    assert_eq!(
+        kinds,
+        [BlockKind::Paragraph, BlockKind::PageLink],
+        "in its place"
+    );
+    let link = link_block(&app);
+    assert_eq!(link.link.as_deref(), Some(recetas.as_str()));
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t.starts_with("Recetas")),
+        "{painted:?}"
+    );
+    app.save_now()?;
+    let page = app.selected.clone().unwrap_or_default();
+    assert_eq!(
+        app.db.list_blocks(&page)?[1].link.as_deref(),
+        Some(recetas.as_str())
+    );
+    // Cmd+Z takes it away.
+    ctx.memory_mut(|m| m.surrender_focus(app.block_field_id(&link.id)));
+    app_frame(&mut app, &ctx, undo());
+    assert!(app.blocks.iter().all(|b| b.kind != BlockKind::PageLink));
+    Ok(())
+}
+
+#[test]
+fn intro_on_a_link_opens_its_page_and_renames_show_at_once() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, recetas, _) = links_app()?;
+    app.open_link_picker(None, None);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("Pan"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let link = link_block(&app);
+    // Its card shows the page's path, and its current title after a rename.
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.starts_with("Pan") && t.ends_with("Recetas")),
+        "{painted:?}"
+    );
+    let pan = link.link.clone().expect("its page");
+    app.db.rename_page(&pan, "Pan de centeno")?;
+    app.reload_pages()?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t.starts_with("Pan de centeno")),
+        "{painted:?}"
+    );
+    // Intro on the card opens it.
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&link.id)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(app.selected.as_deref(), Some(pan.as_str()));
+    let _ = recetas;
+    Ok(())
+}
+
+#[test]
+fn a_link_to_a_page_in_the_trash_offers_to_restore_it() -> anyhow::Result<()> {
+    let (mut app, ctx, recetas, _) = links_app()?;
+    app.open_link_picker(None, None);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("Recetas"));
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    let link = link_block(&app);
+    app.save_now()?;
+    app.db.trash_page(&recetas)?;
+    app.reload_pages()?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t.contains("en la papelera")),
+        "{painted:?}"
+    );
+    app.block_action(BlockAction::OpenLink, &link.id);
+    assert_eq!(
+        app.links.restore.as_ref().map(|(id, _)| id.clone()),
+        Some(recetas.clone())
+    );
+    // A new window is measured, unseen, on its first frame.
+    app_frame(&mut app, &ctx, vec![]);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.contains("¿Quieres restaurarla y abrirla?")),
+        "{painted:?}"
+    );
+    // «Restaurar y abrir»: as the restore button would.
+    app.links.restore = None;
+    app.restore_from_trash(&recetas)?;
+    assert_eq!(app.selected.as_deref(), Some(recetas.as_str()));
+    assert!(app.db.get_page(&recetas)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn slash_enlace_and_the_palette_open_the_picker_and_escape_closes_it() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, _, empty) = links_app()?;
+    app_frame(&mut app, &ctx, type_text("/enlace"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let picker = app.links.picker.clone().expect("opened by /enlace");
+    assert_eq!(picker.replace.as_deref(), Some(empty.as_str()));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.links.picker.is_none(), "Esc closes it");
+    assert!(app.blocks.iter().all(|b| b.kind != BlockKind::PageLink));
+
+    app.run_command(&ctx, silex_desktop::palette::Command::LinkPage)?;
+    assert!(app.links.picker.is_some(), "opened by the palette");
+    // The page that is open is not offered.
+    let page = app.selected.clone();
+    let offered = links::picker_matches(&app.pages, "", page.as_deref());
+    assert!(offered.iter().all(|p| Some(&p.id) != page.as_ref()));
     Ok(())
 }

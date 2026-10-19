@@ -21,6 +21,7 @@ mod document;
 mod files;
 pub mod icons;
 mod jobs;
+mod links;
 mod palette;
 mod row_page;
 mod search;
@@ -38,8 +39,8 @@ mod view_tabs;
 
 pub use self::startup::StartupError;
 use self::{
-    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, row_page::*, search::*,
-    sidebar::*, space::*, table_undo::*, view_menus::*, view_tabs::*,
+    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, links::*, row_page::*,
+    search::*, sidebar::*, space::*, table_undo::*, view_menus::*, view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
@@ -122,6 +123,8 @@ pub struct SilexApp {
     files: Files,
     /// «Espacio» and «Liberar espacio» (H7.4).
     space: Space,
+    /// Links of the open page and the page picker (H7.5).
+    links: Links,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -205,6 +208,7 @@ impl SilexApp {
             export_job: None,
             files: Files::default(),
             space: Space::default(),
+            links: Links::default(),
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -248,6 +252,8 @@ impl SilexApp {
             // Make the open page visible in the tree.
             self.expanded.extend(ancestors(&self.pages, &id));
             self.selected = Some(id);
+            self.links.picker = None;
+            self.load_link_targets()?;
             self.rebuild_tree();
         }
         Ok(())
@@ -255,6 +261,8 @@ impl SilexApp {
 
     fn reload_pages(&mut self) -> Result<()> {
         self.pages = self.db.list_pages()?;
+        // A linked page may have gone to the trash, or come back.
+        self.load_link_targets()?;
         self.trash_count = self.db.trash_count()?;
         self.favorites = self.db.list_favorites()?;
         self.rebuild_tree();
@@ -534,7 +542,7 @@ impl SilexApp {
         self.handle_shortcuts(&ctx);
         self.handle_dropped_files(&ctx);
         // The search window has the keyboard while it is open.
-        if self.search.is_none() {
+        if self.search.is_none() && self.links.picker.is_none() {
             self.take_pasted_image(&ctx);
             self.take_editor_key(&ctx);
             self.apply_pending_focus(&ctx);
@@ -544,6 +552,7 @@ impl SilexApp {
         self.run_paste(&ctx);
         self.run_editor_key(&ctx);
         self.refresh_slash_and_selection();
+        self.take_double_bracket();
         // Save errors are shown by the status bar, so results are not reported twice.
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             let _ = self.save_now();
@@ -565,6 +574,8 @@ impl SilexApp {
         self.restore_dialog(&ctx);
         self.trash_dialog(&ctx);
         self.free_space_dialog(&ctx);
+        self.link_picker(&ctx);
+        self.link_restore_dialog(&ctx);
         // The UI may be idle between edits; wake up for the next autosave or retry.
         if let Some(at) = self.save.next_attempt() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));

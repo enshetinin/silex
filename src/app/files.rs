@@ -579,6 +579,7 @@ impl SilexApp {
                         position: 0,
                         indent: 0,
                         attachment: Some(attachment.id.clone()),
+                        link: None,
                     });
                     if self.selected.as_deref() == Some(page) {
                         self.files

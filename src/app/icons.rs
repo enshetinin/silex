@@ -68,6 +68,7 @@ pub const KEYBOARD: &str = "\u{e2d8}";
 pub const TABLE: &str = "\u{e476}";
 pub const KANBAN: &str = "\u{eb54}";
 pub const PAPERCLIP: &str = "\u{e39a}";
+pub const LINK: &str = "\u{e2e2}";
 pub const FILE: &str = "\u{e230}";
 pub const FILE_IMAGE: &str = "\u{ea24}";
 pub const FILE_PDF: &str = "\u{e702}";
@@ -139,6 +140,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("TABLE", TABLE),
     ("KANBAN", KANBAN),
     ("PAPERCLIP", PAPERCLIP),
+    ("LINK", LINK),
     ("FILE", FILE),
     ("FILE_IMAGE", FILE_IMAGE),
     ("FILE_PDF", FILE_PDF),

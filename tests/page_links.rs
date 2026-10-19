@@ -1,0 +1,196 @@
+//! Links between pages (ADR 0008): a `page_link` block points at its page by
+//! id, and its text follows the page's title.
+use silex_desktop::db::Database;
+use silex_desktop::model::{Block, BlockKind, PageKind};
+
+fn block(page: &str, kind: BlockKind, content: &str, link: Option<&str>) -> Block {
+    Block {
+        id: uuid::Uuid::new_v4().to_string(),
+        page_id: page.into(),
+        kind,
+        content: content.into(),
+        checked: false,
+        position: 0,
+        indent: 0,
+        attachment: None,
+        link: link.map(str::to_owned),
+    }
+}
+
+/// «Diario» links to «Recetas»; returns (diario, recetas, link block).
+fn linked(db: &mut Database) -> anyhow::Result<(String, String, Block)> {
+    let recetas = db.create_page("Recetas", None)?;
+    let diario = db.create_page("Diario", None)?;
+    // The text it is saved with does not matter: it becomes the title.
+    let link = block(
+        &diario,
+        BlockKind::PageLink,
+        "cualquier cosa",
+        Some(&recetas),
+    );
+    db.save_document(
+        &diario,
+        "Diario",
+        &[
+            block(&diario, BlockKind::Paragraph, "Hoy cociné", None),
+            link.clone(),
+        ],
+    )?;
+    Ok((diario, recetas, link))
+}
+
+#[test]
+fn a_link_points_at_its_page_and_reads_its_title() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let (diario, recetas, link) = linked(&mut db)?;
+    let stored = db.list_blocks(&diario)?;
+    assert_eq!(stored[1].kind, BlockKind::PageLink);
+    assert_eq!(stored[1].link.as_deref(), Some(recetas.as_str()));
+    assert_eq!(stored[1].content, "Recetas");
+    assert_eq!(stored[1].id, link.id);
+    // The page that links is found by the title it links to.
+    let hits = db.search("recetas")?;
+    assert!(hits.iter().any(|h| h.page.id == diario), "{hits:?}");
+    Ok(())
+}
+
+#[test]
+fn renaming_a_page_renames_the_links_to_it() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let (diario, recetas, link) = linked(&mut db)?;
+    db.rename_page(&recetas, "Cocina")?;
+    assert_eq!(db.list_blocks(&diario)?[1].content, "Cocina");
+    assert!(db.search("cocina")?.iter().any(|h| h.page.id == diario));
+    // Also when the title is edited in the page itself.
+    db.save_document(&recetas, "Cocina vasca", &[])?;
+    assert_eq!(db.list_blocks(&diario)?[1].content, "Cocina vasca");
+    // A stale title in the open document is corrected when it is saved.
+    let stale = Block {
+        content: "Recetas".into(),
+        ..link
+    };
+    db.save_document(&diario, "Diario", &[stale])?;
+    assert_eq!(db.list_blocks(&diario)?[0].content, "Cocina vasca");
+    Ok(())
+}
+
+#[test]
+fn links_know_when_their_page_is_in_the_trash() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let (diario, recetas, _) = linked(&mut db)?;
+    let base = db.create_database("Lecturas", None)?;
+    let mut blocks = db.list_blocks(&diario)?;
+    blocks.push(block(&diario, BlockKind::PageLink, "", Some(&base)));
+    db.save_document(&diario, "Diario", &blocks)?;
+    db.trash_page(&recetas)?;
+    let mut targets = db.page_link_targets(&diario)?;
+    targets.sort_by(|a, b| a.title.cmp(&b.title));
+    let shown: Vec<(&str, PageKind, bool)> = targets
+        .iter()
+        .map(|t| (t.title.as_str(), t.kind, t.trashed))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("Lecturas", PageKind::Database, false),
+            ("Recetas", PageKind::Page, true)
+        ]
+    );
+    // The link never broke: back from the trash, it works as before.
+    db.restore_page(&recetas)?;
+    assert!(db.page_link_targets(&diario)?.iter().all(|t| !t.trashed));
+    Ok(())
+}
+
+#[test]
+fn impossible_links_are_refused() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let (diario, _, _) = linked(&mut db)?;
+    let before = db.list_blocks(&diario)?;
+    for blocks in [
+        // A page that does not exist (foreign key).
+        vec![block(&diario, BlockKind::PageLink, "x", Some("no-existe"))],
+        // A text block with a link.
+        vec![block(&diario, BlockKind::Paragraph, "x", Some(&diario))],
+    ] {
+        assert!(db.save_document(&diario, "Diario", &blocks).is_err());
+        assert_eq!(db.list_blocks(&diario)?, before, "nothing changed");
+    }
+    assert!(db.add_block(&diario, BlockKind::PageLink).is_err());
+    Ok(())
+}
+
+// ---- Markdown export ----
+
+#[test]
+fn relative_links_climb_out_of_folders() {
+    use silex_desktop::export::relative_link;
+    use std::path::Path;
+    assert_eq!(
+        relative_link(Path::new(""), Path::new("Diario.md")),
+        "Diario.md"
+    );
+    assert_eq!(
+        relative_link(Path::new(""), Path::new("Recetas/Pan.md")),
+        "Recetas/Pan.md"
+    );
+    assert_eq!(
+        relative_link(Path::new("Recetas"), Path::new("Diario.md")),
+        "../Diario.md"
+    );
+    assert_eq!(
+        relative_link(Path::new("A/B"), Path::new("A/C/D.md")),
+        "../C/D.md"
+    );
+}
+
+#[test]
+fn links_export_as_relative_links_in_the_workspace_and_text_alone() -> anyhow::Result<()> {
+    use silex_desktop::export::{export_page_with_files, export_workspace};
+    let tmp = std::env::temp_dir().join(format!("silex-links-{}", uuid::Uuid::new_v4()));
+    let result = (|| -> anyhow::Result<()> {
+        let mut db = Database::open_in_memory()?;
+        let recetas = db.create_page("Recetas", None)?;
+        let pan = db.create_page("Pan [de] centeno", Some(&recetas))?;
+        let diario = db.create_page("Diario", None)?;
+        let borrada = db.create_page("Borrada", None)?;
+        db.save_document(
+            &diario,
+            "Diario",
+            &[
+                block(&diario, BlockKind::PageLink, "", Some(&pan)),
+                block(&diario, BlockKind::PageLink, "", Some(&recetas)),
+                block(&diario, BlockKind::PageLink, "", Some(&borrada)),
+            ],
+        )?;
+        db.save_document(
+            &pan,
+            "Pan [de] centeno",
+            &[block(&pan, BlockKind::PageLink, "", Some(&diario))],
+        )?;
+        db.trash_page(&borrada)?;
+
+        let export = export_workspace(&db, &tmp.join("todo"))?;
+        let diario_md = std::fs::read_to_string(export.dir.join("Diario.md"))?;
+        assert!(
+            diario_md.contains(r"[Pan \[de\] centeno](<Recetas/Pan [de] centeno.md>)"),
+            "{diario_md}"
+        );
+        assert!(diario_md.contains("[Recetas](<Recetas.md>)"), "{diario_md}");
+        // Not exported (in the trash): its title, as text.
+        assert!(diario_md.contains("\nBorrada\n"), "{diario_md}");
+        let pan_md =
+            std::fs::read_to_string(export.dir.join("Recetas").join("Pan [de] centeno.md"))?;
+        assert!(pan_md.contains("[Diario](<../Diario.md>)"), "{pan_md}");
+
+        // A page alone: its links are just titles.
+        let blocks = db.list_blocks(&diario)?;
+        let alone = export_page_with_files(&db, &tmp.join("sola"), "Diario", &blocks)?;
+        let text = std::fs::read_to_string(alone)?;
+        assert!(text.contains(r"Pan \[de\] centeno"), "{text}");
+        assert!(!text.contains("](<"), "{text}");
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
+}

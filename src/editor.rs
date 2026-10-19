@@ -47,6 +47,7 @@ fn new_block_like(source: &Block, kind: BlockKind, id: String, content: String) 
         position: 0,
         indent: source.indent,
         attachment: None,
+        link: None,
     }
 }
 
@@ -210,7 +211,7 @@ pub fn slash_query(content: &str, cursor: usize) -> Option<&str> {
 
 /// Lowercase without Spanish accents, so "codigo" finds "Código" and
 /// "pequeno" finds "pequeño" (slash menu and command palette).
-pub(crate) fn fold(text: &str) -> String {
+pub fn fold(text: &str) -> String {
     text.chars()
         .flat_map(char::to_lowercase)
         .map(|c| match c {
@@ -237,8 +238,8 @@ fn aliases(kind: BlockKind) -> &'static [&'static str] {
         BlockKind::Numbered => &["numerada", "ol", "1.", "numero"],
         BlockKind::Quote => &["cita", "quote", ">"],
         BlockKind::Code => &["codigo", "code", "```"],
-        // Not offered: a file block is made by attaching a file.
-        BlockKind::File => &[],
+        // Not offered: made by attaching a file or choosing a page.
+        BlockKind::File | BlockKind::PageLink => &[],
     }
 }
 
@@ -260,7 +261,12 @@ pub fn slash_matches(query: &str) -> Vec<BlockKind> {
 pub enum SlashItem {
     Kind(BlockKind),
     AttachFiles,
+    /// A link to another page (H7.5, ADR 0008): opens the page picker.
+    LinkPage,
 }
+
+/// Words «Enlazar a una página» answers to in the slash menu.
+const LINK_WORDS: &[&str] = &["enlace", "enlazar", "pagina", "link", "vincular", "mencion"];
 
 /// Words «Adjuntar archivos» answers to in the slash menu.
 const ATTACH_WORDS: &[&str] = &[
@@ -283,6 +289,9 @@ pub fn slash_items(query: &str) -> Vec<SlashItem> {
         .map(SlashItem::Kind)
         .collect();
     let folded = fold(query);
+    if LINK_WORDS.iter().any(|w| w.starts_with(&folded)) {
+        items.push(SlashItem::LinkPage);
+    }
     if ATTACH_WORDS.iter().any(|w| w.starts_with(&folded)) {
         items.push(SlashItem::AttachFiles);
     }
