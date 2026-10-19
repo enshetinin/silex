@@ -1,6 +1,7 @@
 //! Typed properties (H6.2, ADR 0006): the columns of a database and the
 //! values of its rows.
 use silex_desktop::db::{Database, Shift};
+use silex_desktop::model::ViewKind;
 use silex_desktop::property::{CellValue, Date, OptionColor, Property, PropertyKind};
 
 fn names(properties: &[Property]) -> Vec<&str> {
@@ -479,8 +480,8 @@ fn views_are_added_renamed_moved_and_deleted_but_never_the_last() -> anyhow::Res
         op: FilterOp::Contains,
         value: "a".into(),
     });
-    let copy = db.add_view(&base, "Tabla (copia)", &config)?;
-    let empty = db.add_view(&base, "Tabla 2", &ViewConfig::default())?;
+    let copy = db.add_view(&base, "Tabla (copia)", ViewKind::Table, &config)?;
+    let empty = db.add_view(&base, "Tabla 2", ViewKind::Table, &ViewConfig::default())?;
     assert_eq!(names(&db)?, ["Tabla", "Tabla (copia)", "Tabla 2"]);
     assert_eq!(db.database_views(&base)?[1].config, config);
 
@@ -500,6 +501,74 @@ fn views_are_added_renamed_moved_and_deleted_but_never_the_last() -> anyhow::Res
     assert!(db.rename_view("no-existe", "x").is_err());
     assert!(db.delete_view("no-existe").is_err());
     let page = db.create_page("Notas", None)?;
-    assert!(db.add_view(&page, "x", &ViewConfig::default()).is_err());
+    assert!(
+        db.add_view(&page, "x", ViewKind::Board, &ViewConfig::default())
+            .is_err()
+    );
+    Ok(())
+}
+
+// ---- H6.5: board views ----
+
+#[test]
+fn a_board_view_keeps_its_kind_and_the_property_it_groups_by() -> anyhow::Result<()> {
+    use silex_desktop::view::ViewConfig;
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let estado = db.add_property(&base, "Estado", PropertyKind::Select)?;
+    let mut config = ViewConfig::default();
+    config.group_by = Some(estado.clone());
+    let board = db.add_view(&base, "Tablero", ViewKind::Board, &config)?;
+    let views = db.database_views(&base)?;
+    let kinds: Vec<ViewKind> = views.iter().map(|v| v.kind).collect();
+    assert_eq!(kinds, [ViewKind::Table, ViewKind::Board]);
+    assert_eq!(views[1].id, board);
+    assert_eq!(views[1].config.group_by.as_deref(), Some(estado.as_str()));
+
+    // Deleting the property it groups by leaves the view readable; the
+    // board falls back to another select (or asks for one).
+    db.delete_property(&estado)?;
+    let views = db.database_views(&base)?;
+    assert_eq!(views[1].kind, ViewKind::Board);
+    assert!(
+        silex_desktop::view::board_property(&db.database_properties(&base)?, &views[1].config)
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn options_move_within_their_property() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let estado = db.add_property(&base, "Estado", PropertyKind::Select)?;
+    let otra = db.add_property(&base, "Otra", PropertyKind::Select)?;
+    let a = db.add_select_option(&estado, "A", OptionColor::Gray)?;
+    let b = db.add_select_option(&estado, "B", OptionColor::Gray)?;
+    let c = db.add_select_option(&estado, "C", OptionColor::Gray)?;
+    db.add_select_option(&otra, "Z", OptionColor::Gray)?;
+    let order = |db: &Database| -> anyhow::Result<Vec<String>> {
+        Ok(db
+            .database_properties(&base)?
+            .into_iter()
+            .find(|p| p.id == estado)
+            .map(|p| p.options.into_iter().map(|o| o.name).collect())
+            .unwrap_or_default())
+    };
+    assert!(db.move_select_option(&c, Shift::Up)?);
+    assert_eq!(order(&db)?, ["A", "C", "B"]);
+    assert!(db.move_select_option(&a, Shift::Down)?);
+    assert_eq!(order(&db)?, ["C", "A", "B"]);
+    assert!(!db.move_select_option(&b, Shift::Down)?, "already last");
+    assert!(!db.move_select_option(&c, Shift::Up)?, "already first");
+    assert!(db.move_select_option("no-existe", Shift::Up).is_err());
+    // The other property's options are untouched.
+    let z: Vec<String> = db
+        .database_properties(&base)?
+        .into_iter()
+        .find(|p| p.id == otra)
+        .map(|p| p.options.into_iter().map(|o| o.name).collect())
+        .unwrap_or_default();
+    assert_eq!(z, ["Z"]);
     Ok(())
 }

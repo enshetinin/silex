@@ -931,11 +931,18 @@ fn database_filter_menu() -> anyhow::Result<()> {
 
 // ---- H6.3b: view tabs ----
 
+/// «+» after the tabs, then «Tabla» in its menu (H6.5 added «Tablero»).
+fn add_table_view(harness: &mut Harness<'_, SilexApp>) {
+    click_button(harness, "Nueva vista");
+    menu_item(harness, "Tabla").expect("«Tabla»").click();
+    harness.run();
+}
+
 #[test]
 fn view_tabs_add_rename_and_delete_views() -> anyhow::Result<()> {
     let (app, base, _) = database_app()?;
     let mut harness = a11y_harness(app);
-    click_button(&mut harness, "Nueva vista");
+    add_table_view(&mut harness);
     assert!(harness.query_by_label("Vista «Tabla 2»").is_some());
     let open = |h: &Harness<'_, SilexApp>| {
         h.state()
@@ -992,8 +999,180 @@ fn database_view_menu() -> anyhow::Result<()> {
         "database_view_menu_light",
         eframe::egui::Theme::Light,
         |harness| {
-            click_button(harness, "Nueva vista");
+            add_table_view(harness);
             click_button(harness, "Vista «Tabla 2»");
         },
     )
+}
+
+// ---- H6.5: board view ----
+
+/// «Lecturas» open in a new board, grouped by «Estado».
+fn board_app() -> anyhow::Result<(SilexApp, Vec<String>)> {
+    let (mut app, _, rows) = database_app()?;
+    app.add_view(silex_desktop::model::ViewKind::Board)?;
+    Ok((app, rows))
+}
+
+#[test]
+fn board_cards_and_menus_have_names() -> anyhow::Result<()> {
+    use silex_desktop::property::CellValue;
+    let (app, rows) = board_app()?;
+    let mut harness = a11y_harness(app);
+    assert_accessible(&harness, "board");
+    for label in [
+        "Tarjeta «Rayuela», en Terminado; Autor: Julio Cortázar; Páginas: 736; Leído: Sí; \
+         Terminado: 2026-09-14",
+        "Tarjeta «Pedro Páramo», en Sin Estado; Autor: Juan Rulfo; Páginas: 124",
+        "Nueva tarjeta en «Leyendo»",
+    ] {
+        assert!(harness.query_by_label(label).is_some(), "{label}");
+    }
+
+    // Without a mouse drag: the card's menu moves it.
+    harness
+        .get_by_label_contains("Tarjeta «Pedro Páramo»")
+        .click_secondary();
+    harness.run();
+    assert_accessible(&harness, "card menu");
+    assert!(menu_item(&harness, "Sin Estado").is_none(), "it is there");
+    menu_item(&harness, "Leyendo").expect("«Leyendo»").click();
+    harness.run();
+    let state = harness.state();
+    let estado = state
+        .database
+        .as_ref()
+        .and_then(|d| d.properties.iter().find(|p| p.name == "Estado"))
+        .expect("Estado");
+    let leyendo = estado.options.iter().find(|o| o.name == "Leyendo");
+    assert_eq!(
+        state
+            .db
+            .database_values(&state.database.as_ref().expect("open").id)?
+            .get(&rows[1])
+            .and_then(|cells| cells.get(&estado.id))
+            .cloned(),
+        leyendo.map(|o| CellValue::Select(o.id.clone()))
+    );
+
+    click_button(&mut harness, "Agrupar: Estado");
+    assert_accessible(&harness, "group menu");
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+    click_button(&mut harness, "Nueva vista");
+    assert_accessible(&harness, "new view menu");
+    assert!(menu_item(&harness, "Tablero").is_some());
+    Ok(())
+}
+
+#[test]
+fn database_board() -> anyhow::Result<()> {
+    board_snapshot("database_board_light", eframe::egui::Theme::Light)
+}
+
+#[test]
+fn database_board_dark() -> anyhow::Result<()> {
+    board_snapshot("database_board_dark", eframe::egui::Theme::Dark)
+}
+
+fn board_snapshot(name: &str, theme: eframe::egui::Theme) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (app, _) = board_app()?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+/// The options of «Estado» on the open board, in order.
+fn board_columns(harness: &Harness<'_, SilexApp>) -> Vec<String> {
+    harness
+        .state()
+        .database
+        .as_ref()
+        .and_then(|d| d.properties.iter().find(|p| p.name == "Estado"))
+        .map(|p| p.options.iter().map(|o| o.name.clone()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_board_column_menu_renames_moves_and_deletes_its_option() -> anyhow::Result<()> {
+    let (app, rows) = board_app()?;
+    let mut harness = a11y_harness(app);
+    assert_eq!(board_columns(&harness), ["Terminado", "Leyendo"]);
+
+    click_button(&mut harness, "Grupo «Leyendo»");
+    assert_accessible(&harness, "column menu");
+    assert_steady(&mut harness, "Nombre del grupo");
+    assert!(
+        menu_item(&harness, "Mover a la derecha").is_some_and(|b| b.accesskit_node().is_disabled()),
+        "already last"
+    );
+    menu_item(&harness, "Mover a la izquierda")
+        .expect("move")
+        .click();
+    harness.run();
+    assert_eq!(board_columns(&harness), ["Leyendo", "Terminado"]);
+
+    // Renamed in its field; saved when the menu closes.
+    click_button(&mut harness, "Grupo «Leyendo»");
+    harness.get_by_label("Nombre del grupo").type_text(" ya");
+    harness.run();
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+    harness.run();
+    assert_eq!(board_columns(&harness), ["Leyendo ya", "Terminado"]);
+
+    // Deleting asks first and says where its cards go.
+    click_button(&mut harness, "Grupo «Leyendo ya»");
+    menu_item(&harness, "Borrar el grupo")
+        .expect("delete")
+        .click();
+    harness.run();
+    assert!(
+        harness
+            .query_by_label_contains("1 tarjeta pasará a «Sin Estado»")
+            .is_some()
+    );
+    click_button(&mut harness, "Borrar");
+    assert_eq!(board_columns(&harness), ["Terminado"]);
+    let state = harness.state();
+    let base = state.database.as_ref().expect("open").id.clone();
+    let ficciones = state.db.database_values(&base)?.get(&rows[2]).cloned();
+    assert!(
+        ficciones.is_none_or(|cells| cells
+            .values()
+            .all(|v| !matches!(v, silex_desktop::property::CellValue::Select(_)))),
+        "its card has no option now"
+    );
+    Ok(())
+}
+
+#[test]
+fn database_board_column_menu() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (app, _) = board_app()?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    click_button(&mut harness, "Grupo «Leyendo»");
+    menu_item(&harness, "Borrar el grupo")
+        .expect("delete")
+        .click();
+    harness.run();
+    harness.snapshot("database_board_column_menu_light");
+    Ok(())
 }

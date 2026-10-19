@@ -12,6 +12,7 @@ use silex_desktop::{
 };
 
 mod blocks;
+mod board;
 mod cells;
 mod database;
 mod dialogs;

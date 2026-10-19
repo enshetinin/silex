@@ -1,10 +1,12 @@
 //! The view's menus in the table's toolbar (H6.3a, ADR 0006): filters,
-//! sort and visible columns. They edit the view's settings in place and
+//! sort and visible columns; on a board (H6.5), the properties on the
+//! cards and the property it groups by. They edit the view's settings in place and
 //! say whether they changed; the table applies them at once and saves them
 //! (`DatabaseState::view_changed`).
 use eframe::egui::{self, TextEdit};
+use silex_desktop::model::ViewKind;
 use silex_desktop::property::{Property, PropertyKind};
-use silex_desktop::view::{Direction, Filter, FilterOp, NAME, Sort, ViewConfig};
+use silex_desktop::view::{Direction, Filter, FilterOp, NAME, Sort, ViewConfig, board_property};
 
 use super::*;
 use super::{icons, theme};
@@ -14,9 +16,10 @@ pub(super) fn filter_value_id(index: usize) -> egui::Id {
     egui::Id::unique(("silex-filter-value", index))
 }
 
-/// «Filtrar», «Ordenar» and «Columnas», added right to left after
-/// «Propiedad». Each shows how many rules it has and is accented then.
-/// Returns whether the view's settings changed.
+/// «Filtrar», «Ordenar» and «Columnas» (on a board, «Propiedades» and
+/// «Agrupar»), added right to left after «Propiedad». Each shows how many
+/// rules it has and is accented then. Returns whether the view's settings
+/// changed.
 pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState) -> bool {
     let DatabaseState {
         views,
@@ -27,26 +30,35 @@ pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState) -> bool {
         ..
     } = state;
     *typing_filter = false;
-    let Some(config) = views.get_mut(*view).map(|v| &mut v.config) else {
+    let Some((kind, config)) = views.get_mut(*view).map(|v| (v.kind, &mut v.config)) else {
         return false;
     };
+    let board = kind == ViewKind::Board;
     let mut changed = false;
 
     let hidden = properties
         .iter()
         .filter(|p| config.is_hidden(&p.id))
         .count();
-    let label = match hidden {
-        0 => "Columnas".to_owned(),
-        1 => "Columnas (1 oculta)".to_owned(),
-        n => format!("Columnas ({n} ocultas)"),
+    let label = match (board, hidden) {
+        (false, 0) => "Columnas".to_owned(),
+        (false, 1) => "Columnas (1 oculta)".to_owned(),
+        (false, n) => format!("Columnas ({n} ocultas)"),
+        (true, 0) => "Propiedades".to_owned(),
+        (true, 1) => "Propiedades (1 oculta)".to_owned(),
+        (true, n) => format!("Propiedades ({n} ocultas)"),
     };
     let button = toolbar_button(ui, icons::EYE, &label, hidden > 0);
     if button.clicked() {
         *view_picker = None;
     }
     menu_from(&button, "silex-columns-menu", 240.0).show(|ui| {
-        changed |= columns_menu(ui, config, properties);
+        let caption = if board {
+            "Propiedades en las tarjetas"
+        } else {
+            "Columnas de esta vista"
+        };
+        changed |= columns_menu(ui, config, properties, caption);
     });
 
     let label = counted("Ordenar", config.sorts.len());
@@ -66,6 +78,43 @@ pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState) -> bool {
     menu_from(&button, "silex-filter-menu", 340.0).show(|ui| {
         changed |= filter_menu(ui, config, properties, view_picker, typing_filter);
     });
+
+    if board {
+        let group = board_property(properties, config);
+        let label = match group {
+            Some(p) => format!("Agrupar: {}", p.name),
+            None => "Agrupar".to_owned(),
+        };
+        let button = toolbar_button(ui, icons::KANBAN, &label, false);
+        menu_from(&button, "silex-group-menu", 240.0).show(|ui| {
+            changed |= group_menu(ui, config, properties);
+        });
+    }
+    changed
+}
+
+/// The select properties a board can group by, the current one ticked.
+fn group_menu(ui: &mut egui::Ui, config: &mut ViewConfig, properties: &[Property]) -> bool {
+    menu_spacing(ui);
+    menu_caption(ui, "Agrupar por");
+    let current = board_property(properties, config).map(|p| p.id.clone());
+    let mut changed = false;
+    let selects = properties.iter().filter(|p| p.kind == PropertyKind::Select);
+    let mut any = false;
+    for property in selects {
+        any = true;
+        let on = current.as_deref() == Some(property.id.as_str());
+        if check_row(ui, on, property_icon(property.kind), &property.name).clicked() && !on {
+            config.group_by = Some(property.id.clone());
+            changed = true;
+        }
+    }
+    if !any {
+        menu_caption(
+            ui,
+            "Un tablero se agrupa por una propiedad de selección, y todavía no hay ninguna.",
+        );
+    }
     changed
 }
 
@@ -227,11 +276,17 @@ fn rule_line(
     });
 }
 
-/// One check box per property: ticked, it is a column of this view.
-fn columns_menu(ui: &mut egui::Ui, config: &mut ViewConfig, properties: &[Property]) -> bool {
+/// One check box per property: ticked, it is a column of this view (on a
+/// board, it is shown on the cards).
+fn columns_menu(
+    ui: &mut egui::Ui,
+    config: &mut ViewConfig,
+    properties: &[Property],
+    caption: &str,
+) -> bool {
     menu_spacing(ui);
     let mut changed = false;
-    menu_caption(ui, "Columnas de esta vista");
+    menu_caption(ui, caption);
     if properties.is_empty() {
         menu_caption(ui, "Todavía no hay propiedades.");
     }

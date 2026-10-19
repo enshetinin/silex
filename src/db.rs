@@ -458,12 +458,14 @@ impl Database {
         Ok(views)
     }
 
-    /// Adds a table view at the end of a live database's tabs, with
-    /// `config` (empty for a new view, another view's for a copy).
+    /// Adds a view of `kind` (a table or a board, H6.5) at the end of a
+    /// live database's tabs, with `config` (empty for a new view, another
+    /// view's for a copy).
     pub fn add_view(
         &mut self,
         database_id: &str,
         name: &str,
+        kind: ViewKind,
         config: &ViewConfig,
     ) -> Result<String> {
         let tx = self.conn.transaction()?;
@@ -476,7 +478,7 @@ impl Database {
             "INSERT INTO db_views (id, database_id, name, kind, position, config)
              VALUES (?1, ?2, ?3, ?4,
                      (SELECT COALESCE(MAX(position), -1) + 1 FROM db_views WHERE database_id = ?2), ?5)",
-            params![id, database_id, name, ViewKind::Table.as_str(), config.to_json()],
+            params![id, database_id, name, kind.as_str(), config.to_json()],
         )?;
         tx.commit()?;
         Ok(id)
@@ -784,6 +786,48 @@ impl Database {
         )?;
         ensure!(affected == 1, "La opción no existe");
         Ok(())
+    }
+
+    /// Moves an option one place earlier (`Up`) or later (`Down`) among its
+    /// property's options: the order of select menus and of a board's
+    /// columns (H6.5). Returns `false` at the edge. The options are
+    /// renumbered 0..n.
+    pub fn move_select_option(&mut self, id: &str, shift: Shift) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let property: String = tx
+            .query_row(
+                "SELECT property_id FROM db_select_options WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .context("La opción no existe")?;
+        let mut options: Vec<String> = tx
+            .prepare(
+                "SELECT id FROM db_select_options WHERE property_id = ?1 ORDER BY position, id",
+            )?
+            .query_map([&property], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let index = options
+            .iter()
+            .position(|o| o == id)
+            .context("La opción no aparece en su propiedad")?;
+        let target = match shift {
+            Shift::Up => index.checked_sub(1),
+            Shift::Down => Some(index + 1).filter(|&i| i < options.len()),
+        };
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        options.swap(index, target);
+        for (position, option) in options.iter().enumerate() {
+            tx.execute(
+                "UPDATE db_select_options SET position = ?2 WHERE id = ?1",
+                params![option, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Deletes a select option. The cells that had it become empty

@@ -465,6 +465,18 @@ pub(super) fn paint_tag(
     option: &SelectOption,
     max_width: f32,
 ) {
+    paint_tag_on(ui, ui.painter(), left_center, option, max_width);
+}
+
+/// [`paint_tag`] with another painter (a card being dragged, on top).
+/// Returns the tag's rect.
+pub(super) fn paint_tag_on(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    left_center: egui::Pos2,
+    option: &SelectOption,
+    max_width: f32,
+) -> egui::Rect {
     let (bg, fg) = theme::option_colors(ui.ctx(), option.color);
     let pad = egui::vec2(6.0, 2.0);
     let galley = egui::WidgetText::from(egui::RichText::new(&option.name).color(fg)).into_galley(
@@ -478,9 +490,9 @@ pub(super) fn paint_tag(
         egui::pos2(left_center.x, left_center.y - size.y / 2.0),
         size,
     );
-    let painter = ui.painter();
     painter.rect_filled(rect, egui::CornerRadius::same(theme::radius::SM), bg);
     painter.galley(rect.min + pad, galley, fg);
+    rect
 }
 
 /// A `Ui` for drawing in `rect`, already allocated by the caller. Unlike

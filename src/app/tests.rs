@@ -1750,6 +1750,14 @@ fn database_scale_smoke() -> anyhow::Result<()> {
             app_frame(&mut app, &ctx, vec![]);
         }
         println!("{count} filas: un frame de la tabla {:?}", t.elapsed() / 10);
+        // A board (H6.5) with every card in one column: the worst case.
+        app.add_view(silex_desktop::model::ViewKind::Board)?;
+        sized_frame(&mut app, &ctx, vec![]);
+        let t = std::time::Instant::now();
+        for _ in 0..10 {
+            sized_frame(&mut app, &ctx, vec![]);
+        }
+        println!("{count} filas: un frame del tablero {:?}", t.elapsed() / 10);
         // A text filter and a number sort, as applied on each key typed.
         let (text, number) = (properties[0].0.clone(), properties[1].0.clone());
         let t = std::time::Instant::now();
@@ -2281,7 +2289,7 @@ fn each_view_keeps_its_own_rules() -> anyhow::Result<()> {
     app.db.create_row(&base, "Pedro Páramo")?;
     app.reload_pages()?;
 
-    app.add_view()?;
+    app.add_view(silex_desktop::model::ViewKind::Table)?;
     assert_eq!(view_names(&app), ["Tabla", "Tabla 2"]);
     assert_eq!(open_view(&app), "Tabla 2", "a new view opens");
     change_view(&mut app, |c| {
@@ -2439,5 +2447,258 @@ fn cmd_z_while_typing_in_a_cell_undoes_the_text_not_the_table() -> anyhow::Resul
         stored(&app, &row, &ids[0])?,
         Some(CellValue::Text("Cortázar".into()))
     );
+    Ok(())
+}
+
+// ---- H6.5: board view ----
+
+/// A database with «Estado» (Leyendo, Hecho) and three rows: Rayuela
+/// (Leyendo), Ficciones (Hecho) and Aleph (none), open in a new board view.
+/// Returns the rows and Estado's (property, Leyendo, Hecho) ids.
+fn board_app() -> anyhow::Result<(SilexApp, egui::Context, Vec<String>, [String; 3])> {
+    let (mut app, ctx, base) = database_app()?;
+    let rows = ["Rayuela", "Ficciones", "Aleph"]
+        .into_iter()
+        .map(|title| app.db.create_row(&base, title))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let estado = app.add_property(PropertyKind::Select, "Estado")?;
+    let leyendo = app
+        .db
+        .add_select_option(&estado, "Leyendo", OptionColor::Blue)?;
+    let hecho = app
+        .db
+        .add_select_option(&estado, "Hecho", OptionColor::Green)?;
+    app.db
+        .set_value(&rows[0], &estado, Some(&CellValue::Select(leyendo.clone())))?;
+    app.db
+        .set_value(&rows[1], &estado, Some(&CellValue::Select(hecho.clone())))?;
+    app.reload_pages()?;
+    app.open_page(base)?;
+    app.add_view(silex_desktop::model::ViewKind::Board)?;
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, rows, [estado, leyendo, hecho]))
+}
+
+/// The pointer presses at `from`, moves past the drag threshold, goes to
+/// `to` and lets go there.
+fn drag(app: &mut SilexApp, ctx: &egui::Context, from: egui::Pos2, to: egui::Pos2) {
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    sized_frame(app, ctx, vec![egui::Event::PointerMoved(from)]);
+    sized_frame(app, ctx, vec![button(from, true)]);
+    sized_frame(
+        app,
+        ctx,
+        vec![egui::Event::PointerMoved(from + egui::vec2(0.0, 24.0))],
+    );
+    sized_frame(app, ctx, vec![egui::Event::PointerMoved(to)]);
+    sized_frame(app, ctx, vec![egui::Event::PointerMoved(to)]);
+    sized_frame(app, ctx, vec![button(to, false)]);
+    sized_frame(app, ctx, vec![]);
+}
+
+fn card_rect(ctx: &egui::Context, row: &str) -> egui::Rect {
+    ctx.read_response(egui::Id::unique(("silex-card", row)))
+        .map(|r| r.rect)
+        .unwrap_or_else(|| panic!("card {row} drawn"))
+}
+
+#[test]
+fn a_board_shows_a_column_per_option_and_a_drag_moves_the_card() -> anyhow::Result<()> {
+    let (mut app, ctx, rows, [estado, leyendo, hecho]) = board_app()?;
+    let state = app.database.as_ref().expect("database open");
+    assert!(state.is_board());
+    assert_eq!(
+        state.config().and_then(|c| c.group_by.clone()),
+        Some(estado.clone()),
+        "a new board groups by the first select"
+    );
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 760.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+    output.textures_delta.clear();
+    let painted = painted_text(&output.shapes);
+    for text in [
+        "Tablero",
+        "Sin Estado",
+        "Leyendo",
+        "Hecho",
+        "Rayuela",
+        "Aleph",
+        "Nueva",
+    ] {
+        assert!(
+            painted.iter().any(|t| t.trim() == text),
+            "{text:?} in {painted:?}"
+        );
+    }
+    // Columns in order: none, Leyendo, Hecho.
+    let (aleph, rayuela, ficciones) = (
+        card_rect(&ctx, &rows[2]),
+        card_rect(&ctx, &rows[0]),
+        card_rect(&ctx, &rows[1]),
+    );
+    assert!(aleph.left() < rayuela.left() && rayuela.left() < ficciones.left());
+
+    // Rayuela is dropped on the «Hecho» column.
+    drag(&mut app, &ctx, rayuela.center(), ficciones.center());
+    assert_eq!(
+        stored(&app, &rows[0], &estado)?,
+        Some(CellValue::Select(hecho.clone()))
+    );
+    sized_frame(&mut app, &ctx, vec![]);
+    assert!(card_rect(&ctx, &rows[0]).left() > rayuela.left() + 100.0);
+    // Dropped where it was: nothing changes, nothing to undo.
+    let at = card_rect(&ctx, &rows[1]).center();
+    drag(&mut app, &ctx, at, at + egui::vec2(0.0, 30.0));
+    assert_eq!(
+        stored(&app, &rows[1], &estado)?,
+        Some(CellValue::Select(hecho.clone()))
+    );
+    // One undo puts it back.
+    app.undo_table();
+    assert_eq!(
+        stored(&app, &rows[0], &estado)?,
+        Some(CellValue::Select(leyendo))
+    );
+    // A card dropped on the first column loses its value. (Rects are read
+    // one frame late.)
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    let (from, to) = (
+        card_rect(&ctx, &rows[1]).center(),
+        card_rect(&ctx, &rows[2]).center(),
+    );
+    drag(&mut app, &ctx, from, to);
+    assert_eq!(stored(&app, &rows[1], &estado)?, None);
+    Ok(())
+}
+
+#[test]
+fn a_click_on_a_card_opens_its_row() -> anyhow::Result<()> {
+    let (mut app, ctx, rows, _) = board_app()?;
+    let at = card_rect(&ctx, &rows[0]).center();
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    sized_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at)]);
+    sized_frame(&mut app, &ctx, vec![button(true)]);
+    sized_frame(&mut app, &ctx, vec![button(false)]);
+    assert_eq!(app.selected.as_deref(), Some(rows[0].as_str()));
+    Ok(())
+}
+
+#[test]
+fn a_new_card_takes_its_column_and_its_name() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, _, [estado, _, hecho]) = board_app()?;
+    let base = app.selected.clone().unwrap_or_default();
+    app.apply_table_action(&base, TableAction::AddCard(Some(hecho.clone())))?;
+    let row = app
+        .database
+        .as_ref()
+        .and_then(|d| d.rows.last())
+        .map(|r| r.id.clone())
+        .expect("a new row");
+    assert_eq!(stored(&app, &row, &estado)?, Some(CellValue::Select(hecho)));
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    assert!(
+        ctx.memory(|m| m.has_focus(row_name_id(&row))),
+        "name ready to type"
+    );
+    sized_frame(&mut app, &ctx, vec![egui::Event::Text("Bestiario".into())]);
+    sized_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    sized_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        app.db.get_page(&row)?.map(|p| p.title).as_deref(),
+        Some("Bestiario")
+    );
+    // A new card in the first column has no value.
+    app.apply_table_action(&base, TableAction::AddCard(None))?;
+    let empty = app
+        .database
+        .as_ref()
+        .and_then(|d| d.rows.last())
+        .map(|r| r.id.clone())
+        .expect("another row");
+    assert_eq!(stored(&app, &empty, &estado)?, None);
+    // Undo takes the card away in one step.
+    app.undo_table();
+    assert_eq!(app.trash_count, 1);
+    assert!(
+        app.database
+            .as_ref()
+            .is_some_and(|d| d.rows.iter().all(|r| r.id != empty))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_new_group_is_a_new_option_and_a_board_without_selects_offers_one() -> anyhow::Result<()> {
+    let (mut app, ctx, _, [estado, ..]) = board_app()?;
+    let base = app.selected.clone().unwrap_or_default();
+    app.apply_table_action(
+        &base,
+        TableAction::AddOption(estado.clone(), "  Abandonado ".into()),
+    )?;
+    app.apply_table_action(&base, TableAction::AddOption(estado.clone(), " ".into()))?;
+    let names: Vec<String> = app
+        .db
+        .database_properties(&base)?
+        .into_iter()
+        .find(|p| p.id == estado)
+        .map(|p| p.options.into_iter().map(|o| o.name).collect())
+        .unwrap_or_default();
+    assert_eq!(names, ["Leyendo", "Hecho", "Abandonado"]);
+
+    // Without a select property the board says how to get one.
+    app.delete_property(&estado)?;
+    let input = egui::RawInput::default();
+    let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+    output.textures_delta.clear();
+    let painted = painted_text(&output.shapes);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.contains("Añadir la propiedad «Estado»")),
+        "{painted:?}"
+    );
+    app.apply_table_action(
+        &base,
+        TableAction::AddProperty(PropertyKind::Select, "Estado".into()),
+    )?;
+    let state = app.database.as_ref().expect("open");
+    let group = state
+        .config()
+        .and_then(|c| silex_desktop::view::board_property(&state.properties, c));
+    assert_eq!(group.map(|p| p.name.as_str()), Some("Estado"));
+    Ok(())
+}
+
+#[test]
+fn a_duplicated_board_is_a_board() -> anyhow::Result<()> {
+    use silex_desktop::model::ViewKind;
+    let (mut app, _, _, [estado, ..]) = board_app()?;
+    let index = app.database.as_ref().map(|d| d.view).unwrap_or_default();
+    app.duplicate_view(index)?;
+    let state = app.database.as_ref().expect("open");
+    let copy = &state.views[state.view];
+    assert_eq!(copy.kind, ViewKind::Board);
+    assert_eq!(copy.name, "Tablero (copia)");
+    assert_eq!(copy.config.group_by.as_deref(), Some(estado.as_str()));
     Ok(())
 }

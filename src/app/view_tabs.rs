@@ -1,11 +1,13 @@
 //! A database's views as tabs (H6.3b, ADR 0006): a click switches view
-//! (each keeps its own sort, filters and columns), «+» adds one, and the
+//! (each keeps its own sort, filters and columns), «+» adds a table or a
+//! board (H6.5), and the
 //! open tab (or a right click on any) has a menu to rename, duplicate,
 //! move or delete it. Deleting a view loses its settings, never rows.
 use anyhow::Result;
 use eframe::egui::{self};
 use silex_desktop::db::Shift;
-use silex_desktop::view::ViewConfig;
+use silex_desktop::model::ViewKind;
+use silex_desktop::view::{ViewConfig, board_property};
 
 use super::*;
 use super::{icons, theme};
@@ -14,15 +16,31 @@ fn view_menu_id(view: &str) -> egui::Id {
     egui::Id::unique(("silex-view-menu", view))
 }
 
-/// The name of a new view: «Tabla», «Tabla 2»… the first one not taken.
-pub(super) fn new_view_name(taken: &[String]) -> String {
+/// The name of a new view: «Tabla», «Tabla 2»… (or «Tablero»…) the
+/// first one not taken.
+pub(super) fn new_view_name(kind: ViewKind, taken: &[String]) -> String {
+    let base = kind_label(kind);
     (1..)
         .map(|n| match n {
-            1 => "Tabla".to_owned(),
-            n => format!("Tabla {n}"),
+            1 => base.to_owned(),
+            n => format!("{base} {n}"),
         })
         .find(|name| !taken.iter().any(|t| t == name))
-        .unwrap_or_else(|| "Tabla".to_owned())
+        .unwrap_or_else(|| base.to_owned())
+}
+
+fn kind_label(kind: ViewKind) -> &'static str {
+    match kind {
+        ViewKind::Table => "Tabla",
+        ViewKind::Board => "Tablero",
+    }
+}
+
+pub(super) fn view_icon(kind: ViewKind) -> &'static str {
+    match kind {
+        ViewKind::Table => icons::TABLE,
+        ViewKind::Board => icons::KANBAN,
+    }
 }
 
 /// The tabs and «+», at the start of the toolbar. Returns the open tab's
@@ -48,7 +66,7 @@ pub(super) fn view_tabs(
         let tab = ui
             .add(
                 egui::Button::new((
-                    icons::icon(icons::TABLE).color(color),
+                    icons::icon(view_icon(view.kind)).color(color),
                     egui::RichText::new(&view.name).color(color),
                 ))
                 .frame_when_inactive(false)
@@ -105,9 +123,26 @@ pub(super) fn view_tabs(
         )
         .on_hover_text("Nueva vista")
         .accessible_name("Nueva vista");
-    if add.clicked() {
-        actions.push(TableAction::AddView);
-    }
+    egui::Popup::menu(&add)
+        .id(egui::Id::unique("silex-add-view-menu"))
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(200.0)
+        .show(|ui| {
+            menu_spacing(ui);
+            menu_caption(ui, "Nueva vista");
+            for kind in [ViewKind::Table, ViewKind::Board] {
+                if ui
+                    .button((
+                        icons::icon(view_icon(kind)),
+                        format!(" {}", kind_label(kind)),
+                    ))
+                    .clicked()
+                {
+                    actions.push(TableAction::AddView(kind));
+                    ui.close();
+                }
+            }
+        });
     selected_tab
 }
 
@@ -134,7 +169,13 @@ fn view_menu(
         }
     }
     ui.add_space(theme::space::XS);
-    menu_caption(ui, "Vista de tabla");
+    menu_caption(
+        ui,
+        match view.kind {
+            ViewKind::Table => "Vista de tabla",
+            ViewKind::Board => "Vista de tablero",
+        },
+    );
     ui.separator();
     if ui
         .button((icons::icon(icons::COPY), " Duplicar la vista"))
@@ -254,16 +295,21 @@ impl SilexApp {
         Ok(())
     }
 
-    /// A new, empty table view at the end, shown at once.
-    pub(super) fn add_view(&mut self) -> Result<()> {
+    /// A new, empty view at the end, shown at once. A board groups by the
+    /// first select property, if there is one.
+    pub(super) fn add_view(&mut self, kind: ViewKind) -> Result<()> {
         let Some(state) = self.database.as_ref() else {
             return Ok(());
         };
         let taken: Vec<String> = state.views.iter().map(|v| v.name.clone()).collect();
         let database = state.id.clone();
+        let mut config = ViewConfig::default();
+        if kind == ViewKind::Board {
+            config.group_by = board_property(&state.properties, &config).map(|p| p.id.clone());
+        }
         let id = self
             .db
-            .add_view(&database, &new_view_name(&taken), &ViewConfig::default())?;
+            .add_view(&database, &new_view_name(kind, &taken), kind, &config)?;
         self.reload_views(Some(&id))
     }
 
@@ -277,7 +323,9 @@ impl SilexApp {
             return Ok(());
         };
         let name = format!("{} (copia)", view.name);
-        let id = self.db.add_view(&database, &name, &view.config)?;
+        let id = self
+            .db
+            .add_view(&database, &name, view.kind, &view.config)?;
         self.reload_views(Some(&id))
     }
 
@@ -323,16 +371,19 @@ impl SilexApp {
 #[cfg(test)]
 mod tests {
     use super::new_view_name;
+    use silex_desktop::model::ViewKind::{Board, Table};
 
     #[test]
     fn new_views_take_the_first_free_name() {
         let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        assert_eq!(new_view_name(&names(&[])), "Tabla");
-        assert_eq!(new_view_name(&names(&["Tabla"])), "Tabla 2");
+        assert_eq!(new_view_name(Table, &names(&[])), "Tabla");
+        assert_eq!(new_view_name(Table, &names(&["Tabla"])), "Tabla 2");
         assert_eq!(
-            new_view_name(&names(&["Tabla", "Tabla 2", "Tabla 4"])),
+            new_view_name(Table, &names(&["Tabla", "Tabla 2", "Tabla 4"])),
             "Tabla 3"
         );
-        assert_eq!(new_view_name(&names(&["Pendientes"])), "Tabla");
+        assert_eq!(new_view_name(Table, &names(&["Pendientes"])), "Tabla");
+        assert_eq!(new_view_name(Board, &names(&["Tabla"])), "Tablero");
+        assert_eq!(new_view_name(Board, &names(&["Tablero"])), "Tablero 2");
     }
 }

@@ -4,17 +4,18 @@
 //! properties (H6.2) are the other columns; each cell is edited by its type
 //! (`cells.rs`) and saved at once in its own transaction. The arrow keys
 //! move between cells (H6.2b), and a select property's menu manages its
-//! options.
+//! options. A board view (H6.5) shares the toolbar and draws cards instead
+//! (`board.rs`).
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, anyhow};
 use eframe::egui::{self, TextEdit};
 use silex_desktop::db::Shift;
-use silex_desktop::model::{DatabaseView, Page};
+use silex_desktop::model::{DatabaseView, Page, ViewKind};
 use silex_desktop::property::{
     CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues,
 };
-use silex_desktop::view::{ViewConfig, visible_rows};
+use silex_desktop::view::{ViewConfig, board_property, visible_rows};
 
 use super::*;
 use super::{icons, theme};
@@ -55,6 +56,9 @@ pub(super) struct DatabaseState {
     pub(super) option_colors: Option<String>,
     /// The option waiting for «Borrar» to be confirmed.
     pub(super) option_delete: Option<String>,
+    /// A board column's new name, typed in its menu (option id, name);
+    /// saved when the menu closes (H6.5).
+    pub(super) group_rename: Option<(String, String)>,
     /// The view on show, an index into `views` (the first until H6.3b).
     pub(super) view: usize,
     /// The rows in sight, in the view's order: indices into `rows`.
@@ -82,6 +86,13 @@ impl DatabaseState {
     /// The settings of the view on show.
     pub(super) fn config(&self) -> Option<&ViewConfig> {
         self.views.get(self.view).map(|v| &v.config)
+    }
+
+    /// Whether the view on show is a board (H6.5).
+    pub(super) fn is_board(&self) -> bool {
+        self.views
+            .get(self.view)
+            .is_some_and(|v| v.kind == ViewKind::Board)
     }
 
     /// Works out which rows and columns are in sight, and in what order.
@@ -179,11 +190,19 @@ pub(super) enum TableAction {
     RenameOption(String, String),
     SetOptionColor(String, OptionColor),
     DeleteOption(String),
+    /// Move an option one place (a board's column, H6.5).
+    MoveOption(String, Shift),
     /// Hide a property's column in the view on show.
     HideProperty(String),
+    /// A new card in a board's column: the option it gets (none for the
+    /// column of rows without one).
+    AddCard(Option<String>),
+    /// A new option of a select property (a board's new column): its
+    /// property and name.
+    AddOption(String, String),
     /// Views as tabs (H6.3b): by index in `views`, or by id.
     SwitchView(usize),
-    AddView,
+    AddView(ViewKind),
     DuplicateView(usize),
     RenameView(String, String),
     MoveView(String, Shift),
@@ -211,6 +230,7 @@ impl SilexApp {
             option_names: HashMap::new(),
             option_colors: None,
             option_delete: None,
+            group_rename: None,
             view: 0,
             order: Vec::new(),
             columns: Vec::new(),
@@ -376,6 +396,27 @@ impl SilexApp {
     /// Adds an empty row to `database` and puts the cursor in its name,
     /// opening the database first if needed.
     pub(super) fn add_row(&mut self, database: &str) -> Result<()> {
+        self.insert_row(database).map(|_| ())
+    }
+
+    /// A new card in a board's column (H6.5): a row whose grouping
+    /// property is `option` (none: the column of rows without one), its
+    /// name ready to type. One undo removes it.
+    pub(super) fn add_card(&mut self, database: &str, option: Option<String>) -> Result<()> {
+        let property = self
+            .database
+            .as_ref()
+            .and_then(|d| board_property(&d.properties, d.config()?))
+            .map(|p| p.id.clone());
+        let row = self.insert_row(database)?;
+        if let (Some(property), Some(option)) = (property, option) {
+            self.store_cell(&row, &property, Some(CellValue::Select(option)))?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::add_row`], returning the new row's id.
+    fn insert_row(&mut self, database: &str) -> Result<String> {
         self.save_now()?;
         let row = self.db.create_row(database, "")?;
         self.reload_pages()?;
@@ -392,8 +433,8 @@ impl SilexApp {
             }
             state.focus = Some((row.clone(), 0));
         }
-        self.record_table(TableOp::AddRow(row));
-        Ok(())
+        self.record_table(TableOp::AddRow(row.clone()));
+        Ok(row)
     }
 
     /// The database's view tabs and table, below its title.
@@ -401,7 +442,9 @@ impl SilexApp {
         let Some(mut state) = self.database.take() else {
             return;
         };
-        table_keys(ui.ctx(), &mut state);
+        if !state.is_board() {
+            table_keys(ui.ctx(), &mut state);
+        }
         let (actions, cells) = self.draw_table(ui, &mut state);
         let database = state.id.clone();
         let editing_name = state
@@ -481,16 +524,37 @@ impl SilexApp {
                 self.db.set_option_color(&id, color)?;
                 self.reload_properties()?;
             }
+            TableAction::MoveOption(id, shift) => {
+                self.db.move_select_option(&id, shift)?;
+                self.reload_properties()?;
+            }
             TableAction::DeleteOption(id) => {
                 self.db.delete_select_option(&id)?;
                 self.reload_properties()?;
             }
             TableAction::SwitchView(index) => self.switch_view(index)?,
-            TableAction::AddView => self.add_view()?,
+            TableAction::AddView(kind) => self.add_view(kind)?,
             TableAction::DuplicateView(index) => self.duplicate_view(index)?,
             TableAction::RenameView(id, name) => self.rename_view(&id, &name)?,
             TableAction::MoveView(id, shift) => self.move_view(&id, shift)?,
             TableAction::DeleteView(id) => self.delete_view(&id)?,
+            TableAction::AddCard(option) => self.add_card(database, option)?,
+            TableAction::AddOption(property, name) => {
+                let existing = self
+                    .database
+                    .iter()
+                    .flat_map(|d| d.properties.iter())
+                    .find(|p| p.id == property)
+                    .map_or(0, |p| p.options.len());
+                if !name.trim().is_empty() {
+                    self.db.add_select_option(
+                        &property,
+                        name.trim(),
+                        OptionColor::for_new_option(existing),
+                    )?;
+                    self.reload_properties()?;
+                }
+            }
             TableAction::HideProperty(id) => {
                 if let Some(state) = self.database.as_mut()
                     && let Some(view) = state.views.get_mut(state.view)
@@ -549,14 +613,14 @@ impl SilexApp {
             selected_tab = view_tabs(ui, state, &mut actions);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Also at the end of the header, which may be out of sight
-                // in a wide table.
+                // in a wide table. A board has one more menu: just «+».
+                let board = state.is_board();
+                let label = if board { "" } else { " Propiedad" };
                 let add = ui
                     .add(
                         egui::Button::new((
                             icons::icon(icons::PLUS).color(p.text_muted),
-                            egui::RichText::new(" Propiedad")
-                                .small()
-                                .color(p.text_muted),
+                            egui::RichText::new(label).small().color(p.text_muted),
                         ))
                         .frame_when_inactive(false),
                     )
@@ -572,6 +636,10 @@ impl SilexApp {
                 if view_menus(ui, state) {
                     state.view_changed();
                 }
+                // Each column of a board counts its own cards.
+                if board {
+                    return;
+                }
                 let total = state.rows.len();
                 let count = match (state.order.len(), total) {
                     (_, 1) if state.order.len() == 1 => "1 fila".to_owned(),
@@ -582,6 +650,10 @@ impl SilexApp {
                 ui.label(egui::RichText::new(count).small().color(p.text_muted));
             });
         });
+        if state.is_board() {
+            self.draw_board(ui, state, selected_tab, &mut actions, &mut cells);
+            return (actions, cells);
+        }
 
         let columns: f32 = state
             .columns
@@ -642,16 +714,7 @@ impl SilexApp {
         }
         let output = ui
             .scope(|ui| {
-                // Thin bars that are always in sight: the columns that do
-                // not fit must not go unnoticed.
-                ui.spacing_mut().scroll = egui::style::ScrollStyle {
-                    floating_width: 4.0,
-                    foreground_color: true,
-                    dormant_handle_opacity: 0.35,
-                    active_handle_opacity: 0.5,
-                    dormant_background_opacity: 0.0,
-                    ..egui::style::ScrollStyle::thin()
-                };
+                visible_scroll_bars(ui);
                 area.show_rows(ui, ROW_HEIGHT, state.order.len(), |ui, range| {
                     ui.set_min_width(width);
                     let columns = Columns { name_width, width };
@@ -1268,7 +1331,7 @@ impl PropertyMenu<'_> {
 /// A small square in an option's colors, a button named `name` (ticked
 /// when it is the current color). Drawn by hand: an `egui::Button` is at
 /// least as tall as a row.
-fn color_swatch(
+pub(super) fn color_swatch(
     ui: &mut egui::Ui,
     bg: egui::Color32,
     fg: egui::Color32,
@@ -1334,8 +1397,21 @@ fn header_label(ui: &egui::Ui, rect: egui::Rect, icon: &str, name: &str) {
     painter.galley(at, galley, p.text_muted);
 }
 
+/// Thin scroll bars that are always in sight: columns that do not fit
+/// must not go unnoticed.
+pub(super) fn visible_scroll_bars(ui: &mut egui::Ui) {
+    ui.spacing_mut().scroll = egui::style::ScrollStyle {
+        floating_width: 4.0,
+        foreground_color: true,
+        dormant_handle_opacity: 0.35,
+        active_handle_opacity: 0.5,
+        dormant_background_opacity: 0.0,
+        ..egui::style::ScrollStyle::thin()
+    };
+}
+
 /// A 1 px line `width` wide. Returns its y.
-fn line(ui: &mut egui::Ui, width: f32, color: egui::Color32) -> f32 {
+pub(super) fn line(ui: &mut egui::Ui, width: f32, color: egui::Color32) -> f32 {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
     ui.painter()
         .hline(rect.x_range(), rect.center().y, (1.0, color));

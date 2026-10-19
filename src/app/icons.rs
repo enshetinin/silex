@@ -65,6 +65,7 @@ pub const INFO: &str = "\u{e2ce}";
 pub const OPEN_EXTERNAL: &str = "\u{e5de}";
 pub const KEYBOARD: &str = "\u{e2d8}";
 pub const TABLE: &str = "\u{e476}";
+pub const KANBAN: &str = "\u{eb54}";
 /// "Aa": the name column of a database (text-aa).
 pub const TEXT_AA: &str = "\u{e6ee}";
 /// Property types (H6.2): text, number, date and select.
@@ -127,6 +128,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("OPEN_EXTERNAL", OPEN_EXTERNAL),
     ("KEYBOARD", KEYBOARD),
     ("TABLE", TABLE),
+    ("KANBAN", KANBAN),
     ("TEXT_AA", TEXT_AA),
     ("TEXT_ALIGN_LEFT", TEXT_ALIGN_LEFT),
     ("HASH", HASH),

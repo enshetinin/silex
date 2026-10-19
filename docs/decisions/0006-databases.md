@@ -110,6 +110,7 @@ CREATE TABLE db_views (
    - *Actualización (2026-10-19):* **H6.3a**, orden, filtros (todos deben cumplirse) y columnas ocultas de la vista «Tabla», guardados en `db_views.config`; **H6.3b**, varias vistas en pestañas. Para el JSON se añade `serde_json` (MIT OR Apache-2.0), leído a mano desde un `Value` sin `derive`, como los ajustes. Las filas no se reordenan ni se ocultan al editar una celda o añadir una fila (no saltan mientras se editan), solo al cambiar la vista, las propiedades o al abrir la base.
 4. **H6.4 — Deshacer en la tabla** (operaciones inversas) y exportación con todas las propiedades.
 5. **H6.5 — Vista Kanban** agrupada por una propiedad de selección; arrastrar tarjetas entre columnas cambia el valor.
+   - *Actualización (2026-10-19):* la propiedad de agrupación es `group_by` en el JSON de la vista; si falta o ya no es una selección viva, se usa la primera. El orden de las tarjetas dentro de una columna es el de la vista (orden manual o «Ordenar»); arrastrar solo cambia de columna, no reordena. Para teclado y lectores de pantalla, el menú de la tarjeta ofrece «Mover a…». Mover una tarjeta es un cambio de celda, así que se deshace con el historial de H6.4.
 
 ## Consecuencias
 - **Una columna y cuatro tablas más.** `Page` gana un `kind`, que hay que propagar a sus 14 construcciones.

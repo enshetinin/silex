@@ -132,3 +132,15 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - Cambia de página y vuelve: el historial de la tabla empieza vacío.
 - «…» → «Exportar a Markdown»: el `.md` tiene una columna por propiedad, con las casillas como `[x]`/`[ ]` y las selecciones por su nombre. Ábrelo en un visor de Markdown: la tabla se ve bien aunque haya `|` en algún texto.
 
+## 15. Tablero (H6.5)
+- En una base con una propiedad de selección (p. ej. «Estado» con dos opciones): «+» junto a las pestañas → «Tablero». Aparece «Tablero» con una columna «Sin Estado» y una por opción, cada una con su número.
+- Arrastra una tarjeta a otra columna con el ratón: la columna se ilumina al pasar por encima y, al soltar, la tarjeta queda allí. Cambia a «Tabla»: la celda tiene el valor nuevo. Vuelve y pulsa Cmd+Z: la tarjeta vuelve a su columna.
+- Suelta una tarjeta fuera de cualquier columna: no cambia nada.
+- Clic en una tarjeta: se abre la fila como página. Tab hasta una tarjeta e Intro: lo mismo.
+- Clic derecho en una tarjeta → «Mover a» → otra columna: se mueve. El resto del menú es el de siempre (renombrar, papelera…).
+- «Nueva» al pie de una columna: aparece una tarjeta en ella con el nombre listo para escribir; Intro lo guarda. Cmd+Z la manda a la papelera.
+- «Nuevo grupo» al final (desplazando a la derecha si hace falta): escribe un nombre e Intro → nueva columna.
+- Clic en la cabecera de una columna (no en «Sin …»): menú con su nombre (se guarda al cerrar; Escape lo descarta), sus colores, «Mover a la izquierda/derecha» (cambia el orden de las columnas y de las opciones en la tabla) y «Borrar el grupo», que pide confirmación y dice cuántas tarjetas pasan a «Sin …»; «Cancelar» no borra.
+- «Agrupar» con dos propiedades de selección: cambiar de una a otra reagrupa las tarjetas. «Propiedades»: desmarca una y desaparece de las tarjetas. Un filtro deja en cada columna solo las tarjetas que lo cumplen.
+- En una base sin propiedad de selección, un tablero explica por qué está vacío y «Añadir la propiedad «Estado»» la crea.
+- Cierra y vuelve a abrir la app: el tablero sigue agrupado por la misma propiedad.

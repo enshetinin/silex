@@ -1,6 +1,7 @@
-//! What a database view shows (H6.3, ADR 0006): its sort, its filters and
-//! its hidden properties, stored as JSON in `db_views.config`, and the rows
-//! they leave in sight. Pure: no SQL and no egui.
+//! What a database view shows (H6.3, ADR 0006): its sort, its filters,
+//! its hidden properties and, on a board (H6.5), the property it groups
+//! by, stored as JSON in `db_views.config`; and the rows they leave in
+//! sight. Pure: no SQL and no egui.
 //!
 //! The JSON is read leniently, like the settings: invalid JSON, unknown
 //! values or rules of a kind this version does not know are left out, and a
@@ -25,8 +26,13 @@ pub struct ViewConfig {
     pub sorts: Vec<Sort>,
     /// A row is shown when it matches all of them.
     pub filters: Vec<Filter>,
-    /// Ids of the properties not shown as columns.
+    /// Ids of the properties not shown as columns (on a board, not shown
+    /// on the cards).
     pub hidden: Vec<String>,
+    /// The select property a board groups its cards by. `None`, or one
+    /// that is no longer a live select: the first select property
+    /// ([`board_property`]).
+    pub group_by: Option<String>,
     /// Keys this version does not use, kept as they were.
     extra: Map<String, Value>,
 }
@@ -225,10 +231,15 @@ impl ViewConfig {
             .into_iter()
             .filter_map(|id| id.as_str().map(str::to_owned))
             .collect();
+        let group_by = match map.remove("group_by") {
+            Some(Value::String(id)) => Some(id),
+            _ => None,
+        };
         Self {
             sorts,
             filters,
             hidden,
+            group_by,
             extra: map,
         }
     }
@@ -251,6 +262,9 @@ impl ViewConfig {
                 .collect(),
         );
         map.insert("hidden".into(), json!(self.hidden));
+        if let Some(group_by) = &self.group_by {
+            map.insert("group_by".into(), json!(group_by));
+        }
         Value::Object(map).to_string()
     }
 
@@ -500,6 +514,65 @@ pub fn visible_rows(
     shown
 }
 
+/// The property a board groups by: the view's choice if it is still a live
+/// select property, else the first select property. `None` if the
+/// database has no select property (the board says how to add one).
+pub fn board_property<'a>(properties: &'a [Property], config: &ViewConfig) -> Option<&'a Property> {
+    let selects = || properties.iter().filter(|p| p.kind == PropertyKind::Select);
+    config
+        .group_by
+        .as_deref()
+        .and_then(|id| selects().find(|p| p.id == id))
+        .or_else(|| selects().next())
+}
+
+/// A column of a board: the cards whose value is `option`, or that have
+/// none (`None`, the first column).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardGroup {
+    pub option: Option<String>,
+    /// Indices into the rows, in the view's order.
+    pub rows: Vec<usize>,
+}
+
+/// Splits the rows in sight (`order`, indices into `rows`, already
+/// filtered and sorted) into the columns of a board grouped by `property`:
+/// first the rows without a value, then one column per option in the
+/// option's order, empty ones included. A value that is not one of its
+/// options goes with the rows without one.
+pub fn board_groups(
+    order: &[usize],
+    rows: &[Page],
+    values: &TableValues,
+    property: &Property,
+) -> Vec<BoardGroup> {
+    let mut groups: Vec<BoardGroup> = std::iter::once(None)
+        .chain(property.options.iter().map(|o| Some(o.id.clone())))
+        .map(|option| BoardGroup {
+            option,
+            rows: Vec::new(),
+        })
+        .collect();
+    for &index in order {
+        let Some(row) = rows.get(index) else {
+            continue;
+        };
+        let column = match values
+            .get(&row.id)
+            .and_then(|cells| cells.get(&property.id))
+        {
+            Some(CellValue::Select(id)) => property
+                .options
+                .iter()
+                .position(|o| o.id == *id)
+                .map_or(0, |i| i + 1),
+            _ => 0,
+        };
+        groups[column].rows.push(index);
+    }
+    groups
+}
+
 /// A checkbox without a value is an unticked box, for sorting.
 fn unticked(subject: Subject<'_>) -> Subject<'_> {
     static NO: CellValue = CellValue::Checkbox(false);
@@ -743,6 +816,7 @@ mod tests {
 
         let newer = r#"{"sort":[],"widths":{"autor":220},"group_by":"estado"}"#;
         let read = ViewConfig::from_json(newer);
+        assert_eq!(read.group_by.as_deref(), Some("estado"));
         let written: Value = serde_json::from_str(&read.to_json()).expect("json");
         assert_eq!(written["widths"]["autor"], 220);
         assert_eq!(written["group_by"], "estado");
@@ -763,6 +837,75 @@ mod tests {
         assert_eq!(read.filters.len(), 1);
         assert_eq!(read.filters[0].property, "c");
         assert_eq!(read.hidden, ["d"]);
+        assert_eq!(ViewConfig::from_json(r#"{"group_by": 7}"#).group_by, None);
+    }
+
+    #[test]
+    fn a_board_groups_by_its_select_or_the_first_one() {
+        let (_, _, mut properties) = library();
+        let mut config = ViewConfig::default();
+        assert_eq!(
+            board_property(&properties, &config).map(|p| p.id.as_str()),
+            Some("estado")
+        );
+        let mut otra = property("otra", PropertyKind::Select);
+        otra.options.truncate(1);
+        properties.push(otra);
+        config.group_by = Some("otra".into());
+        assert_eq!(
+            board_property(&properties, &config).map(|p| p.id.as_str()),
+            Some("otra")
+        );
+        // Not a select, or gone: back to the first select.
+        for gone in ["paginas", "borrada"] {
+            config.group_by = Some(gone.into());
+            assert_eq!(
+                board_property(&properties, &config).map(|p| p.id.as_str()),
+                Some("estado"),
+                "{gone}"
+            );
+        }
+        properties.retain(|p| p.kind != PropertyKind::Select);
+        assert!(board_property(&properties, &config).is_none());
+    }
+
+    #[test]
+    fn board_columns_follow_the_options_and_keep_the_view_order() {
+        let (rows, mut values, properties) = library();
+        let estado = properties
+            .iter()
+            .find(|p| p.id == "estado")
+            .expect("estado");
+        // An option id that is not one of its options: no value.
+        values
+            .entry("5".into())
+            .or_default()
+            .insert("estado".into(), CellValue::Select("perdida".into()));
+        let by_pages = sorted(&[("paginas", Direction::Descending)]);
+        let order = visible_rows(&rows, &values, &properties, &by_pages);
+        let groups = board_groups(&order, &rows, &values, estado);
+        let shown: Vec<(Option<&str>, Vec<String>)> = groups
+            .iter()
+            .map(|g| (g.option.as_deref(), ids(&rows, &g.rows)))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (None, vec!["3".to_owned(), "5".to_owned()]),
+                (Some("pendiente"), vec!["2".to_owned()]),
+                (Some("leyendo"), vec!["4".to_owned()]),
+                (Some("leido"), vec!["1".to_owned()]),
+            ]
+        );
+        // Filtered out rows are in no column; empty columns stay.
+        let only = filtered(&[(NAME, FilterOp::Contains, "rayuela")]);
+        let order = visible_rows(&rows, &values, &properties, &only);
+        let groups = board_groups(&order, &rows, &values, estado);
+        assert_eq!(groups.len(), 4);
+        assert_eq!(
+            groups.iter().map(|g| g.rows.len()).collect::<Vec<_>>(),
+            [0, 0, 0, 1]
+        );
     }
 
     #[test]
