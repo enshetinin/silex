@@ -508,7 +508,8 @@ pub(super) fn menu_field(
     name: &str,
 ) -> egui::Response {
     let p = theme::current(ui.ctx());
-    ui.add(
+    framed(
+        ui,
         TextEdit::singleline(text)
             .margin(egui::Margin::symmetric(MENU_PAD as i8, 5))
             .align(egui::Align2::LEFT_CENTER)
@@ -516,6 +517,50 @@ pub(super) fn menu_field(
             .desired_width(f32::INFINITY),
     )
     .accessible_name(name)
+}
+
+/// Adds a text field to a menu with a visible border: egui's menu style
+/// takes the border off resting widgets (for its buttons), and a field
+/// without one reads as a caption.
+pub(super) fn framed(ui: &mut egui::Ui, field: TextEdit<'_>) -> egui::Response {
+    let p = theme::current(ui.ctx());
+    ui.scope(|ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        widgets.inactive.bg_stroke = egui::Stroke::new(1.0, p.border);
+        widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.text_faint);
+        ui.add(field)
+    })
+    .inner
+}
+
+/// A check box line in a menu, drawn like the app's other check boxes
+/// (the to-do box): named `name`, with `icon` and `name` beside it.
+pub(super) fn check_row(ui: &mut egui::Ui, on: bool, icon: &str, name: &str) -> egui::Response {
+    let p = theme::current(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, name));
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(theme::radius::SM), p.subtle);
+    }
+    let x = rect.left() + MENU_PAD;
+    paint_check_box(ui, egui::pos2(x + 8.0, rect.center().y), on, &response);
+    let icon = ui.painter().text(
+        egui::pos2(x + 16.0 + theme::space::SM, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        icons::font(theme::icon::MD),
+        p.text_muted,
+    );
+    ui.painter().text(
+        egui::pos2(icon.right() + theme::space::SM, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::TextStyle::Body.resolve(ui.style()),
+        p.text,
+    );
+    response
 }
 
 /// A small muted line in a menu («Tipo»), lined up with the items.

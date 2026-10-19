@@ -821,3 +821,110 @@ fn database_property_menu() -> anyhow::Result<()> {
         },
     )
 }
+
+// ---- H6.3a: the view's menus ----
+
+/// The titles of the rows in sight, in order.
+fn shown_rows(harness: &Harness<'_, SilexApp>) -> Vec<String> {
+    harness
+        .state()
+        .database
+        .as_ref()
+        .map(|d| d.order.iter().map(|&i| d.rows[i].title.clone()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_view_menus_filter_sort_and_hide() -> anyhow::Result<()> {
+    let (app, base, _) = database_app()?;
+    let mut harness = a11y_harness(app);
+
+    // Filter: Páginas > 150 (Rayuela 736, Pedro Páramo 124, Ficciones none).
+    click_button(&mut harness, "Filtrar");
+    assert_accessible(&harness, "filter menu");
+    click_button(&mut harness, "+ Añadir un filtro");
+    menu_item(&harness, "Páginas").expect("Páginas").click();
+    harness.run();
+    assert_eq!(
+        harness
+            .state()
+            .database
+            .as_ref()
+            .map(|d| d.views[0].config.filters.len()),
+        Some(1),
+        "the menu stays open with the new filter"
+    );
+    click_button(&mut harness, "igual a");
+    menu_item(&harness, "mayor que").expect("mayor que").click();
+    harness.run();
+    harness.get_by_label("Valor del filtro 1").focus();
+    harness.run();
+    harness.get_by_label("Valor del filtro 1").type_text("150");
+    harness.run();
+    assert_accessible(&harness, "a filter");
+    assert_steady(&mut harness, "Valor del filtro 1");
+    assert_eq!(shown_rows(&harness), ["Rayuela"]);
+    assert!(harness.query_by_label("Filtrar (1)").is_some());
+    assert!(harness.query_by_label_contains("1 de 3 filas").is_some());
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+    let stored = harness.state().db.database_views(&base)?[0].config.clone();
+    assert_eq!(stored.filters[0].value, "150", "saved once typed");
+
+    // Sort by name, descending; the filter goes.
+    click_button(&mut harness, "Filtrar (1)");
+    click_button(&mut harness, "Quitar el filtro 1");
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+    click_button(&mut harness, "Ordenar");
+    assert_accessible(&harness, "sort menu");
+    click_button(&mut harness, "+ Añadir un orden");
+    menu_item(&harness, "Nombre").expect("Nombre").click();
+    harness.run();
+    click_button(&mut harness, "Ascendente");
+    menu_item(&harness, "Descendente")
+        .expect("Descendente")
+        .click();
+    harness.run();
+    assert_steady(&mut harness, "Quitar el orden por Nombre");
+    assert_eq!(
+        shown_rows(&harness),
+        ["Rayuela", "Pedro Páramo", "Ficciones"]
+    );
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+
+    // Columns: «Autor» unticked leaves the header.
+    click_button(&mut harness, "Columnas");
+    assert_accessible(&harness, "columns menu");
+    harness
+        .get_all_by_label_contains("Autor")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::CheckBox)
+        .expect("Autor check box")
+        .click();
+    harness.run();
+    assert!(harness.query_by_label("Autor, Texto").is_none(), "hidden");
+    assert!(harness.query_by_label("Columnas (1 oculta)").is_some());
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+    let stored = harness.state().db.database_views(&base)?[0].config.clone();
+    assert_eq!(stored.sorts.len(), 1);
+    assert_eq!(stored.hidden.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn database_filter_menu() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_filter_menu_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            click_button(harness, "Filtrar");
+            click_button(harness, "+ Añadir un filtro");
+            if let Some(item) = menu_item(harness, "Estado") {
+                item.click();
+            }
+            harness.run();
+        },
+    )
+}

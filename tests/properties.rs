@@ -395,3 +395,62 @@ fn row_values_are_the_values_of_one_live_row() -> anyhow::Result<()> {
     assert!(db.row_values(&row)?.is_empty());
     Ok(())
 }
+
+// ---- H6.3a: a view's sort, filters and hidden properties ----
+
+#[test]
+fn a_views_config_is_stored_and_survives_damage() -> anyhow::Result<()> {
+    use silex_desktop::view::{Direction, Filter, FilterOp, NAME, Sort, ViewConfig};
+    let dir = std::env::temp_dir().join(format!("silex-views-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("silex.sqlite3");
+    let result = (|| -> anyhow::Result<()> {
+        let (base, view, config) = {
+            let mut db = Database::open(&path)?;
+            let base = db.create_database("Lecturas", None)?;
+            let paginas = db.add_property(&base, "Páginas", PropertyKind::Number)?;
+            let views = db.database_views(&base)?;
+            assert_eq!(
+                views[0].config,
+                ViewConfig::default(),
+                "a new view shows all"
+            );
+            let mut config = ViewConfig::default();
+            config.sorts.push(Sort {
+                property: NAME.into(),
+                direction: Direction::Descending,
+            });
+            config.filters.push(Filter {
+                property: paginas.clone(),
+                op: FilterOp::Greater,
+                value: "100".into(),
+            });
+            config.set_hidden(&paginas, true);
+            db.set_view_config(&views[0].id, &config)?;
+            (base, views[0].id.clone(), config)
+        };
+        let db = Database::open(&path)?;
+        assert_eq!(
+            db.database_views(&base)?[0].config,
+            config,
+            "after reopening"
+        );
+        assert!(db.set_view_config("no-existe", &config).is_err());
+        drop(db);
+
+        // Written by hand (another tool, a bug): the database still opens.
+        let conn = rusqlite::Connection::open(&path)?;
+        conn.execute(
+            "UPDATE db_views SET config = 'no es json' WHERE id = ?1",
+            [&view],
+        )?;
+        drop(conn);
+        let db = Database::open(&path)?;
+        let views = db.database_views(&base)?;
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].config, ViewConfig::default());
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}

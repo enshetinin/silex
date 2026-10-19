@@ -27,6 +27,7 @@ pub const DOTS_THREE_VERTICAL: &str = "\u{e208}";
 pub const DRAG_HANDLE: &str = "\u{eae2}"; // dots-six-vertical
 pub const CARET_RIGHT: &str = "\u{e13a}";
 pub const CARET_DOWN: &str = "\u{e136}";
+pub const CARET_UP: &str = "\u{e13c}";
 pub const SEARCH: &str = "\u{e30c}"; // magnifying-glass
 pub const STAR: &str = "\u{e46a}";
 pub const TRASH: &str = "\u{e4a6}";
@@ -73,6 +74,11 @@ pub const CALENDAR: &str = "\u{e10a}"; // calendar-blank
 pub const CARET_CIRCLE_DOWN: &str = "\u{e11e}";
 pub const ARROW_LEFT: &str = "\u{e058}";
 pub const ARROW_RIGHT: &str = "\u{e06c}";
+/// View menus (H6.3a): filter, sort, columns shown or hidden.
+pub const FUNNEL: &str = "\u{e266}";
+pub const ARROWS_DOWN_UP: &str = "\u{e098}";
+pub const EYE: &str = "\u{e220}";
+pub const EYE_SLASH: &str = "\u{e224}";
 
 /// Every icon above, for tests.
 #[cfg(test)]
@@ -83,6 +89,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("DRAG_HANDLE", DRAG_HANDLE),
     ("CARET_RIGHT", CARET_RIGHT),
     ("CARET_DOWN", CARET_DOWN),
+    ("CARET_UP", CARET_UP),
     ("SEARCH", SEARCH),
     ("STAR", STAR),
     ("TRASH", TRASH),
@@ -127,4 +134,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("CARET_CIRCLE_DOWN", CARET_CIRCLE_DOWN),
     ("ARROW_LEFT", ARROW_LEFT),
     ("ARROW_RIGHT", ARROW_RIGHT),
+    ("FUNNEL", FUNNEL),
+    ("ARROWS_DOWN_UP", ARROWS_DOWN_UP),
+    ("EYE", EYE),
+    ("EYE_SLASH", EYE_SLASH),
 ];

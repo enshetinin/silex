@@ -107,6 +107,7 @@ CREATE TABLE db_views (
 2. **H6.2 — Propiedades tipadas.** Añadir, renombrar, ordenar, ocultar y borrar con restauración; editar las celdas de los cinco tipos; opciones de selección con color; propiedades en la página de la fila.
    - *Actualización (2026-10-19):* se entrega en dos partes. **H6.2a**: propiedades en la tabla (añadir, renombrar, mover, borrar y restaurar), las celdas de los cinco tipos y las opciones creadas desde la celda. **H6.2b**: propiedades en la página de la fila, recorrer las celdas con flechas, Tab e Intro, y renombrar, cambiar de color o borrar opciones. «Ocultar» pasa a H6.3, porque vive en la configuración de la vista que H6.3 diseña junto con el orden y los filtros.
 3. **H6.3 — Ordenar y filtrar.** Por vista y guardado; varias vistas por base, en pestañas; ocultar propiedades por vista.
+   - *Actualización (2026-10-19):* **H6.3a**, orden, filtros (todos deben cumplirse) y columnas ocultas de la vista «Tabla», guardados en `db_views.config`; **H6.3b**, varias vistas en pestañas. Para el JSON se añade `serde_json` (MIT OR Apache-2.0), leído a mano desde un `Value` sin `derive`, como los ajustes. Las filas no se reordenan ni se ocultan al editar una celda o añadir una fila (no saltan mientras se editan), solo al cambiar la vista, las propiedades o al abrir la base.
 4. **H6.4 — Deshacer en la tabla** (operaciones inversas) y exportación con todas las propiedades.
 5. **H6.5 — Vista Kanban** agrupada por una propiedad de selección; arrastrar tarjetas entre columnas cambia el valor.
 

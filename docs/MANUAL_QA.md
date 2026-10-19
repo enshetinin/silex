@@ -102,3 +102,15 @@ Con una base de datos abierta (o «Base de prueba» de la semilla):
 - Cabecera de una propiedad de selección: aparece «Opciones». Cambia el nombre de una (Intro o clic fuera), su color (clic en la muestra → elige otro) y bórrala: pide confirmación y dice en cuántas filas se vacía; «Cancelar» no borra. Las celdas que la tenían quedan vacías; las demás, igual.
 - El menú de opciones no cambia de tamaño ni se mueve mientras está abierto.
 - Con VoiceOver/NVDA/Orca: en la página de la fila cada valor se anuncia como «Propiedad, fila: valor»; las muestras de color se anuncian con el nombre del color.
+
+## 12. Ordenar, filtrar y columnas (H6.3a)
+Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
+- «Filtrar» → «+ Añadir un filtro» → «Número» → «mayor que» → escribe `1000`: el recuento dice «N de 1000 filas» y la tabla se actualiza al teclear. «Filtrar (1)» queda acentuado. Escribe `abc`: aparece «Valor no válido» y se ven todas las filas.
+- Añade un segundo filtro «Estado» «es» «Hecho»: solo filas que cumplen los dos. Quita uno con «×».
+- Filtra hasta que no quede ninguna: «Ninguna fila coincide con los filtros.»
+- «Ordenar» → «Notas» → «Descendente»; añade un segundo orden. Las filas vacías van al final.
+- Con un filtro activo, edita una celda para que la fila deje de cumplirlo: la fila no desaparece mientras está en pantalla. Cambia de página y vuelve: ya no está.
+- «Nueva fila» con un filtro activo: la fila nueva aparece al final, aunque esté vacía.
+- «Columnas»: desmarca «Notas» → desaparece de la tabla (y las flechas la saltan); sigue en la página de una fila. Cabecera de una propiedad → «Ocultar en esta vista» hace lo mismo. «Mostrar todas» las devuelve.
+- Cierra y vuelve a abrir la app: filtros, orden y columnas ocultas siguen ahí.
+- Los menús no cambian de tamaño ni se mueven mientras están abiertos; elegir una columna u operador no los cierra.

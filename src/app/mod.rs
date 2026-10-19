@@ -28,9 +28,12 @@ mod startup;
 #[cfg(test)]
 mod tests;
 pub mod theme;
+mod view_menus;
 
 pub use self::startup::StartupError;
-use self::{blocks::*, cells::*, database::*, dialogs::*, row_page::*, search::*, sidebar::*};
+use self::{
+    blocks::*, cells::*, database::*, dialogs::*, row_page::*, search::*, sidebar::*, view_menus::*,
+};
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
 /// entry the Linux packages install (`silex-desktop.desktop`, ADR 0005).

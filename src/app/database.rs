@@ -14,6 +14,7 @@ use silex_desktop::model::{DatabaseView, Page};
 use silex_desktop::property::{
     CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues,
 };
+use silex_desktop::view::{ViewConfig, visible_rows};
 
 use super::*;
 use super::{icons, theme};
@@ -54,6 +55,79 @@ pub(super) struct DatabaseState {
     pub(super) option_colors: Option<String>,
     /// The option waiting for «Borrar» to be confirmed.
     pub(super) option_delete: Option<String>,
+    /// The view on show, an index into `views` (the first until H6.3b).
+    pub(super) view: usize,
+    /// The rows in sight, in the view's order: indices into `rows`.
+    pub(super) order: Vec<usize>,
+    /// The properties shown as columns, in order: indices into `properties`.
+    pub(super) columns: Vec<usize>,
+    /// Rows added since the view last changed: shown even where its filters
+    /// would leave them out, so a new row does not vanish while named.
+    pub(super) pinned: HashSet<String>,
+    /// The view's settings changed and are not saved yet.
+    pub(super) view_dirty: bool,
+    /// A filter's value is being typed (the view is saved after).
+    pub(super) typing_filter: bool,
+    /// The inline list open in a view menu (column, operator…).
+    pub(super) view_picker: Option<String>,
+}
+
+impl DatabaseState {
+    /// The settings of the view on show.
+    pub(super) fn config(&self) -> Option<&ViewConfig> {
+        self.views.get(self.view).map(|v| &v.config)
+    }
+
+    /// Works out which rows and columns are in sight, and in what order.
+    /// Editing a cell does not call it: rows do not jump or vanish while
+    /// they are being edited, only when the view, the rows or the
+    /// properties change (or the database is opened again).
+    pub(super) fn apply_view(&mut self) {
+        let fallback = ViewConfig::default();
+        let config = self.config().unwrap_or(&fallback);
+        let mut order = visible_rows(&self.rows, &self.values, &self.properties, config);
+        let shown: HashSet<usize> = order.iter().copied().collect();
+        order.extend(
+            (0..self.rows.len())
+                .filter(|i| !shown.contains(i) && self.pinned.contains(&self.rows[*i].id)),
+        );
+        let columns = (0..self.properties.len())
+            .filter(|&i| !config.is_hidden(&self.properties[i].id))
+            .collect();
+        self.order = order;
+        self.columns = columns;
+    }
+
+    /// After the rows were read again (added, renamed, trashed): the rows
+    /// in sight stay where they were, gone ones leave, and rows that were
+    /// not there before (`known`) or were added here (pinned) go at the
+    /// end. The view is not worked out again, so nothing jumps or vanishes
+    /// just because a row was added.
+    fn keep_view(&mut self, before: &[String], known: &HashSet<String>) {
+        let index: HashMap<&str, usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.id.as_str(), i))
+            .collect();
+        let mut order: Vec<usize> = before
+            .iter()
+            .filter_map(|id| index.get(id.as_str()).copied())
+            .collect();
+        let shown: HashSet<usize> = order.iter().copied().collect();
+        order.extend((0..self.rows.len()).filter(|i| {
+            let id = &self.rows[*i].id;
+            !shown.contains(i) && (self.pinned.contains(id) || !known.contains(id))
+        }));
+        self.order = order;
+    }
+
+    /// After a change to the view's settings: apply it and save it soon.
+    pub(super) fn view_changed(&mut self) {
+        self.pinned.clear();
+        self.apply_view();
+        self.view_dirty = true;
+    }
 }
 
 /// Height of a table row.
@@ -99,6 +173,8 @@ enum TableAction {
     RenameOption(String, String),
     SetOptionColor(String, OptionColor),
     DeleteOption(String),
+    /// Hide a property's column in the view on show.
+    HideProperty(String),
 }
 
 impl SilexApp {
@@ -122,7 +198,17 @@ impl SilexApp {
             option_names: HashMap::new(),
             option_colors: None,
             option_delete: None,
+            view: 0,
+            order: Vec::new(),
+            columns: Vec::new(),
+            pinned: HashSet::new(),
+            view_dirty: false,
+            typing_filter: false,
+            view_picker: None,
         });
+        if let Some(state) = self.database.as_mut() {
+            state.apply_view();
+        }
         Ok(())
     }
 
@@ -134,7 +220,14 @@ impl SilexApp {
     pub(super) fn refresh_database(&mut self) -> Result<()> {
         self.save_table_edits()?;
         if let Some(state) = self.database.as_mut() {
+            let before: Vec<String> = state
+                .order
+                .iter()
+                .filter_map(|&i| state.rows.get(i).map(|r| r.id.clone()))
+                .collect();
+            let known: HashSet<String> = state.rows.iter().map(|r| r.id.clone()).collect();
             state.rows = self.db.database_rows(&state.id)?;
+            state.keep_view(&before, &known);
         }
         Ok(())
     }
@@ -146,14 +239,31 @@ impl SilexApp {
             state.properties = self.db.database_properties(&state.id)?;
             state.deleted = self.db.deleted_properties(&state.id)?;
             state.values = self.db.database_values(&state.id)?;
+            state.apply_view();
         }
+        Ok(())
+    }
+
+    /// Stores the view's settings if they changed.
+    pub(super) fn save_view(&mut self) -> Result<()> {
+        let Some(state) = self.database.as_mut() else {
+            return Ok(());
+        };
+        if !state.view_dirty {
+            return Ok(());
+        }
+        if let Some(view) = state.views.get(state.view) {
+            self.db.set_view_config(&view.id, &view.config)?;
+        }
+        state.view_dirty = false;
         Ok(())
     }
 
     /// Saves everything the table and the row's page have pending: edited
     /// row names and the text typed in an open cell (which stays open).
     pub(super) fn save_table_edits(&mut self) -> Result<()> {
-        let names = self.save_row_names();
+        let view = self.save_view();
+        let names = self.save_row_names().and(view);
         let open = [
             self.database.as_ref().and_then(|d| d.editing.clone()),
             self.row_page.as_ref().and_then(|p| p.editing.clone()),
@@ -232,6 +342,13 @@ impl SilexApp {
             self.open_page(database.to_owned())?;
         }
         if let Some(state) = self.database.as_mut() {
+            // In sight even if the view's filters would hide an empty row.
+            if state.pinned.insert(row.clone())
+                && let Some(index) = state.rows.iter().position(|r| r.id == row)
+                && !state.order.contains(&index)
+            {
+                state.order.push(index);
+            }
             state.focus = Some((row, 0));
         }
         Ok(())
@@ -249,7 +366,13 @@ impl SilexApp {
             .rows
             .iter()
             .any(|r| ui.memory(|m| m.has_focus(row_name_id(&r.id))));
+        let typing_filter = state.typing_filter;
         self.database = Some(state);
+        // The view is saved once its filter values are not being typed.
+        if !typing_filter {
+            let result = self.save_view();
+            self.report(result);
+        }
         // A name is saved once its cell is left (or scrolled away).
         if !editing_name {
             let result = self.save_row_names();
@@ -315,6 +438,14 @@ impl SilexApp {
             TableAction::DeleteOption(id) => {
                 self.db.delete_select_option(&id)?;
                 self.reload_properties()?;
+            }
+            TableAction::HideProperty(id) => {
+                if let Some(state) = self.database.as_mut()
+                    && let Some(view) = state.views.get_mut(state.view)
+                {
+                    view.config.set_hidden(&id, true);
+                    state.view_changed();
+                }
             }
         }
         Ok(())
@@ -399,15 +530,25 @@ impl SilexApp {
                     &mut state.new_property,
                     &mut actions,
                 );
-                let count = match state.rows.len() {
-                    1 => "1 fila".to_owned(),
-                    n => format!("{n} filas"),
+                if view_menus(ui, state) {
+                    state.view_changed();
+                }
+                let total = state.rows.len();
+                let count = match (state.order.len(), total) {
+                    (_, 1) if state.order.len() == 1 => "1 fila".to_owned(),
+                    (shown, total) if shown == total => format!("{total} filas"),
+                    (shown, 1) => format!("{shown} de 1 fila"),
+                    (shown, total) => format!("{shown} de {total} filas"),
                 };
                 ui.label(egui::RichText::new(count).small().color(p.text_muted));
             });
         });
 
-        let columns: f32 = state.properties.iter().map(|p| column_width(p.kind)).sum();
+        let columns: f32 = state
+            .columns
+            .iter()
+            .map(|&i| column_width(state.properties[i].kind))
+            .sum();
         let visible = ui.available_width();
         let name_width = (visible - columns - ADD_COLUMN_WIDTH).max(NAME_MIN_WIDTH);
         let width = name_width + columns + ADD_COLUMN_WIDTH;
@@ -441,10 +582,12 @@ impl SilexApp {
         // The rows scroll in their own area, both ways, drawing only the
         // ones in sight (thousands of rows). Room is left for «Nueva fila».
         let max_height = (ui.available_height() - 48.0).max(3.0 * ROW_HEIGHT);
-        let wanted = state
-            .focus
-            .as_ref()
-            .and_then(|(id, _)| state.rows.iter().position(|r| &r.id == id));
+        let wanted = state.focus.as_ref().and_then(|(id, _)| {
+            state
+                .order
+                .iter()
+                .position(|&i| state.rows.get(i).is_some_and(|r| &r.id == id))
+        });
         let mut area = egui::ScrollArea::both()
             .id_salt(("silex-table", &state.id))
             .auto_shrink([false, true])
@@ -470,7 +613,7 @@ impl SilexApp {
                     dormant_background_opacity: 0.0,
                     ..egui::style::ScrollStyle::thin()
                 };
-                area.show_rows(ui, ROW_HEIGHT, state.rows.len(), |ui, range| {
+                area.show_rows(ui, ROW_HEIGHT, state.order.len(), |ui, range| {
                     ui.set_min_width(width);
                     let columns = Columns { name_width, width };
                     self.table_rows(ui, state, range.clone(), columns, &mut actions, &mut cells);
@@ -486,24 +629,25 @@ impl SilexApp {
         // A cell scrolled out of sight stops being typed in: save it.
         let drawn = output.inner;
         if let Some(edit) = &state.editing
-            && !state.rows[drawn].iter().any(|r| r.id == edit.row)
+            && !state.order[drawn]
+                .iter()
+                .any(|&i| state.rows.get(i).is_some_and(|r| r.id == edit.row))
             && let Some(edit) = state.editing.take()
         {
             cells.push(CellAction::Commit(edit));
         }
 
-        if state.rows.is_empty() {
+        if state.order.is_empty() {
+            let empty = if state.rows.is_empty() {
+                "Todavía no hay filas."
+            } else {
+                "Ninguna fila coincide con los filtros."
+            };
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(visible, ROW_HEIGHT), egui::Sense::hover());
             ui.painter()
                 .hline(rect.x_range(), rect.bottom() - 0.5, (1.0, p.border));
-            paint_cell_text(
-                ui,
-                rect,
-                "Todavía no hay filas.",
-                egui::Align2::LEFT_CENTER,
-                p.text_muted,
-            );
+            paint_cell_text(ui, rect, empty, egui::Align2::LEFT_CENTER, p.text_muted);
         }
         ui.add_space(theme::space::XS);
         if new_row_button(ui, visible).clicked() {
@@ -528,6 +672,7 @@ impl SilexApp {
 
         let DatabaseState {
             properties,
+            columns,
             values,
             renaming,
             new_property,
@@ -538,7 +683,10 @@ impl SilexApp {
         } = state;
         let count = properties.len();
         let mut x = name.right();
-        for (index, property) in properties.iter().enumerate() {
+        for &index in columns.iter() {
+            let Some(property) = properties.get(index) else {
+                continue;
+            };
             let cell = egui::Rect::from_min_size(
                 egui::pos2(x, rect.top()),
                 egui::vec2(column_width(property.kind), rect.height()),
@@ -653,7 +801,9 @@ impl SilexApp {
         let p = theme::current(ui.ctx());
         let DatabaseState {
             rows,
+            order,
             properties,
+            columns: shown,
             values,
             dirty,
             focus,
@@ -664,8 +814,12 @@ impl SilexApp {
         } = state;
         *cursor = None;
         let first = range.start;
-        for (offset, row) in rows[range].iter_mut().enumerate() {
+        for (offset, &row_index) in order[range].iter().enumerate() {
+            // `index` is the row's place in the view; `row_index` in `rows`.
             let index = first + offset;
+            let Some(row) = rows.get_mut(row_index) else {
+                continue;
+            };
             let name_id = row_name_id(&row.id);
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(columns.width, ROW_HEIGHT), egui::Sense::hover());
@@ -735,7 +889,7 @@ impl SilexApp {
             }
 
             let mut x = name_rect.right();
-            for (column, property) in (1..).zip(properties.iter()) {
+            for (column, property) in (1..).zip(shown.iter().filter_map(|&i| properties.get(i))) {
                 let rect = egui::Rect::from_min_size(
                     egui::pos2(x, rect.top()),
                     egui::vec2(column_width(property.kind), rect.height()),
@@ -784,12 +938,19 @@ fn table_keys(ctx: &egui::Context, state: &mut DatabaseState) {
     let Some((index, column)) = state.cursor else {
         return;
     };
-    let Some(row) = state.rows.get(index) else {
+    let row_at = |index: usize| state.order.get(index).and_then(|&i| state.rows.get(i));
+    let Some(row) = row_at(index) else {
         return;
+    };
+    let property_at = |column: usize| {
+        state
+            .columns
+            .get(column.checked_sub(1)?)
+            .and_then(|&i| state.properties.get(i))
     };
     let id = match column {
         0 => row_name_id(&row.id),
-        n => match state.properties.get(n - 1) {
+        n => match property_at(n) {
             Some(property) => cell_id(&row.id, &property.id),
             None => return,
         },
@@ -797,8 +958,8 @@ fn table_keys(ctx: &egui::Context, state: &mut DatabaseState) {
     if !ctx.memory(|m| m.has_focus(id)) {
         return;
     }
-    let last_row = state.rows.len().saturating_sub(1);
-    let last_column = state.properties.len();
+    let last_row = state.order.len().saturating_sub(1);
+    let last_column = state.columns.len();
     // The caret at the end of the name, with nothing selected.
     let name_end = column == 0
         && egui::TextEdit::load_state(ctx, id)
@@ -819,7 +980,7 @@ fn table_keys(ctx: &egui::Context, state: &mut DatabaseState) {
     // egui would also move the focus to the nearest widget on its own.
     ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
     if target != (index, column)
-        && let Some(row) = state.rows.get(target.0)
+        && let Some(row) = row_at(target.0)
     {
         state.focus = Some((row.id.clone(), target.1));
     }
@@ -910,6 +1071,13 @@ impl PropertyMenu<'_> {
             self.options(ui, property, actions);
         }
         ui.separator();
+        if ui
+            .button((icons::icon(icons::EYE_SLASH), " Ocultar en esta vista"))
+            .clicked()
+        {
+            actions.push(TableAction::HideProperty(property.id.clone()));
+            ui.close();
+        }
         let moves = [
             (
                 Shift::Up,
@@ -988,13 +1156,13 @@ impl PropertyMenu<'_> {
                         *self.option_delete = Some(option.id.clone());
                     }
                     if let Some(name) = self.option_names.get_mut(&option.id) {
-                        let field = ui
-                            .add(
-                                TextEdit::singleline(name)
-                                    .margin(egui::Margin::symmetric(MENU_PAD as i8, 3))
-                                    .desired_width(f32::INFINITY),
-                            )
-                            .accessible_name(format!("Nombre de la opción {number}"));
+                        let field = framed(
+                            ui,
+                            TextEdit::singleline(name)
+                                .margin(egui::Margin::symmetric(MENU_PAD as i8, 3))
+                                .desired_width(f32::INFINITY),
+                        )
+                        .accessible_name(format!("Nombre de la opción {number}"));
                         if field.lost_focus() {
                             actions
                                 .push(TableAction::RenameOption(option.id.clone(), name.clone()));

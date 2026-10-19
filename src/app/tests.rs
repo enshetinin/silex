@@ -1750,6 +1750,25 @@ fn database_scale_smoke() -> anyhow::Result<()> {
             app_frame(&mut app, &ctx, vec![]);
         }
         println!("{count} filas: un frame de la tabla {:?}", t.elapsed() / 10);
+        // A text filter and a number sort, as applied on each key typed.
+        let (text, number) = (properties[0].0.clone(), properties[1].0.clone());
+        let t = std::time::Instant::now();
+        change_view(&mut app, |c| {
+            c.filters.push(silex_desktop::view::Filter {
+                property: text,
+                op: silex_desktop::view::FilterOp::Contains,
+                value: "9".into(),
+            });
+            c.sorts.push(silex_desktop::view::Sort {
+                property: number,
+                direction: silex_desktop::view::Direction::Descending,
+            });
+        });
+        let shown = app.database.as_ref().map_or(0, |d| d.order.len());
+        println!(
+            "{count} filas: filtrar y ordenar ({shown} filas) {:?}",
+            t.elapsed()
+        );
     }
     Ok(())
 }
@@ -2122,5 +2141,118 @@ fn arrow_keys_move_between_cells_and_follow_out_of_sight() -> anyhow::Result<()>
     sized_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
     sized_frame(&mut app, &ctx, vec![]);
     assert!(focused(&ctx, cell_edit_id(&rows[45], &ids[0])));
+    Ok(())
+}
+
+// ---- H6.3a: sort, filters and hidden columns of the view ----
+
+/// Changes the view on show as its menus would.
+fn change_view(app: &mut SilexApp, change: impl FnOnce(&mut silex_desktop::view::ViewConfig)) {
+    if let Some(state) = app.database.as_mut()
+        && let Some(view) = state.views.get_mut(state.view)
+    {
+        change(&mut view.config);
+        state.view_changed();
+    }
+}
+
+fn shown_titles(app: &SilexApp) -> Vec<String> {
+    app.database
+        .as_ref()
+        .map(|d| d.order.iter().map(|&i| d.rows[i].title.clone()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_view_sorts_filters_and_remembers() -> anyhow::Result<()> {
+    use silex_desktop::view::{Direction, Filter, FilterOp, NAME, Sort};
+    let (mut app, ctx, rayuela, ids) = table_app(&[(PropertyKind::Number, "Páginas")])?;
+    let paginas = ids[0].clone();
+    let base = app.selected.clone().unwrap_or_default();
+    let pedro = app.db.create_row(&base, "Pedro Páramo")?;
+    let ficciones = app.db.create_row(&base, "Ficciones")?;
+    app.reload_pages()?;
+    app.set_cell(&rayuela, &paginas, Some(CellValue::Number(736.0)))?;
+    app.set_cell(&pedro, &paginas, Some(CellValue::Number(124.0)))?;
+    app.set_cell(&ficciones, &paginas, Some(CellValue::Number(174.0)))?;
+    assert_eq!(shown_titles(&app), ["Rayuela", "Pedro Páramo", "Ficciones"]);
+
+    change_view(&mut app, |c| {
+        c.sorts.push(Sort {
+            property: NAME.into(),
+            direction: Direction::Ascending,
+        });
+    });
+    assert_eq!(shown_titles(&app), ["Ficciones", "Pedro Páramo", "Rayuela"]);
+    change_view(&mut app, |c| {
+        c.filters.push(Filter {
+            property: paginas.clone(),
+            op: FilterOp::Greater,
+            value: "150".into(),
+        });
+    });
+    assert_eq!(shown_titles(&app), ["Ficciones", "Rayuela"]);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "2 de 3 filas"), "{painted:?}");
+
+    // Editing a cell does not move or hide its row until the view changes.
+    app.set_cell(&ficciones, &paginas, Some(CellValue::Number(10.0)))?;
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(shown_titles(&app), ["Ficciones", "Rayuela"]);
+
+    // A new row stays in sight, though the filter would hide it.
+    app.add_row(&base)?;
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(shown_titles(&app), ["Ficciones", "Rayuela", ""]);
+
+    // Saved with the database: opening it again applies it afresh.
+    app_frame(&mut app, &ctx, vec![]);
+    let notas = app.db.create_page("Notas", None)?;
+    app.reload_pages()?;
+    app.open_page(notas)?;
+    app.open_page(base.clone())?;
+    assert_eq!(shown_titles(&app), ["Rayuela"]);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "1 de 4 filas"), "{painted:?}");
+
+    // Nothing matches: the table says why it is empty.
+    change_view(&mut app, |c| c.filters[0].value = "10000".into());
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t == "Ninguna fila coincide con los filtros."),
+        "{painted:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn hidden_columns_leave_the_table_and_the_arrow_keys() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    // (Not «Páginas»: the sidebar has a section with that name.)
+    let (mut app, ctx, row, ids) = table_app(&[
+        (PropertyKind::Text, "Autor"),
+        (PropertyKind::Number, "Extensión"),
+        (PropertyKind::Date, "Fecha"),
+    ])?;
+    change_view(&mut app, |c| c.set_hidden(&ids[1], true));
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Autor"));
+    assert!(!painted.iter().any(|t| t == "Extensión"), "hidden");
+
+    ctx.memory_mut(|m| m.request_focus(cell_id(&row, &ids[0])));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowRight, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        ctx.memory(|m| m.has_focus(cell_id(&row, &ids[2]))),
+        "→ skips the hidden column"
+    );
+    // A hidden property is still on the row's page.
+    app.open_page(row.clone())?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Extensión"));
     Ok(())
 }

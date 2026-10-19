@@ -16,6 +16,7 @@ use crate::model::{
 use crate::property::{CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues};
 use crate::search::{self, BlockMatch, Candidate, SearchHit};
 use crate::settings::Settings;
+use crate::view::ViewConfig;
 
 pub mod backup;
 
@@ -430,23 +431,41 @@ impl Database {
     /// (a newer Silex may add kinds), never an error that hides the data.
     pub fn database_views(&self, database_id: &str) -> Result<Vec<DatabaseView>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, kind FROM db_views WHERE database_id = ?1 ORDER BY position, id",
+            "SELECT id, name, kind, config FROM db_views WHERE database_id = ?1 ORDER BY position, id",
         )?;
         let rows = stmt.query_map([database_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })?;
         let mut views = Vec::new();
         for row in rows {
-            let (id, name, kind) = row?;
+            let (id, name, kind, config) = row?;
             if let Some(kind) = ViewKind::parse(&kind) {
-                views.push(DatabaseView { id, name, kind });
+                // A damaged config reads as the default (ADR 0006).
+                let config = ViewConfig::from_json(&config);
+                views.push(DatabaseView {
+                    id,
+                    name,
+                    kind,
+                    config,
+                });
             }
         }
         Ok(views)
+    }
+
+    /// Stores a view's sort, filters and hidden properties.
+    pub fn set_view_config(&self, view_id: &str, config: &ViewConfig) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE db_views SET config = ?2 WHERE id = ?1",
+            params![view_id, config.to_json()],
+        )?;
+        ensure!(affected == 1, "La vista no existe");
+        Ok(())
     }
 
     /// Live properties of a database in column order, each with its select

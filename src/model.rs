@@ -125,12 +125,14 @@ impl ViewKind {
     }
 }
 
-/// A saved way of looking at a database (its configuration comes in H6.3).
+/// A saved way of looking at a database: its sort, filters and hidden
+/// properties (H6.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseView {
     pub id: String,
     pub name: String,
     pub kind: ViewKind,
+    pub config: crate::view::ViewConfig,
 }
 
 /// Deepest indent level a block can have (CHECK in migration 0003).

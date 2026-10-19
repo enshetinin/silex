@@ -16,6 +16,10 @@ rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 uuid = { version = "1", features = ["v4"] }
 # Markdown import (H4.2): CommonMark parser, MIT, pure Rust.
 pulldown-cmark = { version = "0.13", default-features = false }
+# Database view settings (H6.3, ADR 0006): the `db_views.config` JSON is read
+# leniently into a `serde_json::Value` and validated by hand (no derive).
+# MIT OR Apache-2.0, maintained by the serde project.
+serde_json = "1.0.154"
 
 
 [target.'cfg(windows)'.build-dependencies]

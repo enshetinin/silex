@@ -12,3 +12,4 @@ pub mod safe_path;
 pub mod save_state;
 pub mod search;
 pub mod settings;
+pub mod view;
