@@ -27,6 +27,7 @@ mod search;
 mod sidebar;
 #[cfg(test)]
 mod snapshots;
+mod space;
 mod startup;
 mod table_undo;
 #[cfg(test)]
@@ -38,7 +39,7 @@ mod view_tabs;
 pub use self::startup::StartupError;
 use self::{
     blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, row_page::*, search::*,
-    sidebar::*, table_undo::*, view_menus::*, view_tabs::*,
+    sidebar::*, space::*, table_undo::*, view_menus::*, view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
@@ -119,6 +120,8 @@ pub struct SilexApp {
     export_job: Option<silex_desktop::export::WorkspaceExportJob>,
     /// Attachments of the open page and the work on files (ADR 0007).
     files: Files,
+    /// «Espacio» and «Liberar espacio» (H7.4).
+    space: Space,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -201,6 +204,7 @@ impl SilexApp {
             import_job: None,
             export_job: None,
             files: Files::default(),
+            space: Space::default(),
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -547,6 +551,7 @@ impl SilexApp {
         self.tick_backups(&ctx);
         self.tick_import();
         self.tick_files(&ctx);
+        self.tick_free_space();
         self.tick_workspace_export();
         Self::drop_hint(&ctx);
         let now = Instant::now();
@@ -559,6 +564,7 @@ impl SilexApp {
         self.close_dialog(&ctx);
         self.restore_dialog(&ctx);
         self.trash_dialog(&ctx);
+        self.free_space_dialog(&ctx);
         // The UI may be idle between edits; wake up for the next autosave or retry.
         if let Some(at) = self.save.next_attempt() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));

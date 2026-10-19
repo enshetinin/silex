@@ -78,6 +78,7 @@ impl Database {
         let mut db = Self { conn };
         db.configure()?;
         db.migrate(PreMigrationBackup::Yes)?;
+        db.finish_compaction()?;
         Ok(db)
     }
 
@@ -1138,6 +1139,103 @@ impl Database {
         })
     }
 
+    /// What the database and its attachments take (H7.4), without reading
+    /// any attachment's data. «Used» means some block points at it, on a
+    /// live page or one in the trash.
+    pub fn space_usage(&self) -> Result<SpaceUsage> {
+        let (used, used_bytes, unused, unused_bytes): (i64, i64, i64, i64) = self.conn.query_row(
+            "SELECT
+                     COALESCE(SUM(used), 0), COALESCE(SUM(CASE WHEN used THEN size END), 0),
+                     COALESCE(SUM(NOT used), 0), COALESCE(SUM(CASE WHEN NOT used THEN size END), 0)
+                 FROM (SELECT a.size,
+                              EXISTS (SELECT 1 FROM blocks b WHERE b.attachment_id = a.id) AS used
+                       FROM attachments a)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        let page_size: i64 = self
+            .conn
+            .pragma_query_value(None, "page_size", |r| r.get(0))?;
+        let pages: i64 = self
+            .conn
+            .pragma_query_value(None, "page_count", |r| r.get(0))?;
+        let free: i64 = self
+            .conn
+            .pragma_query_value(None, "freelist_count", |r| r.get(0))?;
+        let bytes = |n: i64| u64::try_from(n).unwrap_or_default();
+        Ok(SpaceUsage {
+            database: bytes(page_size * pages),
+            free: bytes(page_size * free),
+            used_attachments: bytes(used) as usize,
+            used_bytes: bytes(used_bytes),
+            unused_attachments: bytes(unused) as usize,
+            unused_bytes: bytes(unused_bytes),
+        })
+    }
+
+    /// Deletes the attachments no block uses (H7.4), except those in
+    /// `keep` (the open page's undo history can still bring their blocks
+    /// back). Returns how many went and their size. They stay in older
+    /// backups. The space is reused, but the file only shrinks with
+    /// [`Database::compact`].
+    pub fn delete_unused_attachments(&mut self, keep: &HashSet<String>) -> Result<(usize, u64)> {
+        let tx = self.conn.transaction()?;
+        let unused: Vec<(String, i64)> = tx
+            .prepare(
+                "SELECT id, size FROM attachments a
+                 WHERE NOT EXISTS (SELECT 1 FROM blocks b WHERE b.attachment_id = a.id)",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut count = 0;
+        let mut bytes = 0u64;
+        for (id, size) in unused.iter().filter(|(id, _)| !keep.contains(id)) {
+            tx.execute("DELETE FROM attachments WHERE id = ?1", [id])?;
+            count += 1;
+            bytes += u64::try_from(*size).unwrap_or_default();
+        }
+        tx.commit()?;
+        Ok((count, bytes))
+    }
+
+    /// Gives free space back to the system (`VACUUM`, H7.4). `VACUUM` may
+    /// renumber the implicit `rowid`s the search indexes point at, so both
+    /// are rebuilt after it. A mark is stored first: if the app stops in
+    /// between, the next open finishes the rebuild
+    /// ([`Database::finish_compaction`]).
+    pub fn compact(&mut self) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, '1')
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            [COMPACTING],
+        )?;
+        self.conn
+            .execute_batch("VACUUM")
+            .context("No se pudo compactar la base")?;
+        self.finish_compaction()
+    }
+
+    /// Rebuilds the search indexes if a compaction was interrupted, in one
+    /// transaction with clearing its mark. Cheap when there is no mark.
+    pub fn finish_compaction(&mut self) -> Result<()> {
+        let pending: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM settings WHERE key = ?1)",
+            [COMPACTING],
+            |r| r.get(0),
+        )?;
+        if !pending {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute_batch(
+            "INSERT INTO page_search(page_search) VALUES ('rebuild');
+             INSERT INTO block_search(block_search) VALUES ('rebuild');",
+        )?;
+        tx.execute("DELETE FROM settings WHERE key = ?1", [COMPACTING])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// An attachment's details, without its data.
     pub fn attachment(&self, id: &str) -> Result<Option<Attachment>> {
         self.conn
@@ -1537,6 +1635,24 @@ fn read_page(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Page> {
         title: r.get(at + 2)?,
         kind,
     })
+}
+
+/// Mark of a compaction in progress, in `settings` (ignored by
+/// `Settings::from_pairs` like any unknown key).
+const COMPACTING: &str = "compacting";
+
+/// What the database file and its attachments take (H7.4), in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpaceUsage {
+    /// The whole file (without its WAL).
+    pub database: u64,
+    /// Space inside the file that is free for reuse (`VACUUM` returns it).
+    pub free: u64,
+    pub used_attachments: usize,
+    pub used_bytes: u64,
+    /// Attachments no block uses.
+    pub unused_attachments: usize,
+    pub unused_bytes: u64,
 }
 
 /// Maps an `attachments` row (id, name, mime, size, width, height).

@@ -1371,3 +1371,64 @@ fn file_blocks_snapshot(name: &str, theme: eframe::egui::Theme) -> anyhow::Resul
     harness.snapshot(name);
     Ok(())
 }
+
+// ---- H7.4: space ----
+
+#[test]
+fn freeing_space_shows_what_goes_and_asks_first() -> anyhow::Result<()> {
+    let mut app = attachments_app()?;
+    // The PDF's block is deleted and saved: its file is no longer used.
+    app.blocks.retain(|b| !b.content.starts_with("billetes"));
+    app.mark_dirty();
+    app.save_now()?;
+    app.history.clear();
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Copias y exportación");
+    assert_accessible(&harness, "backups menu");
+    assert!(
+        harness
+            .query_by_label("1 adjunto sin usar, 2,4 MB")
+            .is_some()
+    );
+    menu_item(&harness, "Liberar espacio…")
+        .expect("«Liberar espacio…»")
+        .click();
+    harness.run();
+    assert_accessible(&harness, "free space dialog");
+    assert!(
+        harness
+            .query_by_label_contains("Se borrará 1 adjunto que ya no usa ninguna página (2,4 MB)")
+            .is_some()
+    );
+    click_button(&mut harness, "Liberar espacio");
+    let state = harness.state();
+    let notice = state.notice.clone().unwrap_or_default();
+    assert!(notice.starts_with("Se liberaron"), "{notice}");
+    assert!(notice.contains("(1 adjunto sin usar)"), "{notice}");
+    assert_eq!(state.db.space_usage()?.unused_attachments, 0);
+    // The other files are still there.
+    assert_eq!(state.db.space_usage()?.used_attachments, 2);
+    Ok(())
+}
+
+/// The «Copias y exportación» menu with its «Espacio» part.
+#[test]
+fn backups_menu() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut app = attachments_app()?;
+    app.blocks.retain(|b| !b.content.starts_with("billetes"));
+    app.mark_dirty();
+    app.save_now()?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    click_button(&mut harness, "Copias y exportación");
+    harness.snapshot("backups_menu_light");
+    Ok(())
+}

@@ -77,6 +77,17 @@ impl History {
         !self.redo.is_empty()
     }
 
+    /// The attachments that undo or redo can bring back (ADR 0007): they
+    /// must not be deleted while this history lives.
+    pub fn attachments(&self) -> std::collections::HashSet<String> {
+        self.undo
+            .iter()
+            .chain(&self.redo)
+            .flat_map(|snapshot| &snapshot.blocks)
+            .filter_map(|block| block.attachment.clone())
+            .collect()
+    }
+
     /// Forget everything (page switch, backup restore).
     pub fn clear(&mut self) {
         *self = Self::default();

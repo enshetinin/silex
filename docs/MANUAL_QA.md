@@ -181,3 +181,11 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - Cmd+K → «adjuntar» → Intro, con el cursor en medio de la página: los archivos van tras ese bloque.
 - En una base de datos, la paleta no ofrece «Adjuntar archivos…».
 - Linux: prueba en GNOME o KDE (con portal) y, si puedes, en un escritorio sin portal; sin él, el aviso debe explicar el error y la app seguir funcionando.
+
+## 20. Espacio (H7.4)
+- Abre «Copias y exportación»: la sección «Espacio» dice cuánto ocupan la base, las copias y los adjuntos sin usar.
+- Adjunta un archivo grande, bórralo de la página, cambia de página (para vaciar el historial) y vuelve al menú: aparece «1 adjunto sin usar».
+- «Liberar espacio…» → lee la confirmación → «Liberar espacio»: el aviso dice cuánto se liberó, y en Finder el archivo `silex.sqlite3` ha encogido.
+- Borra un archivo de la página y, sin cambiar de página, libera espacio: ese archivo no se borra (Cmd+Z lo devuelve y se abre).
+- Tras liberar espacio, la búsqueda (Cmd+K) sigue encontrando todo, y crear y restaurar una copia funciona.
+- «Cancelar» en la confirmación no borra nada.

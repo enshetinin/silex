@@ -302,3 +302,150 @@ fn a_page_without_files_exports_as_before() -> anyhow::Result<()> {
     assert_eq!(fs::read_dir(tmp.0.join("a"))?.count(), 1, "no folder");
     Ok(())
 }
+
+// ---- H7.4: space ----
+
+/// A page with a file block using a `size`-byte attachment; returns the page,
+/// its block and the attachment id.
+fn page_with_blob(
+    db: &mut Database,
+    title: &str,
+    size: usize,
+) -> anyhow::Result<(String, Block, String)> {
+    let data: Vec<u8> = (0..size).map(|i| (i % 253) as u8).collect();
+    let attachment =
+        db.add_attachment(&NewAttachment::from_bytes(&format!("{title}.bin"), data)?)?;
+    let page = db.create_page(title, None)?;
+    let file = block(
+        &page,
+        BlockKind::File,
+        &attachment.name,
+        Some(attachment.id.clone()),
+    );
+    db.save_document(&page, title, std::slice::from_ref(&file))?;
+    Ok((page, file, attachment.id))
+}
+
+#[test]
+fn space_counts_used_and_unused_attachments() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let (_, _, _) = page_with_blob(&mut db, "usado", 1000)?;
+    let (trashed, _, _) = page_with_blob(&mut db, "papelera", 300)?;
+    let (orphan_page, _, orphan) = page_with_blob(&mut db, "suelto", 2000)?;
+    db.trash_page(&trashed)?;
+    db.save_document(&orphan_page, "suelto", &[])?;
+    let usage = db.space_usage()?;
+    // A page in the trash still uses its attachment.
+    assert_eq!((usage.used_attachments, usage.used_bytes), (2, 1300));
+    assert_eq!((usage.unused_attachments, usage.unused_bytes), (1, 2000));
+    assert!(usage.database > 0);
+
+    // What undo can bring back is kept.
+    let keep = std::collections::HashSet::from([orphan.clone()]);
+    assert_eq!(db.delete_unused_attachments(&keep)?, (0, 0));
+    assert!(db.attachment(&orphan)?.is_some());
+    assert_eq!(
+        db.delete_unused_attachments(&Default::default())?,
+        (1, 2000)
+    );
+    assert!(db.attachment(&orphan)?.is_none());
+    let usage = db.space_usage()?;
+    assert_eq!((usage.used_attachments, usage.unused_attachments), (2, 0));
+    Ok(())
+}
+
+#[test]
+fn compacting_gives_the_space_back_and_keeps_search() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let mut db = Database::open(tmp.db())?;
+    let (page, _, _) = page_with_blob(&mut db, "grande", 3_000_000)?;
+    let notes = db.create_page("Notas", None)?;
+    let text = block(&notes, BlockKind::Paragraph, "zanahorias moradas", None);
+    db.save_document(&notes, "Notas", &[text])?;
+    db.save_document(&page, "grande", &[])?;
+    db.delete_unused_attachments(&Default::default())?;
+    let before = db.space_usage()?;
+    assert!(before.free >= 3_000_000, "{before:?}");
+
+    db.compact()?;
+    let after = db.space_usage()?;
+    assert!(
+        after.database + 2_900_000 <= before.database,
+        "{before:?} → {after:?}"
+    );
+    assert!(after.free < 100_000, "{after:?}");
+    // Search still finds pages and blocks, and the file verifies.
+    assert_eq!(db.search_pages("zanahorias")?.len(), 1);
+    assert_eq!(db.search("Notas")?.len(), 1);
+    drop(db);
+    backup::verify_backup(&tmp.db())?;
+    Ok(())
+}
+
+#[test]
+fn an_interrupted_compaction_is_finished_on_open() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let mut db = Database::open(tmp.db())?;
+    let notes = db.create_page("Notas", None)?;
+    let text = block(&notes, BlockKind::Paragraph, "zanahorias", None);
+    db.save_document(&notes, "Notas", &[text])?;
+    drop(db);
+    // As if the app stopped after VACUUM, before rebuilding the indexes,
+    // and the block index were left empty.
+    let conn = Connection::open(tmp.db())?;
+    conn.execute_batch(
+        "INSERT INTO settings (key, value) VALUES ('compacting', '1');
+         INSERT INTO block_search(block_search) VALUES ('delete-all');",
+    )?;
+    drop(conn);
+    let db = Database::open(tmp.db())?;
+    assert_eq!(db.search_pages("zanahorias")?.len(), 1, "index rebuilt");
+    let marks: i64 = Connection::open(tmp.db())?.query_row(
+        "SELECT COUNT(*) FROM settings WHERE key = 'compacting'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(marks, 0);
+    // Settings ignore the mark meanwhile.
+    assert_eq!(
+        db.load_settings()?,
+        silex_desktop::settings::Settings::default()
+    );
+    Ok(())
+}
+
+#[test]
+fn backups_report_their_count_and_size() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let db = Database::open(tmp.db())?;
+    let dir = backup::backups_dir(&tmp.db());
+    assert_eq!(backup::backups_size(&dir)?, (0, 0));
+    let copy = backup::create_backup(&tmp.db(), &dir)?;
+    let (count, bytes) = backup::backups_size(&dir)?;
+    assert_eq!((count, bytes), (1, fs::metadata(copy)?.len()));
+    drop(db);
+    Ok(())
+}
+
+#[test]
+fn freeing_space_in_its_thread_shrinks_the_file() -> anyhow::Result<()> {
+    use silex_desktop::space::FreeSpaceJob;
+    let tmp = TempDir::new()?;
+    let mut db = Database::open(tmp.db())?;
+    let (page, _, kept) = page_with_blob(&mut db, "deshacer", 500_000)?;
+    let (other, _, _) = page_with_blob(&mut db, "suelto", 2_000_000)?;
+    db.save_document(&page, "deshacer", &[])?;
+    db.save_document(&other, "suelto", &[])?;
+    let (done, wait) = std::sync::mpsc::channel();
+    let job = FreeSpaceJob::spawn(tmp.db(), [kept.clone()].into(), move || {
+        let _ = done.send(());
+    })?;
+    wait.recv_timeout(std::time::Duration::from_secs(30))?;
+    let freed = job.poll().expect("finished")?;
+    assert_eq!(freed.attachments, 1);
+    assert!(freed.bytes >= 1_900_000, "{freed:?}");
+    // The main connection sees it, and the kept one is still there.
+    assert!(db.attachment(&kept)?.is_some());
+    assert_eq!(db.space_usage()?.unused_attachments, 1);
+    Ok(())
+}

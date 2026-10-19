@@ -128,6 +128,17 @@ pub fn newest_stamp(dir: &Path) -> Result<Option<String>> {
         .map(str::to_owned))
 }
 
+/// How many backups `dir` holds and their total size in bytes (H7.4).
+pub fn backups_size(dir: &Path) -> Result<(usize, u64)> {
+    let backups = list_backups(dir)?;
+    let bytes = backups
+        .iter()
+        .filter_map(|path| fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .sum();
+    Ok((backups.len(), bytes))
+}
+
 /// Deletes the oldest backups beyond `keep`; returns how many were removed.
 pub fn rotate(dir: &Path, keep: usize) -> Result<usize> {
     let mut removed = 0;

@@ -3161,3 +3161,34 @@ fn the_palette_attaches_files_after_the_block_being_edited() -> anyhow::Result<(
     );
     Ok(())
 }
+
+// ---- H7.4: freeing space ----
+
+#[test]
+fn freeing_space_keeps_what_undo_can_bring_back() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[("acta.pdf", b"%PDF-1.4")])?;
+    let file = file_block(&app);
+    let attachment = file.attachment.clone().expect("its file");
+    // Deleted from the page, but Cmd+Z could bring it back.
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&file.id)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    assert!(app.blocks.iter().all(|b| b.kind != BlockKind::File));
+    app.start_free_space(&ctx)?;
+    assert!(app.db.attachment(&attachment)?.is_some(), "kept for undo");
+    // Undo brings the block back, and it saves.
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, undo());
+    assert_eq!(file_block(&app).attachment, Some(attachment.clone()));
+    app.save_now()?;
+    // With the history gone (another page), it can go.
+    app.blocks.retain(|b| b.kind != BlockKind::File);
+    app.mark_dirty();
+    app.save_now()?;
+    app.history.clear();
+    app.start_free_space(&ctx)?;
+    assert!(app.db.attachment(&attachment)?.is_none());
+    Ok(())
+}
