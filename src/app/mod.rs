@@ -12,12 +12,14 @@ use silex_desktop::{
 };
 
 mod blocks;
+mod cells;
 mod database;
 mod dialogs;
 mod document;
 pub mod icons;
 mod jobs;
 mod palette;
+mod row_page;
 mod search;
 mod sidebar;
 #[cfg(test)]
@@ -28,7 +30,7 @@ mod tests;
 pub mod theme;
 
 pub use self::startup::StartupError;
-use self::{blocks::*, database::*, dialogs::*, search::*, sidebar::*};
+use self::{blocks::*, cells::*, database::*, dialogs::*, row_page::*, search::*, sidebar::*};
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
 /// entry the Linux packages install (`silex-desktop.desktop`, ADR 0005).
@@ -54,6 +56,8 @@ pub struct SilexApp {
     search: Option<SearchWindow>,
     /// The open page's rows and views, when it is a database (ADR 0006).
     database: Option<DatabaseState>,
+    /// The open page's properties, when it is a row of a database.
+    row_page: Option<RowPage>,
     /// The keyboard shortcuts window (from the command palette).
     shortcuts_dialog: bool,
     rename: Option<Rename>,
@@ -152,6 +156,7 @@ impl SilexApp {
             favorites: Vec::new(),
             search: None,
             database: None,
+            row_page: None,
             shortcuts_dialog: false,
             rename: None,
             selected: None,
@@ -215,6 +220,7 @@ impl SilexApp {
             if page.kind == PageKind::Database {
                 self.load_database(&id)?;
             }
+            self.load_row_page(&page)?;
             self.title = page.title;
             self.reset_history();
             // Make the open page visible in the tree.
@@ -246,6 +252,7 @@ impl SilexApp {
             None => {
                 self.selected = None;
                 self.database = None;
+                self.row_page = None;
                 self.title.clear();
                 self.blocks.clear();
                 self.reset_history();

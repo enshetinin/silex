@@ -95,6 +95,20 @@ impl OptionColor {
         Self::ALL.into_iter().find(|c| c.as_str() == name)
     }
 
+    /// Name shown in the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            OptionColor::Gray => "Gris",
+            OptionColor::Blue => "Azul",
+            OptionColor::Green => "Verde",
+            OptionColor::Yellow => "Amarillo",
+            OptionColor::Orange => "Naranja",
+            OptionColor::Red => "Rojo",
+            OptionColor::Purple => "Morado",
+            OptionColor::Pink => "Rosa",
+        }
+    }
+
     /// Color for a property's new option when it already has `existing`
     /// options: the colors in turn, gray last, so neighbours differ.
     pub fn for_new_option(existing: usize) -> Self {

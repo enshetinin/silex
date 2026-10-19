@@ -612,6 +612,7 @@ fn table_cells_and_property_menus_have_names() -> anyhow::Result<()> {
 
     click_button(&mut harness, "Estado, Ficciones: Leyendo");
     assert_accessible(&harness, "select menu");
+    assert_steady(&mut harness, "Opción de Estado, Ficciones");
     assert!(harness.query_by_label("Terminado").is_some());
     assert!(menu_item(&harness, "Quitar la opción").is_some());
     egui::Popup::close_all(&harness.ctx);
@@ -619,6 +620,7 @@ fn table_cells_and_property_menus_have_names() -> anyhow::Result<()> {
 
     click_button(&mut harness, "Añadir una propiedad");
     assert_accessible(&harness, "add property menu");
+    assert_steady(&mut harness, "Nombre de la nueva propiedad");
     menu_item(&harness, "Fecha").expect("type «Fecha»").click();
     harness.run();
     let state = harness.state();
@@ -685,4 +687,137 @@ fn database_snapshot(
     harness.run();
     harness.snapshot(name);
     Ok(())
+}
+
+// ---- H6.2b: options in the property menu, a row's page ----
+
+/// A menu keeps its size and place from one frame to the next (a widget
+/// sized from the menu's own width makes it grow every frame).
+#[track_caller]
+fn assert_steady(harness: &mut Harness<'_, SilexApp>, label: &str) {
+    let bounds =
+        |harness: &Harness<'_, SilexApp>| harness.get_by_label(label).accesskit_node().raw_bounds();
+    let before = bounds(harness);
+    for _ in 0..5 {
+        harness.step();
+    }
+    assert_eq!(bounds(harness), before, "the menu with {label:?} moved");
+}
+
+/// The options of «Estado» as stored: (name, color).
+fn estado_options(
+    app: &SilexApp,
+    base: &str,
+) -> Vec<(String, silex_desktop::property::OptionColor)> {
+    app.db
+        .database_properties(base)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|p| p.name == "Estado")
+        .map(|p| p.options.into_iter().map(|o| (o.name, o.color)).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn options_are_managed_from_the_property_menu() -> anyhow::Result<()> {
+    use silex_desktop::property::OptionColor;
+    let (app, base, rows) = database_app()?;
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Estado, Selección");
+    assert_accessible(&harness, "options in the property menu");
+    assert_steady(&mut harness, "Color de «Leyendo»: Azul");
+
+    // Color: the swatch shows the eight colors.
+    click_button(&mut harness, "Color de «Leyendo»: Azul");
+    assert_accessible(&harness, "colors");
+    click_button(&mut harness, "Rojo");
+    assert_eq!(
+        estado_options(harness.state(), &base),
+        [
+            ("Terminado".to_owned(), OptionColor::Green),
+            ("Leyendo".to_owned(), OptionColor::Red)
+        ]
+    );
+
+    // Name: saved when the field is left with Enter.
+    let field = harness.get_by_label("Nombre de la opción 2");
+    field.focus();
+    harness.run();
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    harness
+        .get_by_label("Nombre de la opción 2")
+        .type_text("Releyendo");
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(estado_options(harness.state(), &base)[1].0, "Releyendo");
+
+    // Delete: asks first and says how many cells it empties.
+    click_button(&mut harness, "Borrar la opción «Terminado»");
+    assert_accessible(&harness, "confirm delete");
+    assert!(
+        harness
+            .query_by_label_contains("¿Borrar «Terminado»? Se vaciará en 1 fila.")
+            .is_some()
+    );
+    click_button(&mut harness, "Cancelar");
+    assert_eq!(estado_options(harness.state(), &base).len(), 2);
+    click_button(&mut harness, "Borrar la opción «Terminado»");
+    click_button(&mut harness, "Borrar");
+    assert_eq!(estado_options(harness.state(), &base).len(), 1);
+    let values = harness.state().db.row_values(&rows[0])?;
+    assert!(
+        values
+            .values()
+            .all(|v| !matches!(v, silex_desktop::property::CellValue::Select(_))),
+        "Rayuela's state is empty: {values:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_rows_page_names_its_properties() -> anyhow::Result<()> {
+    let (mut app, _, rows) = database_app()?;
+    app.open_page(rows[0].clone())?;
+    let harness = a11y_harness(app);
+    assert_accessible(&harness, "row page");
+    for label in [
+        "Autor, Rayuela: Julio Cortázar",
+        "Páginas, Rayuela: 736",
+        "Estado, Rayuela: Terminado",
+        "Leído, Rayuela",
+    ] {
+        assert!(harness.query_by_label(label).is_some(), "{label}");
+    }
+    Ok(())
+}
+
+#[test]
+fn database_row_page() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (mut app, _, rows) = database_app()?;
+    app.open_page(rows[1].clone())?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot("database_row_page_light");
+    Ok(())
+}
+
+#[test]
+fn database_property_menu() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_property_menu_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            click_button(harness, "Estado, Selección");
+            click_button(harness, "Color de «Leyendo»: Azul");
+        },
+    )
 }

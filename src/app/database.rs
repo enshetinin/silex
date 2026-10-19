@@ -2,19 +2,21 @@
 //! Rows are pages (H6.1): the name cell is the page title, «Abrir» opens the
 //! row as a page, and right-click shows the usual page menu. Typed
 //! properties (H6.2) are the other columns; each cell is edited by its type
-//! and saved at once in its own transaction.
-use std::collections::HashSet;
+//! (`cells.rs`) and saved at once in its own transaction. The arrow keys
+//! move between cells (H6.2b), and a select property's menu manages its
+//! options.
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, anyhow};
 use eframe::egui::{self, TextEdit};
 use silex_desktop::db::Shift;
 use silex_desktop::model::{DatabaseView, Page};
 use silex_desktop::property::{
-    CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues, parse_input,
+    CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues,
 };
 
 use super::*;
-use super::{blocks::paint_check_box, icons, theme};
+use super::{icons, theme};
 
 /// The open database: its rows, views, properties and values, and the
 /// edits in progress.
@@ -29,8 +31,12 @@ pub(super) struct DatabaseState {
     pub(super) values: TableValues,
     /// Rows whose name was edited in the table and is not saved yet.
     pub(super) dirty: HashSet<String>,
-    /// Focus this row's name on the next frame (a new row, «Renombrar»).
-    pub(super) focus: Option<String>,
+    /// Give the keyboard focus to this cell on the next frame: row id and
+    /// column (0 is the name). A new row, «Renombrar», the arrow keys.
+    pub(super) focus: Option<(String, usize)>,
+    /// The cell that had the keyboard focus last frame (row index, column),
+    /// where the arrow keys start from.
+    pub(super) cursor: Option<(usize, usize)>,
     /// The text, number or date cell being typed in.
     pub(super) editing: Option<CellEdit>,
     /// A property's new name, typed in its menu; saved when the menu closes.
@@ -41,16 +47,13 @@ pub(super) struct DatabaseState {
     pub(super) option_filter: String,
     /// How far the rows are scrolled (the header follows sideways).
     pub(super) scroll: egui::Vec2,
-}
-
-/// A cell being typed in: its row, its property and the text so far.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CellEdit {
-    pub(super) row: String,
-    pub(super) property: String,
-    pub(super) text: String,
-    /// Put the cursor in the field on the next frame.
-    pub(super) focus: bool,
+    /// Option names typed in a select property's menu (option id → name),
+    /// saved when they lose the focus or the menu closes.
+    pub(super) option_names: HashMap<String, String>,
+    /// The option whose colors are shown in its property's menu.
+    pub(super) option_colors: Option<String>,
+    /// The option waiting for «Borrar» to be confirmed.
+    pub(super) option_delete: Option<String>,
 }
 
 /// Height of a table row.
@@ -61,9 +64,6 @@ const HEADER_HEIGHT: f32 = 30.0;
 const NAME_MIN_WIDTH: f32 = 240.0;
 /// The «+» column that adds a property.
 const ADD_COLUMN_WIDTH: f32 = 40.0;
-/// Space between a cell's edge and its content.
-const CELL_PAD: f32 = 8.0;
-
 fn column_width(kind: PropertyKind) -> f32 {
     match kind {
         PropertyKind::Text => 180.0,
@@ -74,29 +74,8 @@ fn column_width(kind: PropertyKind) -> f32 {
     }
 }
 
-/// Icon of a property type (header and menus).
-pub(super) fn property_icon(kind: PropertyKind) -> &'static str {
-    match kind {
-        PropertyKind::Text => icons::TEXT_ALIGN_LEFT,
-        PropertyKind::Number => icons::HASH,
-        PropertyKind::Checkbox => icons::TODO,
-        PropertyKind::Date => icons::CALENDAR,
-        PropertyKind::Select => icons::CARET_CIRCLE_DOWN,
-    }
-}
-
 pub(super) fn row_name_id(row_id: &str) -> egui::Id {
     egui::Id::unique(("silex-row-name", row_id))
-}
-
-/// The cell of `row` in the column of `property` (when not typing in it).
-pub(super) fn cell_id(row: &str, property: &str) -> egui::Id {
-    egui::Id::unique(("silex-cell", row, property))
-}
-
-/// The text field of a cell being typed in.
-pub(super) fn cell_edit_id(row: &str, property: &str) -> egui::Id {
-    egui::Id::unique(("silex-cell-edit", row, property))
 }
 
 /// The header button of a property (opens its menu).
@@ -108,10 +87,6 @@ fn property_menu_id(property: &str) -> egui::Id {
     egui::Id::unique(("silex-property-menu", property))
 }
 
-pub(super) fn select_menu_id(row: &str, property: &str) -> egui::Id {
-    egui::Id::unique(("silex-select-menu", row, property))
-}
-
 /// What the user did in the table this frame, applied after drawing.
 enum TableAction {
     Open(String),
@@ -121,18 +96,9 @@ enum TableAction {
     RenameProperty(String, String),
     MoveProperty(String, Shift),
     DeleteProperty(String),
-    SetValue {
-        row: String,
-        property: String,
-        value: Option<CellValue>,
-    },
-    CreateOption {
-        row: String,
-        property: String,
-        name: String,
-    },
-    /// Save what was typed in a cell that is no longer being edited.
-    Commit(CellEdit),
+    RenameOption(String, String),
+    SetOptionColor(String, OptionColor),
+    DeleteOption(String),
 }
 
 impl SilexApp {
@@ -147,20 +113,24 @@ impl SilexApp {
             values: self.db.database_values(id)?,
             dirty: HashSet::new(),
             focus: None,
+            cursor: None,
             editing: None,
             renaming: None,
             new_property: String::new(),
             option_filter: String::new(),
             scroll: egui::Vec2::ZERO,
+            option_names: HashMap::new(),
+            option_colors: None,
+            option_delete: None,
         });
         Ok(())
     }
 
     /// Saves the table's pending edits, then reloads the rows (they may
     /// have been added, renamed, moved or trashed from elsewhere). Values
-    /// are not reloaded (~80 ms with 10 000 rows): they only change from the
-    /// table, and a row restored from the trash opens as a page, so its
-    /// values are read when the database opens again.
+    /// are not reloaded (~80 ms with 10 000 rows): they change in the table
+    /// itself or on a row's page, and opening the database reads them again
+    /// (a row restored from the trash opens as a page too).
     pub(super) fn refresh_database(&mut self) -> Result<()> {
         self.save_table_edits()?;
         if let Some(state) = self.database.as_mut() {
@@ -171,7 +141,7 @@ impl SilexApp {
 
     /// Reloads the columns after a change to them (and the values, which
     /// follow their properties out and back).
-    fn reload_properties(&mut self) -> Result<()> {
+    pub(super) fn reload_properties(&mut self) -> Result<()> {
         if let Some(state) = self.database.as_mut() {
             state.properties = self.db.database_properties(&state.id)?;
             state.deleted = self.db.deleted_properties(&state.id)?;
@@ -180,15 +150,19 @@ impl SilexApp {
         Ok(())
     }
 
-    /// Saves everything the table has pending: edited row names and the
-    /// text typed in the open cell (which stays open).
+    /// Saves everything the table and the row's page have pending: edited
+    /// row names and the text typed in an open cell (which stays open).
     pub(super) fn save_table_edits(&mut self) -> Result<()> {
         let names = self.save_row_names();
-        let cell = match self.database.as_ref().and_then(|d| d.editing.clone()) {
-            Some(edit) => self.commit_cell_edit(&edit),
-            None => Ok(()),
-        };
-        names.and(cell)
+        let open = [
+            self.database.as_ref().and_then(|d| d.editing.clone()),
+            self.row_page.as_ref().and_then(|p| p.editing.clone()),
+        ];
+        let mut cells = Ok(());
+        for edit in open.into_iter().flatten() {
+            cells = cells.and(self.commit_cell_edit(&edit));
+        }
+        names.and(cells)
     }
 
     /// Saves the row names edited in the table. On error the edits stay
@@ -207,46 +181,6 @@ impl SilexApp {
         // The sidebar, the search and the breadcrumbs use these titles.
         self.pages = self.db.list_pages()?;
         self.rebuild_tree();
-        Ok(())
-    }
-
-    /// Saves the text typed in a cell. Text that does not fit the property
-    /// (a number, a date) is reported and the cell keeps its value.
-    pub(super) fn commit_cell_edit(&mut self, edit: &CellEdit) -> Result<()> {
-        let Some(state) = self.database.as_ref() else {
-            return Ok(());
-        };
-        // Deleted meanwhile: there is nothing to save into.
-        let Some(property) = state.properties.iter().find(|p| p.id == edit.property) else {
-            return Ok(());
-        };
-        let value = parse_input(property.kind, &edit.text)
-            .map_err(|message| anyhow!("{message} No se ha guardado."))?;
-        let current = state
-            .values
-            .get(&edit.row)
-            .and_then(|cells| cells.get(&edit.property));
-        if value.as_ref() == current {
-            return Ok(());
-        }
-        self.set_cell(&edit.row, &edit.property, value)
-    }
-
-    /// Stores a cell's value (`None` empties it) and updates the table.
-    pub(super) fn set_cell(
-        &mut self,
-        row: &str,
-        property: &str,
-        value: Option<CellValue>,
-    ) -> Result<()> {
-        self.db.set_value(row, property, value.as_ref())?;
-        if let Some(state) = self.database.as_mut() {
-            let cells = state.values.entry(row.to_owned()).or_default();
-            match value.filter(|v| !v.is_empty()) {
-                Some(value) => cells.insert(property.to_owned(), value),
-                None => cells.remove(property),
-            };
-        }
         Ok(())
     }
 
@@ -288,23 +222,6 @@ impl SilexApp {
         self.reload_properties()
     }
 
-    /// Creates an option named `name` in a select property (next color in
-    /// turn) and puts it in the cell of `row`.
-    pub(super) fn create_option(&mut self, row: &str, property: &str, name: &str) -> Result<()> {
-        let existing = self
-            .database
-            .as_ref()
-            .and_then(|d| d.properties.iter().find(|p| p.id == property))
-            .map_or(0, |p| p.options.len());
-        let option = self.db.add_select_option(
-            property,
-            name.trim(),
-            OptionColor::for_new_option(existing),
-        )?;
-        self.reload_properties()?;
-        self.set_cell(row, property, Some(CellValue::Select(option)))
-    }
-
     /// Adds an empty row to `database` and puts the cursor in its name,
     /// opening the database first if needed.
     pub(super) fn add_row(&mut self, database: &str) -> Result<()> {
@@ -315,7 +232,7 @@ impl SilexApp {
             self.open_page(database.to_owned())?;
         }
         if let Some(state) = self.database.as_mut() {
-            state.focus = Some(row);
+            state.focus = Some((row, 0));
         }
         Ok(())
     }
@@ -325,10 +242,8 @@ impl SilexApp {
         let Some(mut state) = self.database.take() else {
             return;
         };
-        let mut actions = self.draw_table(ui, &mut state);
-        // Text typed in a cell is saved before anything else changes the
-        // table (deleting its property, opening another page…).
-        actions.sort_by_key(|action| !matches!(action, TableAction::Commit(_)));
+        table_keys(ui.ctx(), &mut state);
+        let (actions, cells) = self.draw_table(ui, &mut state);
         let database = state.id.clone();
         let editing_name = state
             .rows
@@ -340,6 +255,9 @@ impl SilexApp {
             let result = self.save_row_names();
             self.report(result);
         }
+        // Cells first: text typed in one is saved before anything else
+        // changes the table (deleting its property, opening another page…).
+        self.apply_cell_actions(cells);
         for action in actions {
             let result = self.apply_table_action(&database, action);
             self.report(result);
@@ -353,7 +271,7 @@ impl SilexApp {
             // Rows are not in the sidebar: rename in the table.
             TableAction::Row(RowAction::StartRename(id)) => {
                 if let Some(state) = self.database.as_mut() {
-                    state.focus = Some(id);
+                    state.focus = Some((id, 0));
                 }
             }
             TableAction::Row(other) => self.apply(other)?,
@@ -377,17 +295,27 @@ impl SilexApp {
                 self.reload_properties()?;
             }
             TableAction::DeleteProperty(id) => self.delete_property(&id)?,
-            TableAction::SetValue {
-                row,
-                property,
-                value,
-            } => self.set_cell(&row, &property, value)?,
-            TableAction::CreateOption {
-                row,
-                property,
-                name,
-            } => self.create_option(&row, &property, &name)?,
-            TableAction::Commit(edit) => self.commit_cell_edit(&edit)?,
+            TableAction::RenameOption(id, name) => {
+                let unchanged = self
+                    .database
+                    .iter()
+                    .flat_map(|d| d.properties.iter())
+                    .flat_map(|p| p.options.iter())
+                    .find(|o| o.id == id)
+                    .is_none_or(|o| o.name == name.trim());
+                if !unchanged && !name.trim().is_empty() {
+                    self.db.rename_select_option(&id, name.trim())?;
+                    self.reload_properties()?;
+                }
+            }
+            TableAction::SetOptionColor(id, color) => {
+                self.db.set_option_color(&id, color)?;
+                self.reload_properties()?;
+            }
+            TableAction::DeleteOption(id) => {
+                self.db.delete_select_option(&id)?;
+                self.reload_properties()?;
+            }
         }
         Ok(())
     }
@@ -420,9 +348,14 @@ impl SilexApp {
         .flatten()
     }
 
-    fn draw_table(&self, ui: &mut egui::Ui, state: &mut DatabaseState) -> Vec<TableAction> {
+    fn draw_table(
+        &self,
+        ui: &mut egui::Ui,
+        state: &mut DatabaseState,
+    ) -> (Vec<TableAction>, Vec<CellAction>) {
         let p = theme::current(ui.ctx());
         let mut actions = Vec::new();
+        let mut cells = Vec::new();
 
         // View tabs (one «Tabla» view until H6.3) and the row count. Their
         // content lines up with the cells' text, at CELL_PAD from each edge.
@@ -511,7 +444,7 @@ impl SilexApp {
         let wanted = state
             .focus
             .as_ref()
-            .and_then(|id| state.rows.iter().position(|r| &r.id == id));
+            .and_then(|(id, _)| state.rows.iter().position(|r| &r.id == id));
         let mut area = egui::ScrollArea::both()
             .id_salt(("silex-table", &state.id))
             .auto_shrink([false, true])
@@ -539,7 +472,8 @@ impl SilexApp {
                 };
                 area.show_rows(ui, ROW_HEIGHT, state.rows.len(), |ui, range| {
                     ui.set_min_width(width);
-                    self.table_rows(ui, state, range.clone(), name_width, width, &mut actions);
+                    let columns = Columns { name_width, width };
+                    self.table_rows(ui, state, range.clone(), columns, &mut actions, &mut cells);
                     range
                 })
             })
@@ -555,7 +489,7 @@ impl SilexApp {
             && !state.rows[drawn].iter().any(|r| r.id == edit.row)
             && let Some(edit) = state.editing.take()
         {
-            actions.push(TableAction::Commit(edit));
+            cells.push(CellAction::Commit(edit));
         }
 
         if state.rows.is_empty() {
@@ -575,7 +509,7 @@ impl SilexApp {
         if new_row_button(ui, visible).clicked() {
             actions.push(TableAction::AddRow);
         }
-        actions
+        (actions, cells)
     }
 
     /// «Nombre», one button per property (opens its menu) and «+», in
@@ -594,8 +528,12 @@ impl SilexApp {
 
         let DatabaseState {
             properties,
+            values,
             renaming,
             new_property,
+            option_names,
+            option_colors,
+            option_delete,
             ..
         } = state;
         let count = properties.len();
@@ -623,22 +561,46 @@ impl SilexApp {
             let opening = button.clicked() && !egui::Popup::is_id_open(ui.ctx(), menu);
             if opening {
                 *renaming = Some((property.id.clone(), property.name.clone()));
+                *option_names = property
+                    .options
+                    .iter()
+                    .map(|o| (o.id.clone(), o.name.clone()))
+                    .collect();
+                *option_colors = None;
+                *option_delete = None;
             }
+            let width = if property.kind == PropertyKind::Select {
+                280.0
+            } else {
+                220.0
+            };
             egui::Popup::menu(&button)
                 .id(menu)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .width(220.0)
+                .width(width)
                 .show(|ui| {
-                    property_menu(ui, renaming, property, (index, count), opening, actions);
+                    let mut menu = PropertyMenu {
+                        renaming: &mut *renaming,
+                        option_names: &mut *option_names,
+                        option_colors: &mut *option_colors,
+                        option_delete: &mut *option_delete,
+                        values,
+                    };
+                    menu.show(ui, property, (index, count), opening, actions);
                 });
         }
-        // A new name is saved when its menu closes; Escape drops it.
+        // New names are saved when their menu closes; Escape drops them.
         if let Some((id, _)) = renaming
             && !egui::Popup::is_id_open(ui.ctx(), property_menu_id(id))
             && let Some((id, name)) = renaming.take()
-            && !ui.input(|i| i.key_pressed(egui::Key::Escape))
         {
-            actions.push(TableAction::RenameProperty(id, name));
+            let names = std::mem::take(option_names);
+            if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                actions.push(TableAction::RenameProperty(id, name));
+                for (option, name) in names {
+                    actions.push(TableAction::RenameOption(option, name));
+                }
+            }
         }
 
         let add = egui::Rect::from_min_size(
@@ -678,15 +640,15 @@ impl SilexApp {
     }
 
     /// The rows in `range` (the ones in sight): name and «Abrir», then a
-    /// cell per property.
+    /// cell per property. Notes which cell has the keyboard focus.
     fn table_rows(
         &self,
         ui: &mut egui::Ui,
         state: &mut DatabaseState,
         range: std::ops::Range<usize>,
-        name_width: f32,
-        width: f32,
+        columns: Columns,
         actions: &mut Vec<TableAction>,
+        cells: &mut Vec<CellAction>,
     ) {
         let p = theme::current(ui.ctx());
         let DatabaseState {
@@ -695,16 +657,27 @@ impl SilexApp {
             values,
             dirty,
             focus,
+            cursor,
             editing,
             option_filter,
             ..
         } = state;
-        for row in rows[range].iter_mut() {
+        *cursor = None;
+        let first = range.start;
+        for (offset, row) in rows[range].iter_mut().enumerate() {
+            let index = first + offset;
             let name_id = row_name_id(&row.id);
             let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::hover());
+                ui.allocate_exact_size(egui::vec2(columns.width, ROW_HEIGHT), egui::Sense::hover());
             let focused = ui.memory(|m| m.has_focus(name_id));
-            let wanted = focus.as_deref() == Some(row.id.as_str());
+            if focused {
+                *cursor = Some((index, 0));
+            }
+            let wanted = |column: usize| {
+                focus
+                    .as_ref()
+                    .is_some_and(|(id, c)| *id == row.id && *c == column)
+            };
             if ui.rect_contains_pointer(rect) || focused {
                 ui.painter().rect_filled(rect, 0.0, p.subtle);
             }
@@ -712,7 +685,7 @@ impl SilexApp {
                 .hline(rect.x_range(), rect.bottom() - 0.5, (1.0, p.border));
 
             let name_rect =
-                egui::Rect::from_min_size(rect.min, egui::vec2(name_width, rect.height()));
+                egui::Rect::from_min_size(rect.min, egui::vec2(columns.name_width, rect.height()));
             {
                 // A frameless text field has no margin: the rect sets where
                 // the text starts.
@@ -731,9 +704,11 @@ impl SilexApp {
                         .hint_text(egui::RichText::new("Sin título").color(p.text_faint))
                         .desired_width(ui.available_width() - open_width),
                 );
-                if wanted {
+                if wanted(0) {
                     name.request_focus();
-                    *focus = None;
+                }
+                if name.gained_focus() {
+                    name.scroll_to_me(None);
                 }
                 if name.changed() {
                     dirty.insert(row.id.clone());
@@ -760,35 +735,93 @@ impl SilexApp {
             }
 
             let mut x = name_rect.right();
-            for property in properties.iter() {
-                let cell = egui::Rect::from_min_size(
+            for (column, property) in (1..).zip(properties.iter()) {
+                let rect = egui::Rect::from_min_size(
                     egui::pos2(x, rect.top()),
                     egui::vec2(column_width(property.kind), rect.height()),
                 );
-                x = cell.right();
+                x = rect.right();
                 ui.painter()
-                    .vline(cell.left(), cell.y_range(), (1.0, p.border));
-                let value = values
-                    .get(&row.id)
-                    .and_then(|cells| cells.get(&property.id));
-                let place = Cell {
-                    rect: cell,
+                    .vline(rect.left(), rect.y_range(), (1.0, p.border));
+                let cell = Cell {
+                    rect,
                     row,
                     property,
-                    value,
+                    value: values
+                        .get(&row.id)
+                        .and_then(|cells| cells.get(&property.id)),
+                    wanted: wanted(column),
+                    place: CellPlace::Table,
                 };
-                match property.kind {
-                    PropertyKind::Text | PropertyKind::Number | PropertyKind::Date => {
-                        text_cell(ui, &place, editing, actions);
-                    }
-                    PropertyKind::Checkbox => checkbox_cell(ui, &place, actions),
-                    PropertyKind::Select => {
-                        select_cell(ui, &place, editing, option_filter, actions);
-                    }
+                property_cell(ui, &cell, editing, option_filter, cells);
+                if ui.memory(|m| m.has_focus(cell.id())) {
+                    *cursor = Some((index, column));
                 }
             }
             ui.painter().vline(x, rect.y_range(), (1.0, p.border));
+            if focus.as_ref().is_some_and(|(id, _)| *id == row.id) {
+                *focus = None;
+            }
         }
+    }
+}
+
+/// Widths of the table's columns this frame.
+#[derive(Clone, Copy)]
+struct Columns {
+    name_width: f32,
+    width: f32,
+}
+
+/// The arrow keys move the keyboard focus between cells, like a
+/// spreadsheet: ↑/↓ change row (scrolling to rows out of sight), ←/→
+/// change column. In a name, ← and → move in its text, and → at its end
+/// goes on to the first property. While typing in a cell or with a menu
+/// open, the keys belong to them. Runs before the table is drawn, so the
+/// widgets never see the keys it takes.
+fn table_keys(ctx: &egui::Context, state: &mut DatabaseState) {
+    use egui::{Key, Modifiers};
+    let Some((index, column)) = state.cursor else {
+        return;
+    };
+    let Some(row) = state.rows.get(index) else {
+        return;
+    };
+    let id = match column {
+        0 => row_name_id(&row.id),
+        n => match state.properties.get(n - 1) {
+            Some(property) => cell_id(&row.id, &property.id),
+            None => return,
+        },
+    };
+    if !ctx.memory(|m| m.has_focus(id)) {
+        return;
+    }
+    let last_row = state.rows.len().saturating_sub(1);
+    let last_column = state.properties.len();
+    // The caret at the end of the name, with nothing selected.
+    let name_end = column == 0
+        && egui::TextEdit::load_state(ctx, id)
+            .and_then(|s| s.cursor.char_range())
+            .is_some_and(|r| r.is_empty() && r.primary.index.0 >= row.title.chars().count());
+    let take = |key| take_exact_key(ctx, key, Modifiers::NONE);
+    let target = if take(Key::ArrowUp) {
+        (index.saturating_sub(1), column)
+    } else if take(Key::ArrowDown) {
+        ((index + 1).min(last_row), column)
+    } else if column > 0 && take(Key::ArrowLeft) {
+        (index, column - 1)
+    } else if (column > 0 || name_end) && take(Key::ArrowRight) {
+        (index, (column + 1).min(last_column))
+    } else {
+        return;
+    };
+    // egui would also move the focus to the nearest widget on its own.
+    ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+    if target != (index, column)
+        && let Some(row) = state.rows.get(target.0)
+    {
+        state.focus = Some((row.id.clone(), target.1));
     }
 }
 
@@ -837,437 +870,233 @@ fn add_property_menu(
         });
 }
 
-/// Inner padding of the table's menus: the text of their field, their
-/// captions, the icons of their items and the option tags start here.
-const MENU_PAD: f32 = 6.0;
-
-/// Gives the menu's items the same padding as its field and captions
-/// (egui menus use 2 px, too tight next to a framed field).
-fn menu_spacing(ui: &mut egui::Ui) {
-    ui.spacing_mut().button_padding = egui::vec2(MENU_PAD, 4.0);
+/// What a property's menu edits: its name, and for a select property the
+/// names, colors and deletion of its options.
+struct PropertyMenu<'a> {
+    renaming: &'a mut Option<(String, String)>,
+    option_names: &'a mut HashMap<String, String>,
+    option_colors: &'a mut Option<String>,
+    option_delete: &'a mut Option<String>,
+    /// To say how many cells deleting an option empties.
+    values: &'a TableValues,
 }
 
-/// A text field at the top of a menu, its text at MENU_PAD.
-fn menu_field(ui: &mut egui::Ui, text: &mut String, hint: &str, name: &str) -> egui::Response {
-    let p = theme::current(ui.ctx());
-    ui.add(
-        TextEdit::singleline(text)
-            .margin(egui::Margin::symmetric(MENU_PAD as i8, 5))
-            .align(egui::Align2::LEFT_CENTER)
-            .hint_text(egui::RichText::new(hint).color(p.text_faint))
-            .desired_width(f32::INFINITY),
-    )
-    .accessible_name(name)
-}
-
-/// A small muted line in a menu («Tipo»), lined up with the items.
-fn menu_caption(ui: &mut egui::Ui, text: &str) {
-    let p = theme::current(ui.ctx());
-    ui.horizontal(|ui| {
-        ui.add_space(MENU_PAD);
-        ui.label(egui::RichText::new(text).small().color(p.text_muted));
-    });
-}
-
-/// A property's menu: its name (editable), type, moving and deleting.
-fn property_menu(
-    ui: &mut egui::Ui,
-    renaming: &mut Option<(String, String)>,
-    property: &Property,
-    (index, count): (usize, usize),
-    opening: bool,
-    actions: &mut Vec<TableAction>,
-) {
-    let p = theme::current(ui.ctx());
-    menu_spacing(ui);
-    if let Some((_, name)) = renaming.as_mut().filter(|(id, _)| *id == property.id) {
-        let field = menu_field(ui, name, "Nombre de la propiedad", "Nombre de la propiedad");
-        if opening {
-            field.request_focus();
-        }
-        if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            ui.close();
-        }
-    }
-    ui.add_space(theme::space::XS);
-    menu_caption(ui, &format!("Tipo: {}", property.kind.label()));
-    ui.separator();
-    let moves = [
-        (
-            Shift::Up,
-            icons::ARROW_LEFT,
-            " Mover a la izquierda",
-            index > 0,
-        ),
-        (
-            Shift::Down,
-            icons::ARROW_RIGHT,
-            " Mover a la derecha",
-            index + 1 < count,
-        ),
-    ];
-    for (shift, icon, label, enabled) in moves {
-        if ui
-            .add_enabled(enabled, egui::Button::new((icons::icon(icon), label)))
-            .clicked()
-        {
-            actions.push(TableAction::MoveProperty(property.id.clone(), shift));
-            ui.close();
-        }
-    }
-    ui.separator();
-    if ui
-        .button((
-            icons::icon(icons::TRASH).color(p.danger),
-            egui::RichText::new(" Borrar la propiedad").color(p.danger),
-        ))
-        .clicked()
-    {
-        actions.push(TableAction::DeleteProperty(property.id.clone()));
-        ui.close();
-    }
-}
-
-/// Where a cell is drawn and what it shows.
-struct Cell<'a> {
-    rect: egui::Rect,
-    row: &'a Page,
-    property: &'a Property,
-    value: Option<&'a CellValue>,
-}
-
-impl Cell<'_> {
-    fn id(&self) -> egui::Id {
-        cell_id(&self.row.id, &self.property.id)
-    }
-
-    /// "Propiedad, fila" (what a screen reader says before the value).
-    fn name(&self) -> String {
-        format!("{}, {}", self.property.name, display_title(&self.row.title))
-    }
-
-    fn shown(&self) -> String {
-        self.value
-            .map(|v| v.display(self.property))
-            .unwrap_or_default()
-    }
-
-    fn is_typing(&self, editing: &Option<CellEdit>) -> bool {
-        editing
-            .as_ref()
-            .is_some_and(|e| e.row == self.row.id && e.property == self.property.id)
-    }
-}
-
-/// Starts typing in a cell. A cell still being typed in is saved first, so
-/// its text is not lost when the new one takes its place.
-fn start_typing(editing: &mut Option<CellEdit>, actions: &mut Vec<TableAction>, edit: CellEdit) {
-    if let Some(old) = editing.replace(edit) {
-        actions.push(TableAction::Commit(old));
-    }
-}
-
-/// A text, number or date cell: its value, or a text field while typing.
-/// Enter or leaving the cell saves; Escape drops what was typed.
-fn text_cell(
-    ui: &mut egui::Ui,
-    cell: &Cell<'_>,
-    editing: &mut Option<CellEdit>,
-    actions: &mut Vec<TableAction>,
-) {
-    let p = theme::current(ui.ctx());
-    let number = cell.property.kind == PropertyKind::Number;
-    let align = if number {
-        egui::Align2::RIGHT_CENTER
-    } else {
-        egui::Align2::LEFT_CENTER
-    };
-    if cell.is_typing(editing) {
-        let Some(edit) = editing.as_mut() else {
-            return;
-        };
-        let hint = match cell.property.kind {
-            PropertyKind::Date => "AAAA-MM-DD",
-            PropertyKind::Number => "0",
-            _ => "Vacío",
-        };
-        // Frameless, in the same rect as the shown value: the text does not
-        // move when typing starts.
-        let field = inside(
-            ui,
-            cell.rect.shrink2(egui::vec2(CELL_PAD, 0.0)),
-            egui::Layout::centered_and_justified(egui::Direction::TopDown),
-        )
-        .add(
-            TextEdit::singleline(&mut edit.text)
-                .id(cell_edit_id(&cell.row.id, &cell.property.id))
-                .frame(egui::Frame::NONE)
-                .align(align)
-                .hint_text(egui::RichText::new(hint).color(p.text_faint))
-                .desired_width(f32::INFINITY),
-        )
-        .accessible_name(cell.name());
-        ui.painter().rect_stroke(
-            cell.rect.shrink(1.5),
-            egui::CornerRadius::same(theme::radius::SM),
-            egui::Stroke::new(1.5, p.accent),
-            egui::StrokeKind::Inside,
-        );
-        if std::mem::take(&mut edit.focus) {
-            field.request_focus();
-        }
-        if field.lost_focus() {
-            let (enter, escape) = ui.input(|i| {
-                (
-                    i.key_pressed(egui::Key::Enter),
-                    i.key_pressed(egui::Key::Escape),
-                )
-            });
-            if let Some(edit) = editing.take()
-                && !escape
-            {
-                actions.push(TableAction::Commit(edit));
-            }
-            // From the keyboard, the cell keeps the focus.
-            if enter || escape {
-                ui.memory_mut(|m| m.request_focus(cell.id()));
-            }
-        }
-        return;
-    }
-    let shown = cell.shown();
-    let button = cell_button(ui, cell, &shown);
-    paint_cell_text(ui, cell.rect, &shown, align, p.text);
-    if button.clicked() {
-        start_typing(
-            editing,
-            actions,
-            CellEdit {
-                row: cell.row.id.clone(),
-                property: cell.property.id.clone(),
-                text: shown,
-                focus: true,
-            },
-        );
-    }
-}
-
-/// A checkbox cell: a click (or Space/Enter) ticks or unticks it.
-fn checkbox_cell(ui: &mut egui::Ui, cell: &Cell<'_>, actions: &mut Vec<TableAction>) {
-    let on = matches!(cell.value, Some(CellValue::Checkbox(true)));
-    let response = ui.interact(cell.rect, cell.id(), egui::Sense::click());
-    let name = cell.name();
-    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, &name));
-    paint_check_box(
-        ui,
-        egui::pos2(cell.rect.left() + CELL_PAD + 8.0, cell.rect.center().y),
-        on,
-        &response,
-    );
-    if response.clicked() {
-        actions.push(TableAction::SetValue {
-            row: cell.row.id.clone(),
-            property: cell.property.id.clone(),
-            value: Some(CellValue::Checkbox(!on)),
-        });
-    }
-}
-
-/// A select cell: its option as a colored tag; a click opens a menu to
-/// search the options, pick one, create one or empty the cell.
-fn select_cell(
-    ui: &mut egui::Ui,
-    cell: &Cell<'_>,
-    editing: &mut Option<CellEdit>,
-    filter: &mut String,
-    actions: &mut Vec<TableAction>,
-) {
-    let current = match cell.value {
-        Some(CellValue::Select(id)) => cell.property.option(id),
-        _ => None,
-    };
-    let button = cell_button(ui, cell, &cell.shown());
-    if let Some(option) = current {
-        paint_tag(
-            ui,
-            egui::pos2(cell.rect.left() + CELL_PAD, cell.rect.center().y),
-            option,
-            cell.rect.width() - 2.0 * CELL_PAD,
-        );
-    }
-    let menu = select_menu_id(&cell.row.id, &cell.property.id);
-    let opening = button.clicked() && !egui::Popup::is_id_open(ui.ctx(), menu);
-    if opening {
-        filter.clear();
-        if let Some(old) = editing.take() {
-            actions.push(TableAction::Commit(old));
-        }
-    }
-    egui::Popup::menu(&button)
-        .id(menu)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .width(240.0)
-        .show(|ui| {
-            menu_spacing(ui);
-            let field = menu_field(
-                ui,
-                filter,
-                "Busca o crea una opción",
-                &format!("Opción de {}", cell.name()),
-            );
+impl PropertyMenu<'_> {
+    /// Name (editable), type, its options if it is a select, moving and
+    /// deleting.
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        property: &Property,
+        (index, count): (usize, usize),
+        opening: bool,
+        actions: &mut Vec<TableAction>,
+    ) {
+        let p = theme::current(ui.ctx());
+        menu_spacing(ui);
+        if let Some((_, name)) = self.renaming.as_mut().filter(|(id, _)| *id == property.id) {
+            let field = menu_field(ui, name, "Nombre de la propiedad", "Nombre de la propiedad");
             if opening {
                 field.request_focus();
             }
-            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let typed = filter.trim().to_owned();
-            let (matches, exact) = cell.property.matching_options(&typed);
-            let set = |option: Option<&SelectOption>| TableAction::SetValue {
-                row: cell.row.id.clone(),
-                property: cell.property.id.clone(),
-                value: option.map(|o| CellValue::Select(o.id.clone())),
-            };
-            let create = || TableAction::CreateOption {
-                row: cell.row.id.clone(),
-                property: cell.property.id.clone(),
-                name: typed.clone(),
-            };
-            let mut chosen = None;
-            ui.add_space(theme::space::XS);
-            for option in &matches {
-                let selected = current.is_some_and(|c| c.id == option.id);
-                if option_row(ui, option, selected).clicked() {
-                    chosen = Some(set(Some(option)));
-                }
-            }
-            if !typed.is_empty() && exact.is_none() {
-                let label = format!("Crear «{typed}»");
-                if ui
-                    .button((icons::icon(icons::PLUS), format!(" {label}")))
-                    .clicked()
-                {
-                    chosen = Some(create());
-                }
-            }
-            if cell.property.options.is_empty() && typed.is_empty() {
-                menu_caption(ui, "Escribe para crear la primera opción.");
-            }
-            // Enter takes the option with that name, else the first match,
-            // else creates it.
-            if enter && chosen.is_none() && !typed.is_empty() {
-                chosen = Some(match exact.or(matches.first().copied()) {
-                    Some(option) => set(Some(option)),
-                    None => create(),
-                });
-            }
-            if current.is_some() {
-                ui.separator();
-                if ui
-                    .button((icons::icon(icons::CLOSE), " Quitar la opción"))
-                    .clicked()
-                {
-                    chosen = Some(set(None));
-                }
-            }
-            if let Some(action) = chosen {
-                actions.push(action);
+            if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 ui.close();
             }
-        });
-}
-
-/// One option in a select menu: its tag, and a tick on the current one.
-fn option_row(ui: &mut egui::Ui, option: &SelectOption, selected: bool) -> egui::Response {
-    let p = theme::current(ui.ctx());
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::Button, true, selected, &option.name)
-    });
-    if response.hovered() || response.has_focus() {
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(theme::radius::SM), p.subtle);
+        }
+        ui.add_space(theme::space::XS);
+        menu_caption(ui, &format!("Tipo: {}", property.kind.label()));
+        if property.kind == PropertyKind::Select {
+            ui.separator();
+            self.options(ui, property, actions);
+        }
+        ui.separator();
+        let moves = [
+            (
+                Shift::Up,
+                icons::ARROW_LEFT,
+                " Mover a la izquierda",
+                index > 0,
+            ),
+            (
+                Shift::Down,
+                icons::ARROW_RIGHT,
+                " Mover a la derecha",
+                index + 1 < count,
+            ),
+        ];
+        for (shift, icon, label, enabled) in moves {
+            if ui
+                .add_enabled(enabled, egui::Button::new((icons::icon(icon), label)))
+                .clicked()
+            {
+                actions.push(TableAction::MoveProperty(property.id.clone(), shift));
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui
+            .button((
+                icons::icon(icons::TRASH).color(p.danger),
+                egui::RichText::new(" Borrar la propiedad").color(p.danger),
+            ))
+            .clicked()
+        {
+            actions.push(TableAction::DeleteProperty(property.id.clone()));
+            ui.close();
+        }
     }
-    paint_tag(
-        ui,
-        egui::pos2(rect.left() + MENU_PAD, rect.center().y),
-        option,
-        rect.width() - 40.0,
-    );
-    if selected {
-        ui.painter().text(
-            egui::pos2(rect.right() - MENU_PAD, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            icons::CHECK,
-            icons::font(theme::icon::MD),
-            p.accent,
-        );
-    }
-    response
-}
 
-/// A clickable, focusable cell named "Propiedad, fila: valor".
-fn cell_button(ui: &mut egui::Ui, cell: &Cell<'_>, shown: &str) -> egui::Response {
-    let response = ui.interact(cell.rect, cell.id(), egui::Sense::click());
-    let value = if shown.is_empty() { "vacío" } else { shown };
-    let label = format!("{}: {value}", cell.name());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-    focus_ring(ui, cell.rect, &response);
-    response
-}
-
-/// Accent outline of a focused cell or header.
-fn focus_ring(ui: &egui::Ui, rect: egui::Rect, response: &egui::Response) {
-    if response.has_focus() {
+    /// One line per option: its color (a click shows the eight), its name
+    /// and a button to delete it, which asks first.
+    fn options(&mut self, ui: &mut egui::Ui, property: &Property, actions: &mut Vec<TableAction>) {
         let p = theme::current(ui.ctx());
-        ui.painter().rect_stroke(
-            rect.shrink(1.5),
-            egui::CornerRadius::same(theme::radius::SM),
-            egui::Stroke::new(1.5, p.accent),
-            egui::StrokeKind::Inside,
+        menu_caption(ui, "Opciones");
+        if property.options.is_empty() {
+            menu_caption(ui, "Se crean escribiendo en una celda.");
+        }
+        for (number, option) in (1..).zip(property.options.iter()) {
+            if self.option_delete.as_deref() == Some(option.id.as_str()) {
+                self.confirm_delete(ui, option, actions);
+                continue;
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::space::XS;
+                // Lined up with the captions, like the colors below.
+                ui.add_space(MENU_PAD);
+                let (bg, fg) = theme::option_colors(ui.ctx(), option.color);
+                let name = format!("Color de «{}»: {}", option.name, option.color.label());
+                let swatch =
+                    color_swatch(ui, bg, fg, false, &name).on_hover_text("Cambiar el color");
+                if swatch.clicked() {
+                    *self.option_colors = match self.option_colors.take() {
+                        Some(open) if open == option.id => None,
+                        _ => Some(option.id.clone()),
+                    };
+                }
+                // Delete on the right first; the name takes exactly the room
+                // left. (Sizing it from the menu's width made the menu grow
+                // every frame.)
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let delete = ui
+                        .add(
+                            egui::Button::new(icons::icon(icons::TRASH).color(p.text_muted))
+                                .frame_when_inactive(false),
+                        )
+                        .on_hover_text("Borrar la opción")
+                        .accessible_name(format!("Borrar la opción «{}»", option.name));
+                    if delete.clicked() {
+                        *self.option_delete = Some(option.id.clone());
+                    }
+                    if let Some(name) = self.option_names.get_mut(&option.id) {
+                        let field = ui
+                            .add(
+                                TextEdit::singleline(name)
+                                    .margin(egui::Margin::symmetric(MENU_PAD as i8, 3))
+                                    .desired_width(f32::INFINITY),
+                            )
+                            .accessible_name(format!("Nombre de la opción {number}"));
+                        if field.lost_focus() {
+                            actions
+                                .push(TableAction::RenameOption(option.id.clone(), name.clone()));
+                        }
+                    }
+                });
+            });
+            if self.option_colors.as_deref() == Some(option.id.as_str()) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(theme::space::SM, theme::space::SM);
+                    ui.add_space(MENU_PAD);
+                    for color in OptionColor::ALL {
+                        let (bg, fg) = theme::option_colors(ui.ctx(), color);
+                        let current = color == option.color;
+                        let swatch = color_swatch(ui, bg, fg, current, color.label())
+                            .on_hover_text(color.label());
+                        if swatch.clicked() {
+                            actions.push(TableAction::SetOptionColor(option.id.clone(), color));
+                            *self.option_colors = None;
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// In place of an option's line: what deleting it does, and the choice.
+    fn confirm_delete(
+        &mut self,
+        ui: &mut egui::Ui,
+        option: &SelectOption,
+        actions: &mut Vec<TableAction>,
+    ) {
+        let p = theme::current(ui.ctx());
+        let uses = self
+            .values
+            .values()
+            .flat_map(|cells| cells.values())
+            .filter(|v| matches!(v, CellValue::Select(id) if *id == option.id))
+            .count();
+        let effect = match uses {
+            0 => "Ninguna fila la usa.".to_owned(),
+            1 => "Se vaciará en 1 fila.".to_owned(),
+            n => format!("Se vaciará en {n} filas."),
+        };
+        menu_caption(ui, &format!("¿Borrar «{}»? {effect}", option.name));
+        // The buttons' padding lines their text up with the question.
+        ui.horizontal(|ui| {
+            if ui
+                .button(egui::RichText::new("Borrar").color(p.danger))
+                .on_hover_text("No se puede deshacer")
+                .clicked()
+            {
+                actions.push(TableAction::DeleteOption(option.id.clone()));
+                *self.option_delete = None;
+            }
+            if ui.button("Cancelar").clicked() {
+                *self.option_delete = None;
+            }
+        });
+    }
+}
+
+/// A small square in an option's colors, a button named `name` (ticked
+/// when it is the current color). Drawn by hand: an `egui::Button` is at
+/// least as tall as a row.
+fn color_swatch(
+    ui: &mut egui::Ui,
+    bg: egui::Color32,
+    fg: egui::Color32,
+    current: bool,
+    name: &str,
+) -> egui::Response {
+    let p = theme::current(ui.ctx());
+    let (swatch, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, current, name));
+    let radius = egui::CornerRadius::same(theme::radius::SM);
+    ui.painter().rect_filled(swatch, radius, bg);
+    ui.painter().rect_stroke(
+        swatch,
+        radius,
+        egui::Stroke::new(1.0, fg),
+        egui::StrokeKind::Inside,
+    );
+    if current {
+        ui.painter().text(
+            swatch.center(),
+            egui::Align2::CENTER_CENTER,
+            icons::CHECK,
+            icons::font(12.0),
+            fg,
         );
     }
-}
-
-/// One line of text inside a cell, cut with "…" if it does not fit.
-fn paint_cell_text(
-    ui: &egui::Ui,
-    rect: egui::Rect,
-    text: &str,
-    align: egui::Align2,
-    color: egui::Color32,
-) {
-    if text.is_empty() {
-        return;
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_stroke(
+            swatch.expand(2.0),
+            egui::CornerRadius::same(theme::radius::MD),
+            egui::Stroke::new(1.5, p.accent),
+            egui::StrokeKind::Outside,
+        );
     }
-    let inner = rect.shrink2(egui::vec2(CELL_PAD, 0.0));
-    let galley = egui::WidgetText::from(text).into_galley(
-        ui,
-        Some(egui::TextWrapMode::Truncate),
-        inner.width(),
-        egui::TextStyle::Body,
-    );
-    let at = align.align_size_within_rect(galley.size(), inner).min;
-    ui.painter().galley(at, galley, color);
-}
-
-/// An option's colored tag, starting at `left_center`, at most `max_width` wide.
-fn paint_tag(ui: &egui::Ui, left_center: egui::Pos2, option: &SelectOption, max_width: f32) {
-    let (bg, fg) = theme::option_colors(ui.ctx(), option.color);
-    let pad = egui::vec2(6.0, 2.0);
-    let galley = egui::WidgetText::from(egui::RichText::new(&option.name).color(fg)).into_galley(
-        ui,
-        Some(egui::TextWrapMode::Truncate),
-        (max_width - 2.0 * pad.x).max(0.0),
-        egui::TextStyle::Body,
-    );
-    let size = galley.size() + 2.0 * pad;
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(left_center.x, left_center.y - size.y / 2.0),
-        size,
-    );
-    let painter = ui.painter();
-    painter.rect_filled(rect, egui::CornerRadius::same(theme::radius::SM), bg);
-    painter.galley(rect.min + pad, galley, fg);
+    response
 }
 
 /// «Nombre» or a property's icon and name in the header, muted.
@@ -1296,13 +1125,6 @@ fn header_label(ui: &egui::Ui, rect: egui::Rect, icon: &str, name: &str) {
         .align_size_within_rect(galley.size(), text_rect)
         .min;
     painter.galley(at, galley, p.text_muted);
-}
-
-/// A `Ui` for drawing in `rect`, already allocated by the caller. Unlike
-/// `scope_builder` or `put`, it never moves the parent's cursor (egui sets
-/// the cursor below the last child, even if that is above where it was).
-fn inside(ui: &mut egui::Ui, rect: egui::Rect, layout: egui::Layout) -> egui::Ui {
-    ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout))
 }
 
 /// A 1 px line `width` wide. Returns its y.

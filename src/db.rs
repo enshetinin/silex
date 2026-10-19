@@ -619,29 +619,7 @@ impl Database {
         let mut rows = stmt.query([database_id])?;
         let mut values = TableValues::new();
         while let Some(r) = rows.next()? {
-            let kind: String = r.get(2)?;
-            let Some(kind) = PropertyKind::parse(&kind) else {
-                continue;
-            };
-            let text = match r.get::<_, Value>(3)? {
-                Value::Text(text) => Some(text),
-                _ => None,
-            };
-            let number = match r.get::<_, Value>(4)? {
-                Value::Real(n) => Some(n),
-                Value::Integer(n) => Some(n as f64),
-                _ => None,
-            };
-            let flag = match r.get::<_, Value>(5)? {
-                Value::Integer(n) => Some(n),
-                _ => None,
-            };
-            let date = match r.get::<_, Value>(6)? {
-                Value::Text(date) => Some(date),
-                _ => None,
-            };
-            let option: Option<String> = r.get(7)?;
-            if let Some(value) = CellValue::from_columns(kind, text, number, flag, date, option) {
+            if let Some(value) = read_cell(r, 2)? {
                 values
                     .entry(r.get(0)?)
                     .or_default()
@@ -649,6 +627,57 @@ impl Database {
             }
         }
         Ok(values)
+    }
+
+    /// The values of one live row (property id → value) for the live
+    /// properties of its database: what its page shows above its blocks.
+    /// Empty for a page that is not a row.
+    pub fn row_values(&self, row_id: &str) -> Result<HashMap<String, CellValue>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT v.property_id, p.kind, v.text_value, v.number_value,
+                    v.bool_value, v.date_value, o.id
+             FROM pages r
+             JOIN db_properties p ON p.database_id = r.parent_id AND p.deleted_at IS NULL
+             JOIN db_values v ON v.page_id = r.id AND v.property_id = p.id
+             LEFT JOIN db_select_options o ON o.id = v.option_id AND o.property_id = p.id
+             WHERE r.id = ?1 AND r.deleted_at IS NULL",
+        )?;
+        let mut rows = stmt.query([row_id])?;
+        let mut values = HashMap::new();
+        while let Some(r) = rows.next()? {
+            if let Some(value) = read_cell(r, 1)? {
+                values.insert(r.get(0)?, value);
+            }
+        }
+        Ok(values)
+    }
+
+    pub fn rename_select_option(&self, id: &str, name: &str) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE db_select_options SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        ensure!(affected == 1, "La opción no existe");
+        Ok(())
+    }
+
+    pub fn set_option_color(&self, id: &str, color: OptionColor) -> Result<()> {
+        let affected = self.conn.execute(
+            "UPDATE db_select_options SET color = ?2 WHERE id = ?1",
+            params![id, color.as_str()],
+        )?;
+        ensure!(affected == 1, "La opción no existe");
+        Ok(())
+    }
+
+    /// Deletes a select option. The cells that had it become empty
+    /// (`ON DELETE SET NULL`, ADR 0006); the UI asks first.
+    pub fn delete_select_option(&self, id: &str) -> Result<()> {
+        let affected = self
+            .conn
+            .execute("DELETE FROM db_select_options WHERE id = ?1", [id])?;
+        ensure!(affected == 1, "La opción no existe");
+        Ok(())
     }
 
     /// Sets the value of one cell; `None` or an empty value (empty text, an
@@ -1193,6 +1222,38 @@ fn read_properties(
         });
     }
     Ok(properties)
+}
+
+/// A cell from the columns `kind, text_value, number_value, bool_value,
+/// date_value, option id` starting at `at`. `None` if it is empty or does
+/// not fit its property (see [`CellValue::from_columns`]); a property kind
+/// this version does not know reads as empty too.
+fn read_cell(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Option<CellValue>> {
+    let kind: String = r.get(at)?;
+    let Some(kind) = PropertyKind::parse(&kind) else {
+        return Ok(None);
+    };
+    let text = match r.get::<_, Value>(at + 1)? {
+        Value::Text(text) => Some(text),
+        _ => None,
+    };
+    let number = match r.get::<_, Value>(at + 2)? {
+        Value::Real(n) => Some(n),
+        Value::Integer(n) => Some(n as f64),
+        _ => None,
+    };
+    let flag = match r.get::<_, Value>(at + 3)? {
+        Value::Integer(n) => Some(n),
+        _ => None,
+    };
+    let date = match r.get::<_, Value>(at + 4)? {
+        Value::Text(date) => Some(date),
+        _ => None,
+    };
+    let option: Option<String> = r.get(at + 5)?;
+    Ok(CellValue::from_columns(
+        kind, text, number, flag, date, option,
+    ))
 }
 
 /// Kind of a live page; `None` if it is missing or in the trash.

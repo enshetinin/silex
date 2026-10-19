@@ -297,3 +297,101 @@ fn properties_and_values_survive_reopening_the_file() -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
+
+// ---- H6.2b: options and the values of one row ----
+
+#[test]
+fn options_are_renamed_and_recolored_without_touching_cells() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let row = db.create_row(&base, "Rayuela")?;
+    let estado = db.add_property(&base, "Estado", PropertyKind::Select)?;
+    let leido = db.add_select_option(&estado, "Leido", OptionColor::Gray)?;
+    db.set_value(&row, &estado, Some(&CellValue::Select(leido.clone())))?;
+
+    db.rename_select_option(&leido, "Leído")?;
+    db.set_option_color(&leido, OptionColor::Green)?;
+    let option = db.database_properties(&base)?[0].options[0].clone();
+    assert_eq!(
+        (option.name.as_str(), option.color),
+        ("Leído", OptionColor::Green)
+    );
+    assert_eq!(
+        cell(&db, &base, &row, &estado)?,
+        Some(CellValue::Select(leido.clone())),
+        "the cell keeps pointing at it"
+    );
+    assert!(db.rename_select_option("no-existe", "x").is_err());
+    assert!(db.set_option_color("no-existe", OptionColor::Red).is_err());
+    Ok(())
+}
+
+#[test]
+fn deleting_an_option_empties_its_cells_only() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let first = db.create_row(&base, "Rayuela")?;
+    let second = db.create_row(&base, "Ficciones")?;
+    let estado = db.add_property(&base, "Estado", PropertyKind::Select)?;
+    let leido = db.add_select_option(&estado, "Leído", OptionColor::Green)?;
+    let pendiente = db.add_select_option(&estado, "Pendiente", OptionColor::Gray)?;
+    db.set_value(&first, &estado, Some(&CellValue::Select(leido.clone())))?;
+    db.set_value(
+        &second,
+        &estado,
+        Some(&CellValue::Select(pendiente.clone())),
+    )?;
+
+    db.delete_select_option(&leido)?;
+    assert_eq!(cell(&db, &base, &first, &estado)?, None, "emptied");
+    assert_eq!(
+        cell(&db, &base, &second, &estado)?,
+        Some(CellValue::Select(pendiente)),
+        "other options stay"
+    );
+    let names: Vec<String> = db.database_properties(&base)?[0]
+        .options
+        .iter()
+        .map(|o| o.name.clone())
+        .collect();
+    assert_eq!(names, ["Pendiente"]);
+    assert!(db.delete_select_option(&leido).is_err(), "already gone");
+    // The emptied cell takes a new value as usual.
+    let nueva = db.add_select_option(&estado, "Releído", OptionColor::Blue)?;
+    db.set_value(&first, &estado, Some(&CellValue::Select(nueva.clone())))?;
+    assert_eq!(
+        cell(&db, &base, &first, &estado)?,
+        Some(CellValue::Select(nueva))
+    );
+    Ok(())
+}
+
+#[test]
+fn row_values_are_the_values_of_one_live_row() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let row = db.create_row(&base, "Rayuela")?;
+    let other = db.create_row(&base, "Ficciones")?;
+    let autor = db.add_property(&base, "Autor", PropertyKind::Text)?;
+    let paginas = db.add_property(&base, "Páginas", PropertyKind::Number)?;
+    db.set_value(&row, &autor, Some(&CellValue::Text("Cortázar".into())))?;
+    db.set_value(&row, &paginas, Some(&CellValue::Number(736.0)))?;
+    db.set_value(&other, &autor, Some(&CellValue::Text("Borges".into())))?;
+
+    let values = db.row_values(&row)?;
+    assert_eq!(values.len(), 2);
+    assert_eq!(
+        values.get(&autor),
+        Some(&CellValue::Text("Cortázar".into()))
+    );
+    // A deleted property's value is kept but not shown.
+    db.delete_property(&paginas)?;
+    assert_eq!(db.row_values(&row)?.len(), 1);
+    // A normal page, a trashed row or an unknown id have none.
+    let page = db.create_page("Notas", None)?;
+    assert!(db.row_values(&page)?.is_empty());
+    assert!(db.row_values("no-existe")?.is_empty());
+    db.trash_page(&row)?;
+    assert!(db.row_values(&row)?.is_empty());
+    Ok(())
+}

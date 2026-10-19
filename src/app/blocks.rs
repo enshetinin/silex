@@ -1065,6 +1065,14 @@ impl SilexApp {
                         ui.set_width(width);
                         ui.add_space(theme::space::XL);
                         edit = self.page_title(ui, &page_id);
+                        // A row of a database shows its properties (H6.2b).
+                        if self.row_page.is_some() {
+                            ui.add_space(theme::space::SM);
+                            ui.horizontal_top(|ui| {
+                                gutter_space(ui);
+                                ui.vertical(|ui| self.row_properties(ui));
+                            });
+                        }
                         ui.add_space(theme::space::LG);
 
                         let numbers = list_numbers(&self.blocks);

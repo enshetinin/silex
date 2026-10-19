@@ -1980,3 +1980,147 @@ fn properties_are_renamed_in_their_menu_deleted_and_restored() -> anyhow::Result
     );
     Ok(())
 }
+
+// ---- H6.2b: a row's page and the arrow keys in the table ----
+
+#[test]
+fn a_rows_page_shows_and_edits_its_properties() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, row, ids) = table_app(&[
+        (PropertyKind::Number, "Páginas"),
+        (PropertyKind::Select, "Estado"),
+    ])?;
+    let (paginas, estado) = (&ids[0], &ids[1]);
+    app.set_cell(&row, paginas, Some(CellValue::Number(736.0)))?;
+    let base = app.selected.clone().unwrap_or_default();
+
+    app.open_page(row.clone())?;
+    assert!(app.database.is_none());
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    for text in ["Páginas", "736", "Estado", "Vacío"] {
+        assert!(painted.iter().any(|t| t == text), "{text:?} in {painted:?}");
+    }
+
+    // Edited like a cell of the table, and saved at once.
+    press_cell(&mut app, &ctx, cell_id(&row, paginas));
+    assert!(ctx.memory(|m| m.has_focus(cell_edit_id(&row, paginas))));
+    app_frame(&mut app, &ctx, vec![key(Key::A, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("737".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(
+        app.db.row_values(&row)?.get(paginas),
+        Some(&CellValue::Number(737.0))
+    );
+    press_cell(&mut app, &ctx, cell_id(&row, estado));
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("Leído".into())]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(matches!(
+        app.db.row_values(&row)?.get(estado),
+        Some(CellValue::Select(_))
+    ));
+
+    // Typing and leaving the page saves too.
+    press_cell(&mut app, &ctx, cell_id(&row, paginas));
+    app_frame(&mut app, &ctx, vec![key(Key::A, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("10".into())]);
+    app.open_page(base.clone())?;
+    let values = app
+        .database
+        .as_ref()
+        .map(|d| d.values.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        values.get(&row).and_then(|cells| cells.get(paginas)),
+        Some(&CellValue::Number(10.0)),
+        "the table shows what the page saved"
+    );
+
+    // A normal page has no properties.
+    let notas = app.db.create_page("Notas", None)?;
+    app.reload_pages()?;
+    app.open_page(notas)?;
+    assert!(app.row_page.is_none());
+    Ok(())
+}
+
+/// One frame in a window of the default size, so rows can be out of sight.
+fn sized_frame(app: &mut SilexApp, ctx: &egui::Context, events: Vec<egui::Event>) {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 760.0),
+        )),
+        events,
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+    output.textures_delta.clear();
+}
+
+#[test]
+fn arrow_keys_move_between_cells_and_follow_out_of_sight() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, first, ids) = table_app(&[
+        (PropertyKind::Text, "Autor"),
+        (PropertyKind::Number, "Páginas"),
+    ])?;
+    let base = app.selected.clone().unwrap_or_default();
+    let mut rows = vec![first];
+    for i in 1..60 {
+        rows.push(app.db.create_row(&base, &format!("Fila {i}"))?);
+    }
+    app.reload_pages()?;
+    sized_frame(&mut app, &ctx, vec![]);
+    let focused = |ctx: &egui::Context, id: egui::Id| ctx.memory(|m| m.has_focus(id));
+    let arrow = |app: &mut SilexApp, ctx: &egui::Context, key_: Key| {
+        sized_frame(app, ctx, vec![key(key_, M::NONE)]);
+        sized_frame(app, ctx, vec![]);
+    };
+
+    ctx.memory_mut(|m| m.request_focus(cell_id(&rows[0], &ids[0])));
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    arrow(&mut app, &ctx, Key::ArrowRight);
+    assert!(focused(&ctx, cell_id(&rows[0], &ids[1])), "→");
+    arrow(&mut app, &ctx, Key::ArrowRight);
+    assert!(
+        focused(&ctx, cell_id(&rows[0], &ids[1])),
+        "stays in the last column"
+    );
+    arrow(&mut app, &ctx, Key::ArrowDown);
+    assert!(focused(&ctx, cell_id(&rows[1], &ids[1])), "↓");
+    arrow(&mut app, &ctx, Key::ArrowLeft);
+    arrow(&mut app, &ctx, Key::ArrowLeft);
+    assert!(focused(&ctx, row_name_id(&rows[1])), "← reaches the name");
+    arrow(&mut app, &ctx, Key::ArrowUp);
+    assert!(focused(&ctx, row_name_id(&rows[0])), "↑ from a name");
+    arrow(&mut app, &ctx, Key::ArrowUp);
+    assert!(
+        focused(&ctx, row_name_id(&rows[0])),
+        "stays in the first row"
+    );
+
+    // In a name, → moves in the text; at its end, on to the first property.
+    arrow(&mut app, &ctx, Key::Home);
+    arrow(&mut app, &ctx, Key::ArrowRight);
+    assert!(focused(&ctx, row_name_id(&rows[0])), "still in «Rayuela»");
+    arrow(&mut app, &ctx, Key::End);
+    arrow(&mut app, &ctx, Key::ArrowRight);
+    assert!(
+        focused(&ctx, cell_id(&rows[0], &ids[0])),
+        "→ at the end of the name"
+    );
+
+    // Down past the rows in sight: the table scrolls to the focused row.
+    for _ in 0..45 {
+        arrow(&mut app, &ctx, Key::ArrowDown);
+    }
+    assert!(focused(&ctx, cell_id(&rows[45], &ids[0])), "row 45");
+    let scrolled = app.database.as_ref().map_or(0.0, |d| d.scroll.y);
+    assert!(scrolled > 0.0, "scrolled to it ({scrolled})");
+    // Enter still edits the cell the keys reached.
+    sized_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    sized_frame(&mut app, &ctx, vec![]);
+    assert!(focused(&ctx, cell_edit_id(&rows[45], &ids[0])));
+    Ok(())
+}

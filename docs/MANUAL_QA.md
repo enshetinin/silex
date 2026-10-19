@@ -93,3 +93,12 @@ Con una base de datos abierta (o «Base de prueba» de la semilla):
 - Cierra y vuelve a abrir la app: propiedades, orden y valores siguen ahí.
 - Modo oscuro: las etiquetas de las opciones se leen bien.
 - Con VoiceOver/NVDA/Orca: cada celda se anuncia como «Propiedad, fila: valor» y las casillas como casilla marcada o no.
+
+## 11. Filas como páginas, teclado y opciones (H6.2b)
+- «Abrir» en una fila: bajo el título aparecen sus propiedades con icono y nombre a la izquierda. Los números van a la izquierda, y lo vacío dice «Vacío». Edita un texto, un número, una fecha, la casilla y la selección (crea una opción nueva): vuelve a la base por la ruta y la tabla muestra los cambios.
+- En la página de la fila, escribe en una propiedad y, sin salir del campo, cambia de página: al volver está guardado.
+- En la tabla, clic en una celda y Escape (queda con el foco): ↑/↓/←/→ la mueven. En el nombre, ←/→ mueven el cursor y → al final del nombre pasa a la primera propiedad. Intro edita la celda enfocada; Intro otra vez guarda y deja el foco en ella.
+- Con la semilla (1000 filas): mantén ↓ pulsada desde la primera fila; la tabla baja con el foco y la cabecera sigue fija. → hasta la última columna desplaza la tabla en horizontal.
+- Cabecera de una propiedad de selección: aparece «Opciones». Cambia el nombre de una (Intro o clic fuera), su color (clic en la muestra → elige otro) y bórrala: pide confirmación y dice en cuántas filas se vacía; «Cancelar» no borra. Las celdas que la tenían quedan vacías; las demás, igual.
+- El menú de opciones no cambia de tamaño ni se mueve mientras está abierto.
+- Con VoiceOver/NVDA/Orca: en la página de la fila cada valor se anuncia como «Propiedad, fila: valor»; las muestras de color se anuncian con el nombre del color.
