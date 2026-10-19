@@ -15,6 +15,7 @@ mod blocks;
 mod board;
 mod cells;
 mod database;
+mod date_picker;
 mod dialogs;
 mod document;
 pub mod icons;
@@ -35,8 +36,8 @@ mod view_tabs;
 
 pub use self::startup::StartupError;
 use self::{
-    blocks::*, cells::*, database::*, dialogs::*, row_page::*, search::*, sidebar::*,
-    table_undo::*, view_menus::*, view_tabs::*,
+    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, row_page::*, search::*,
+    sidebar::*, table_undo::*, view_menus::*, view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop

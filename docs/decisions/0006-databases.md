@@ -92,7 +92,7 @@ CREATE TABLE db_views (
 - **Página de la base:** la vista sustituye al editor de bloques. Lleva la barra superior de siempre, el título y las pestañas de vistas.
 - **Tabla:**
   - Cabecera con el icono del tipo y el nombre de cada propiedad, y un menú para renombrar, ocultar o borrar.
-  - Celdas editables según el tipo: texto en línea; número validado; casilla; fecha `AAAA-MM-DD` validada (sin selector de calendario, que exigiría una dependencia nueva); selección con buscador y creación de opciones.
+  - Celdas editables según el tipo: texto en línea; número validado; casilla; fecha `AAAA-MM-DD` validada (sin selector de calendario, que exigiría una dependencia nueva; *actualización 2026-10-19, H6.6:* hay calendario, hecho a mano sin dependencias, y se sigue pudiendo escribir la fecha); selección con buscador y creación de opciones.
   - «Nueva fila», y abrir una fila como página.
   - Filas virtualizadas (`ScrollArea::show_rows`) para miles de entradas.
 - **Página de una fila:** las propiedades se muestran y editan encima de sus bloques.

@@ -1176,3 +1176,89 @@ fn database_board_column_menu() -> anyhow::Result<()> {
     harness.snapshot("database_board_column_menu_light");
     Ok(())
 }
+
+// ---- H6.6: date picker ----
+
+/// Opens a cell from the keyboard: focus (which scrolls it into sight;
+/// «Terminado» is past the window's right edge) and Intro.
+fn open_cell(harness: &mut Harness<'_, SilexApp>, label: &str) {
+    harness.get_by_label(label).focus();
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+}
+
+/// The «Terminado» date of a row of «Lecturas», as stored.
+fn terminado(harness: &Harness<'_, SilexApp>, row: &str) -> Option<String> {
+    let state = harness.state();
+    let database = state.database.as_ref()?;
+    let property = database.properties.iter().find(|p| p.name == "Terminado")?;
+    let values = state.db.database_values(&database.id).ok()?;
+    match values.get(row)?.get(&property.id)? {
+        silex_desktop::property::CellValue::Date(date) => Some(date.to_string()),
+        _ => None,
+    }
+}
+
+#[test]
+fn the_calendar_picks_moves_and_clears_dates() -> anyhow::Result<()> {
+    use silex_desktop::property::{CalendarMonth, Date, spoken_date};
+    let (app, _, rows) = database_app()?;
+    let mut harness = a11y_harness(app);
+    let today = Date::today_utc().expect("a clock after 1970");
+
+    // An empty cell opens on this month; «Mes anterior» goes back one.
+    open_cell(&mut harness, "Terminado, Pedro Páramo: vacío");
+    assert_accessible(&harness, "calendar");
+    assert_steady(&mut harness, "Fecha de Terminado, Pedro Páramo");
+    let month = CalendarMonth::of(today);
+    assert!(harness.query_by_label(&month.label()).is_some());
+    assert!(
+        harness
+            .query_by_label(&format!("{}, hoy", spoken_date(today)))
+            .is_some()
+    );
+    click_button(&mut harness, "Mes anterior");
+    let day = month.previous().weeks()[2]
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .expect("a day in the third week");
+    click_button(&mut harness, &spoken_date(day));
+    assert_eq!(terminado(&harness, &rows[1]), Some(day.to_string()));
+
+    // A cell with a date opens on its month, with its day selected.
+    open_cell(&mut harness, "Terminado, Rayuela: 2026-09-14");
+    assert!(harness.query_by_label("septiembre de 2026").is_some());
+    let toggled = |label: &str| {
+        harness
+            .get_by_label(label)
+            .accesskit_node()
+            .toggled()
+            .is_some_and(|t| t == egui::accesskit::Toggled::True)
+    };
+    assert!(toggled("14 de septiembre de 2026"), "its day is marked");
+    assert!(!toggled("15 de septiembre de 2026"));
+    menu_item(&harness, "Quitar la fecha")
+        .expect("«Quitar la fecha»")
+        .click();
+    harness.run();
+    assert_eq!(terminado(&harness, &rows[0]), None);
+
+    // «Hoy».
+    open_cell(&mut harness, "Terminado, Ficciones: vacío");
+    menu_item(&harness, "Hoy").expect("«Hoy»").click();
+    harness.run();
+    assert_eq!(terminado(&harness, &rows[2]), Some(today.to_string()));
+    Ok(())
+}
+
+#[test]
+fn database_date_picker() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_date_picker_light",
+        eframe::egui::Theme::Light,
+        |harness| open_cell(harness, "Terminado, Rayuela: 2026-09-14"),
+    )
+}

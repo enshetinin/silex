@@ -26,6 +26,7 @@ pub const DOTS_THREE: &str = "\u{e1fe}";
 pub const DOTS_THREE_VERTICAL: &str = "\u{e208}";
 pub const DRAG_HANDLE: &str = "\u{eae2}"; // dots-six-vertical
 pub const CARET_RIGHT: &str = "\u{e13a}";
+pub const CARET_LEFT: &str = "\u{e138}";
 pub const CARET_DOWN: &str = "\u{e136}";
 pub const CARET_UP: &str = "\u{e13c}";
 pub const SEARCH: &str = "\u{e30c}"; // magnifying-glass
@@ -91,6 +92,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("CARET_RIGHT", CARET_RIGHT),
     ("CARET_DOWN", CARET_DOWN),
     ("CARET_UP", CARET_UP),
+    ("CARET_LEFT", CARET_LEFT),
     ("SEARCH", SEARCH),
     ("STAR", STAR),
     ("TRASH", TRASH),

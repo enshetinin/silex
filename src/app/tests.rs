@@ -1855,14 +1855,23 @@ fn numbers_and_dates_are_typed_in_their_cells() -> anyhow::Result<()> {
     let painted = app_frame(&mut app, &ctx, vec![]);
     assert!(painted.iter().any(|t| t == "736,5"), "{painted:?}");
 
-    // A date that does not exist is refused and explained.
+    // A date that does not exist is not saved; the calendar says why.
     press_cell(&mut app, &ctx, cell_id(&row, fecha));
     app_frame(&mut app, &ctx, vec![egui::Event::Text("30/02/2026".into())]);
     app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let painted = app_frame(&mut app, &ctx, vec![]);
     assert_eq!(stored(&app, &row, fecha)?, None);
-    let notice = app.notice.take().unwrap_or_default();
-    assert!(notice.contains("no es una fecha válida"), "{notice}");
-    assert!(app.database.as_ref().is_some_and(|d| d.editing.is_none()));
+    assert!(
+        painted
+            .iter()
+            .any(|t| t == "Escribe una fecha como 2026-10-19 o 19/10/2026."),
+        "{painted:?}"
+    );
+    // Escape closes the calendar without saving.
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(!egui::Popup::is_id_open(&ctx, date_menu_id(&row, fecha)));
+    assert_eq!(stored(&app, &row, fecha)?, None);
 
     // D/M/AAAA is read as a date and stored as AAAA-MM-DD.
     press_cell(&mut app, &ctx, cell_id(&row, fecha));

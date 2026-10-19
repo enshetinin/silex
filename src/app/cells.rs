@@ -93,11 +93,11 @@ impl Cell<'_> {
     }
 
     /// "Propiedad, fila" (what a screen reader says before the value).
-    fn name(&self) -> String {
+    pub(super) fn name(&self) -> String {
         format!("{}, {}", self.property.name, display_title(&self.row.title))
     }
 
-    fn shown(&self) -> String {
+    pub(super) fn shown(&self) -> String {
         self.value
             .map(|v| v.display(self.property))
             .unwrap_or_default()
@@ -119,9 +119,8 @@ pub(super) fn property_cell(
     actions: &mut Vec<CellAction>,
 ) {
     match cell.property.kind {
-        PropertyKind::Text | PropertyKind::Number | PropertyKind::Date => {
-            text_cell(ui, cell, editing, actions);
-        }
+        PropertyKind::Text | PropertyKind::Number => text_cell(ui, cell, editing, actions),
+        PropertyKind::Date => date_cell(ui, cell, editing, option_filter, actions),
         PropertyKind::Checkbox => checkbox_cell(ui, cell, actions),
         PropertyKind::Select => select_cell(ui, cell, editing, option_filter, actions),
     }
@@ -139,7 +138,8 @@ pub(super) fn start_typing(
     }
 }
 
-/// A text, number or date cell: its value, or a text field while typing.
+/// A text or number cell: its value, or a text field while typing. (Dates
+/// have a calendar: `date_picker.rs`.)
 /// Enter or leaving the cell saves; Escape drops what was typed.
 pub(super) fn text_cell(
     ui: &mut egui::Ui,
@@ -158,11 +158,7 @@ pub(super) fn text_cell(
         let Some(edit) = editing.as_mut() else {
             return;
         };
-        let hint = match cell.property.kind {
-            PropertyKind::Date => "AAAA-MM-DD",
-            PropertyKind::Number => "0",
-            _ => "Vacío",
-        };
+        let hint = if number { "0" } else { "Vacío" };
         // Frameless, in the same rect as the shown value: the text does not
         // move when typing starts.
         let field = inside(

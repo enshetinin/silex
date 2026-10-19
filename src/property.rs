@@ -209,6 +209,165 @@ impl Date {
     }
 }
 
+impl Date {
+    pub fn year(self) -> u16 {
+        self.year
+    }
+
+    pub fn month(self) -> u8 {
+        self.month
+    }
+
+    pub fn day(self) -> u8 {
+        self.day
+    }
+
+    /// Day of the week: 0 is Monday, 6 is Sunday.
+    pub fn weekday(self) -> u8 {
+        // 1970-01-01 was a Thursday (3).
+        (self.days_since_epoch() + 3).rem_euclid(7) as u8
+    }
+
+    /// Today by the system clock, in UTC (the standard library has no
+    /// local time zone). `None` if the clock is before 1970 or past 9999.
+    pub fn today_utc() -> Option<Self> {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        Self::from_days_since_epoch(i64::try_from(seconds / 86_400).ok()?)
+    }
+
+    /// Days from 1970-01-01 (negative before), by H. Hinnant's
+    /// `days_from_civil`.
+    fn days_since_epoch(self) -> i64 {
+        let (month, day) = (i64::from(self.month), i64::from(self.day));
+        let year = i64::from(self.year) - i64::from(month <= 2);
+        let era = year.div_euclid(400);
+        let year_of_era = year - era * 400;
+        let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        era * 146_097 + day_of_era - 719_468
+    }
+
+    /// The inverse of [`Self::days_since_epoch`] (`civil_from_days`).
+    fn from_days_since_epoch(days: i64) -> Option<Self> {
+        let days = days + 719_468;
+        let era = days.div_euclid(146_097);
+        let day_of_era = days - era * 146_097;
+        let year_of_era =
+            (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        let mp = (5 * day_of_year + 2) / 153;
+        let day = day_of_year - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = year_of_era + era * 400 + i64::from(month <= 2);
+        Self::new(
+            u16::try_from(year).ok()?,
+            u8::try_from(month).ok()?,
+            u8::try_from(day).ok()?,
+        )
+    }
+}
+
+/// A month as a calendar shows it (the date picker of a date cell).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalendarMonth {
+    year: u16,
+    month: u8,
+}
+
+const MONTHS: [&str; 12] = [
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+];
+
+impl CalendarMonth {
+    /// The month a date is in.
+    pub fn of(date: Date) -> Self {
+        Self {
+            year: date.year,
+            month: date.month,
+        }
+    }
+
+    /// The month before; January of year 1 stays where it is.
+    pub fn previous(self) -> Self {
+        match (self.year, self.month) {
+            (1, 1) => self,
+            (year, 1) => Self {
+                year: year - 1,
+                month: 12,
+            },
+            (year, month) => Self {
+                year,
+                month: month - 1,
+            },
+        }
+    }
+
+    /// The month after; December of 9999 stays where it is.
+    pub fn next(self) -> Self {
+        match (self.year, self.month) {
+            (9999, 12) => self,
+            (year, 12) => Self {
+                year: year + 1,
+                month: 1,
+            },
+            (year, month) => Self {
+                year,
+                month: month + 1,
+            },
+        }
+    }
+
+    /// «octubre de 2026».
+    pub fn label(self) -> String {
+        let name = MONTHS[usize::from(self.month - 1)];
+        format!("{name} de {}", self.year)
+    }
+
+    /// Its weeks, Monday first: each day in its place, and `None` where a
+    /// week starts before the month or ends after it. Four to six weeks.
+    pub fn weeks(self) -> Vec<[Option<Date>; 7]> {
+        let days = days_in_month(self.year, self.month);
+        let Some(first) = Date::new(self.year, self.month, 1) else {
+            return Vec::new();
+        };
+        let mut weeks = Vec::new();
+        let mut week = [None; 7];
+        let mut slot = usize::from(first.weekday());
+        for day in 1..=days {
+            week[slot] = Date::new(self.year, self.month, day);
+            slot += 1;
+            if slot == 7 {
+                weeks.push(week);
+                week = [None; 7];
+                slot = 0;
+            }
+        }
+        if slot > 0 {
+            weeks.push(week);
+        }
+        weeks
+    }
+}
+
+/// The name of a date, as a screen reader says it: «19 de octubre de 2026».
+pub fn spoken_date(date: Date) -> String {
+    format!("{} de {}", date.day, CalendarMonth::of(date).label())
+}
+
 /// `AAAA-MM-DD`, the format SQLite stores and checks.
 impl fmt::Display for Date {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -419,6 +578,65 @@ mod tests {
         for n in [0.1 + 0.2, 1e15, -42.125, 1.0 / 3.0] {
             assert_eq!(parse_number(&format_number(n)), Some(n), "{n}");
         }
+    }
+
+    #[test]
+    fn weekdays_and_days_since_1970_are_right() {
+        let date = |s: &str| Date::parse(s).expect("date");
+        // 2026-10-19 is a Monday; 1970-01-01 a Thursday; 2000-02-29 a Tuesday.
+        assert_eq!(date("2026-10-19").weekday(), 0);
+        assert_eq!(date("2026-10-25").weekday(), 6);
+        assert_eq!(date("1970-01-01").weekday(), 3);
+        assert_eq!(date("2000-02-29").weekday(), 1);
+        assert_eq!(date("0001-01-01").weekday(), 0);
+        for s in [
+            "1970-01-01",
+            "1969-12-31",
+            "2000-02-29",
+            "0001-01-01",
+            "9999-12-31",
+            "2026-10-19",
+        ] {
+            let d = date(s);
+            assert_eq!(
+                Date::from_days_since_epoch(d.days_since_epoch()),
+                Some(d),
+                "{s}"
+            );
+        }
+        assert_eq!(date("1970-01-02").days_since_epoch(), 1);
+        assert_eq!(Date::from_days_since_epoch(i64::MAX / 2), None);
+        let today = Date::today_utc().expect("a clock after 1970");
+        assert!(today >= date("2026-01-01"));
+    }
+
+    #[test]
+    fn a_calendar_month_lays_out_its_weeks_from_monday() {
+        let month = CalendarMonth::of(Date::parse("2026-10-19").expect("date"));
+        assert_eq!(month.label(), "octubre de 2026");
+        let weeks = month.weeks();
+        // October 2026 starts on a Thursday and ends on a Saturday.
+        assert_eq!(weeks.len(), 5);
+        assert_eq!(weeks[0][..3], [None, None, None]);
+        assert_eq!(weeks[0][3].map(Date::day), Some(1));
+        assert_eq!(weeks[4][5].map(Date::day), Some(31));
+        assert_eq!(weeks[4][6], None);
+        let days: Vec<u8> = weeks.iter().flatten().flatten().map(|d| d.day()).collect();
+        assert_eq!(days, (1..=31).collect::<Vec<u8>>());
+        // February 2027 starts on a Monday: exactly four weeks.
+        let february = CalendarMonth::of(Date::parse("2027-02-01").expect("date"));
+        assert_eq!(february.weeks().len(), 4);
+        // Months go round the year and stop at the ends of the calendar.
+        assert_eq!(month.next().next().next().label(), "enero de 2027");
+        assert_eq!(february.previous().previous().label(), "diciembre de 2026");
+        let first = CalendarMonth::of(Date::parse("0001-01-01").expect("date"));
+        assert_eq!(first.previous(), first);
+        let last = CalendarMonth::of(Date::parse("9999-12-31").expect("date"));
+        assert_eq!(last.next(), last);
+        assert_eq!(
+            spoken_date(Date::parse("1/5/2026").expect("date")),
+            "1 de mayo de 2026"
+        );
     }
 
     #[test]

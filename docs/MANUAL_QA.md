@@ -144,3 +144,11 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - «Agrupar» con dos propiedades de selección: cambiar de una a otra reagrupa las tarjetas. «Propiedades»: desmarca una y desaparece de las tarjetas. Un filtro deja en cada columna solo las tarjetas que lo cumplen.
 - En una base sin propiedad de selección, un tablero explica por qué está vacío y «Añadir la propiedad «Estado»» la crea.
 - Cierra y vuelve a abrir la app: el tablero sigue agrupado por la misma propiedad.
+
+## 16. Calendario en las fechas (H6.6)
+- Clic en una celda de fecha vacía: se abre el calendario en el mes actual, con hoy rodeado. «‹» y «›» cambian de mes; clic en un día lo guarda y cierra.
+- En una celda con fecha, el calendario se abre en su mes con su día marcado. «Quitar la fecha» la vacía; Cmd+Z la devuelve.
+- Escribe `19/10/2026` en el campo: el calendario salta a ese mes; Intro la guarda como `2026-10-19`. Escribe `30/02/2026`: aparece la explicación y no se guarda; Escape cierra sin guardar.
+- Con el teclado: flechas hasta la celda, Intro abre el calendario, Tab recorre los días, Intro elige.
+- Lo mismo en la página de una fila (propiedades bajo el título).
+- Pasada la medianoche (hora local), comprueba si «Hoy» marca el día correcto (usa UTC: en España, hasta la 1 o las 2 puede marcar el anterior).
