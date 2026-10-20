@@ -59,6 +59,7 @@ Una sola regla: **al guardar una página, si su última versión tiene más de 1
 - Garantiza que siempre se puede volver a como estaba la página **antes** de empezar a editarla, aunque luego se edite durante horas.
 - Escribiendo sin parar sale una versión cada 10 minutos; una página que no se toca no genera ninguna.
 - No se guarda una versión igual a la anterior.
+  - *Actualización (H7.7):* tampoco una página sin bloques: no hay nada que restaurar. Así, crear una página y escribir en ella no deja una versión vacía.
 - Antes de restaurar una versión se guarda el estado actual, sin esperar los 10 minutos: restaurar nunca pierde nada.
 
 Solo se versiona el **título y los bloques**. Mover, renombrar desde la barra lateral, favoritos y papelera no crean versiones (tienen sus propias formas de volver atrás). Las propiedades de las filas y la tabla de una base de datos quedan fuera (véase la pregunta 4).
@@ -70,6 +71,7 @@ Al guardar una versión, en la misma transacción, se aclaran las de esa página
 - más antiguas: la última de cada semana.
 
 Así una página editada todos los días acumula unas 30 versiones al mes y 52 al año. La poda es una consulta indexada por página (`page_versions_page_idx`).
+- *Actualización (H7.7):* los días y las semanas se cuentan en UTC, como las fechas guardadas; la semana va de lunes a domingo. Medido: un año de una página de 100 bloques editada cada 10 minutos, 8 horas al día, deja 120 versiones y 3,5 MB (los bloques de la prueba son más largos que los de la medida inicial).
 
 ### Encaje con lo que ya existe
 - **Adjuntos:** una versión puede nombrar un adjunto que el documento ya no usa. «Liberar espacio» lo considera en uso mientras alguna versión lo nombre (con `json_each`), así que restaurar nunca encuentra un archivo borrado. Si aun así faltara (una base editada a mano), el bloque vuelve como párrafo con su nombre: «[archivo que ya no está] informe.pdf».

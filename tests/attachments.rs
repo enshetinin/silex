@@ -327,14 +327,23 @@ fn page_with_blob(
     Ok((page, file, attachment.id))
 }
 
+/// A `size`-byte attachment no block names (as from an attach that was
+/// undone). A file whose block was deleted is still named by the page's
+/// versions (ADR 0009), so it is not unused.
+fn unused_blob(db: &mut Database, name: &str, size: usize) -> anyhow::Result<String> {
+    let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    Ok(db
+        .add_attachment(&NewAttachment::from_bytes(&format!("{name}.bin"), data)?)?
+        .id)
+}
+
 #[test]
 fn space_counts_used_and_unused_attachments() -> anyhow::Result<()> {
     let mut db = Database::open_in_memory()?;
     let (_, _, _) = page_with_blob(&mut db, "usado", 1000)?;
     let (trashed, _, _) = page_with_blob(&mut db, "papelera", 300)?;
-    let (orphan_page, _, orphan) = page_with_blob(&mut db, "suelto", 2000)?;
+    let orphan = unused_blob(&mut db, "suelto", 2000)?;
     db.trash_page(&trashed)?;
-    db.save_document(&orphan_page, "suelto", &[])?;
     let usage = db.space_usage()?;
     // A page in the trash still uses its attachment.
     assert_eq!((usage.used_attachments, usage.used_bytes), (2, 1300));
@@ -359,11 +368,10 @@ fn space_counts_used_and_unused_attachments() -> anyhow::Result<()> {
 fn compacting_gives_the_space_back_and_keeps_search() -> anyhow::Result<()> {
     let tmp = TempDir::new()?;
     let mut db = Database::open(tmp.db())?;
-    let (page, _, _) = page_with_blob(&mut db, "grande", 3_000_000)?;
+    unused_blob(&mut db, "grande", 3_000_000)?;
     let notes = db.create_page("Notas", None)?;
     let text = block(&notes, BlockKind::Paragraph, "zanahorias moradas", None);
     db.save_document(&notes, "Notas", &[text])?;
-    db.save_document(&page, "grande", &[])?;
     db.delete_unused_attachments(&Default::default())?;
     let before = db.space_usage()?;
     assert!(before.free >= 3_000_000, "{before:?}");
@@ -433,10 +441,8 @@ fn freeing_space_in_its_thread_shrinks_the_file() -> anyhow::Result<()> {
     use silex_desktop::space::FreeSpaceJob;
     let tmp = TempDir::new()?;
     let mut db = Database::open(tmp.db())?;
-    let (page, _, kept) = page_with_blob(&mut db, "deshacer", 500_000)?;
-    let (other, _, _) = page_with_blob(&mut db, "suelto", 2_000_000)?;
-    db.save_document(&page, "deshacer", &[])?;
-    db.save_document(&other, "suelto", &[])?;
+    let kept = unused_blob(&mut db, "deshacer", 500_000)?;
+    unused_blob(&mut db, "suelto", 2_000_000)?;
     let (done, wait) = std::sync::mpsc::channel();
     let job = FreeSpaceJob::spawn(tmp.db(), [kept.clone()].into(), move || {
         let _ = done.send(());

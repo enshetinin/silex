@@ -66,8 +66,15 @@
 - `backlinks` (H7.6) lee las páginas vivas que enlazan a una, sin ella misma, con `blocks_link_idx`. No cambia el esquema.
 - Probado: v6→v7 y v1→v7 conservando los `rowid` y los adjuntos, un fallo a mitad que deja la v6 intacta, y una copia v6 restaurada y actualizada.
 
+## Versión 8 — historial de versiones (`0008_page_versions.sql`, ADR 0009)
+- `page_versions (id, page_id, created_at, title, format, blocks, size)`: una instantánea de una página. `blocks` es una lista JSON (`format` 1, de `src/versions.rs`) con `CHECK (json_valid(blocks))`, y `size` son sus bytes (`CHECK (size = octet_length(blocks))`). `page_id` con `ON DELETE CASCADE` (red de seguridad: las páginas no se borran físicamente) e índice `page_versions_page_idx (page_id, created_at)`. Solo se crea la tabla: no se reconstruye nada.
+- `save_document` guarda, en su misma transacción, cómo estaba la página **antes** del guardado si algo cambia (título o bloques), si su última versión tiene más de 10 minutos y si no es igual a ella. Una página sin bloques no se guarda como versión. Después poda las de esa página (`versions::to_prune`): todas las de 24 horas, la última de cada día (UTC) hasta 30 días y la última de cada semana (de lunes a domingo) después.
+- `save_version` guarda el estado actual sin esperar los 10 minutos (antes de restaurar, H7.8). `page_versions` las lista (la más reciente primero) y `version_blocks` lee una: un formato o tipo de bloque desconocido, o datos dañados, dan un mensaje para esa versión, nunca un error que oculte las demás.
+- **Adjuntos:** un adjunto que nombra alguna versión (`json_each`) cuenta como en uso en `space_usage` y `delete_unused_attachments`, así que «Liberar espacio» no lo borra.
+- Probado: v7→v8 y v1→v8 conservando los `rowid`, adjuntos y enlaces; un fallo a mitad que deja la v7 intacta; una copia v7 restaurada y actualizada; y la base pasa la verificación de copias con versiones.
+
 ## Evolución
-- Las migraciones publicadas (`0001`…`0007`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
+- Las migraciones publicadas (`0001`…`0008`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).
 - Antes de actualizar una base existente en disco se crea una copia verificada con el esquema antiguo. Si esa copia falla, no se migra.
 - Las copias de esquemas anteriores son válidas: la verificación acepta `1..=LATEST` y la restauración actualiza la base después de restaurar.

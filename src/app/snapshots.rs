@@ -1376,13 +1376,25 @@ fn file_blocks_snapshot(name: &str, theme: eframe::egui::Theme) -> anyhow::Resul
 
 // ---- H7.4: space ----
 
-#[test]
-fn freeing_space_shows_what_goes_and_asks_first() -> anyhow::Result<()> {
-    let mut app = attachments_app()?;
-    // The PDF's block is deleted and saved: its file is no longer used.
+/// The PDF's block is deleted and saved, but the version saved before it
+/// still names its file (ADR 0009). A copy of the PDF that nothing names
+/// (as from an attach that was undone) is the unused one.
+fn with_unused_pdf(app: &mut SilexApp) -> anyhow::Result<()> {
+    use silex_desktop::attachment::NewAttachment;
     app.blocks.retain(|b| !b.content.starts_with("billetes"));
     app.mark_dirty();
     app.save_now()?;
+    let mut pdf = b"%PDF-1.7".to_vec();
+    pdf.resize(2_516_582, b' ');
+    app.db
+        .add_attachment(&NewAttachment::from_bytes("billetes (copia).pdf", pdf)?)?;
+    Ok(())
+}
+
+#[test]
+fn freeing_space_shows_what_goes_and_asks_first() -> anyhow::Result<()> {
+    let mut app = attachments_app()?;
+    with_unused_pdf(&mut app)?;
     app.history.clear();
     let mut harness = a11y_harness(app);
     click_button(&mut harness, "Copias y exportación");
@@ -1408,8 +1420,8 @@ fn freeing_space_shows_what_goes_and_asks_first() -> anyhow::Result<()> {
     assert!(notice.starts_with("Se liberaron"), "{notice}");
     assert!(notice.contains("(1 adjunto sin usar)"), "{notice}");
     assert_eq!(state.db.space_usage()?.unused_attachments, 0);
-    // The other files are still there.
-    assert_eq!(state.db.space_usage()?.used_attachments, 2);
+    // The other files are still there, and so is the PDF a version names.
+    assert_eq!(state.db.space_usage()?.used_attachments, 3);
     Ok(())
 }
 
@@ -1420,9 +1432,7 @@ fn backups_menu() -> anyhow::Result<()> {
         return Ok(());
     }
     let mut app = attachments_app()?;
-    app.blocks.retain(|b| !b.content.starts_with("billetes"));
-    app.mark_dirty();
-    app.save_now()?;
+    with_unused_pdf(&mut app)?;
     let mut harness = Harness::builder()
         .with_size([1100.0, 760.0])
         .with_theme(eframe::egui::Theme::Light)

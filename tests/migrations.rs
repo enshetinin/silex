@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 7;
+const LATEST: i64 = 8;
 
 struct TempDir(PathBuf);
 
@@ -738,7 +738,7 @@ mod v7 {
     const SCHEMA_V6: &str = include_str!("../src/db/migrations/0006_attachments.sql");
 
     /// A database exactly as Silex v6 left it (v5 content plus a file block).
-    fn write_v6_database(path: &Path) -> anyhow::Result<()> {
+    pub(super) fn write_v6_database(path: &Path) -> anyhow::Result<()> {
         write_v5_database(path)?;
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA_V6)?;
@@ -854,6 +854,143 @@ mod v7 {
         let mut blocks = db.list_blocks("p1")?;
         blocks.push(link("p1", "p2"));
         db.save_document("p1", "Recetas", &blocks)?;
+        Ok(())
+    }
+}
+
+mod v8 {
+    use super::v5::table_exists;
+    use super::v7::write_v6_database;
+    use super::*;
+
+    const SCHEMA_V7: &str = include_str!("../src/db/migrations/0007_page_links.sql");
+
+    /// A database exactly as Silex v7 left it (v6 content plus a link).
+    fn write_v7_database(path: &Path) -> anyhow::Result<()> {
+        write_v6_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V7)?;
+        conn.execute_batch(
+            "INSERT INTO blocks (id, page_id, kind, content, position, link_page_id)
+                 VALUES ('l1', 'p1', 'page_link', 'Pan de masa madre', 6, 'p2');
+             PRAGMA user_version = 7;",
+        )?;
+        Ok(())
+    }
+
+    /// Renames p1 in the page itself, which saves its old state as a version.
+    fn edit_p1(db: &mut Database) -> anyhow::Result<()> {
+        let blocks = db.list_blocks("p1")?;
+        db.save_document("p1", "Recetas de siempre", &blocks)?;
+        Ok(())
+    }
+
+    #[test]
+    fn v7_database_gets_versions_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v7_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(table_exists(&tmp.db(), "page_versions")?);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        let before = db.list_blocks("p1")?;
+        let link = before.iter().find(|b| b.id == "l1").expect("link block");
+        assert_eq!(link.link.as_deref(), Some("p2"));
+        assert_eq!(db.attachment_data("a1")?, [1, 2, 3]);
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v7 copy first"
+        );
+        assert!(db.page_versions("p1")?.is_empty(), "no history yet");
+        // The first edit keeps the page as it was, file and link included.
+        edit_p1(&mut db)?;
+        let versions = db.page_versions("p1")?;
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].title, "Recetas");
+        let old = db.version_blocks(versions[0].id)?.expect("the version");
+        // Positions are the list order.
+        let same = |b: &silex_desktop::model::Block| {
+            (
+                b.id.clone(),
+                b.kind,
+                b.content.clone(),
+                b.attachment.clone(),
+                b.link.clone(),
+            )
+        };
+        let old: Vec<_> = old.expect("readable").iter().map(same).collect();
+        assert_eq!(old, before.iter().map(same).collect::<Vec<_>>());
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        let broken: Vec<String> = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert!(broken.is_empty(), "{broken:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v8() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        let blocks = db.list_blocks("p2")?;
+        db.save_document("p2", "Pan de centeno", &blocks)?;
+        let versions = db.page_versions("p2")?;
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].title, "Pan de masa madre");
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v7_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v7_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        // The index name is taken, so 0008 fails after creating its table.
+        Connection::open(tmp.db())?
+            .execute_batch("CREATE INDEX page_versions_page_idx ON pages(title);")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 8"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 7);
+        drop(conn);
+        assert!(!table_exists(&tmp.db(), "page_versions")?);
+        assert!(has_column(&tmp.db(), "blocks", "link_page_id")?);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        Ok(())
+    }
+
+    #[test]
+    fn v7_backup_restores_into_v8() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v7_database(&old_db)?;
+        let v7_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        let page = db.create_page("Se pierde al restaurar", None)?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v7_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.get_page(&page)?.is_none());
+        assert_eq!(
+            db.list_blocks("p1")?
+                .iter()
+                .filter(|b| b.link.is_some())
+                .count(),
+            1
+        );
+        edit_p1(&mut db)?;
+        assert_eq!(db.page_versions("p1")?.len(), 1);
         Ok(())
     }
 }
