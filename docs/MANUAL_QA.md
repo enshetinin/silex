@@ -251,3 +251,23 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - «Editar aquí» la pasa a la pestaña activa y cierra el panel; «×» lo cierra. Arrastra el borde del panel: cambia de ancho, sin dejar la página principal por debajo de 480 puntos.
 - Estrecha la ventana: el panel desaparece y vuelve al ensancharla. Con la ventana estrecha, «Abrir al lado» explica por qué no se abre.
 - Con VoiceOver: «Editar aquí» y «Cerrar el panel lateral» se anuncian como botones.
+
+## 27. Datos locales más protegidos (H7.12)
+- macOS y Linux: arranca la app con su base de siempre y comprueba `ls -l` de la carpeta de datos: la carpeta y `backups/` con `drwx------`, la base y las copias con `-rw-------`.
+- Con `SILEX_DB_PATH=/tmp/silex-qa.sqlite3`: la base y sus copias quedan privadas, pero `/tmp` no cambia.
+- Abre un adjunto con su app, cierra Silex: la carpeta de copias abiertas (en la caché de la app, `abiertos/`) ya no existe.
+- Crea una carpeta `Dropbox` (o `OneDrive`) y arranca con `SILEX_DB_PATH` dentro de ella: aparece el aviso. «Entendido» lo cierra hasta el próximo arranque; «No volver a avisar», para siempre.
+- Ajustes → «Privacidad»: dice dónde están los datos; «Mostrar la carpeta» la abre; explica el cifrado de disco del sistema. Con la base en una carpeta sincronizada, lo dice también ahí.
+- Windows: arranca con normalidad (los permisos no se tocan) y el aviso de OneDrive funciona igual.
+
+## 28. Cierre brusco (H9.1)
+- Con la semilla, escribe en una página y, sin esperar, mata la app (`kill -9 <pid>` en macOS o Linux; «Finalizar tarea» en Windows). Ábrela: arranca sin errores y conserva lo escrito hasta el último «Guardado».
+- Mátala mientras crea una copia de seguridad («Crear copia ahora») y mientras «Exportar todo» trabaja: al abrirla, las copias listadas se restauran bien, y en la carpeta de exportaciones solo hay exportaciones completas (y, como mucho, una carpeta oculta `.silex-export-…`, que se borra pasada una hora).
+
+## 29. Arrastrar bloques (H9.2)
+- Pasa el ratón por un bloque y arrastra su asa (⠿): el bloque queda marcado, su texto sigue al puntero y una línea azul marca dónde caerá. Suéltalo: se mueve. Cmd/Ctrl+Z lo devuelve.
+- Un clic en el asa (sin arrastrar) sigue abriendo su menú.
+- Selecciona varios bloques (Esc, Mayús+↑/↓) y arrastra el asa de uno de ellos: se mueven todos, en su orden.
+- Arrastra y pulsa Esc antes de soltar: no se mueve nada. Soltar sobre el propio bloque tampoco mueve nada.
+- En una página larga (la semilla), arrastra hasta el borde de arriba o de abajo: la página se desplaza sola.
+- Arrastra una tarea marcada, una lista sangrada, un archivo y un enlace: llegan con su tipo, su sangría y su contenido. Cierra y abre la app: el orden se mantiene.

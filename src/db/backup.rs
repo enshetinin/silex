@@ -39,14 +39,26 @@ pub fn backups_dir(db_path: &Path) -> PathBuf {
 pub fn create_backup(source: &Path, dir: &Path) -> Result<PathBuf> {
     fs::create_dir_all(dir)
         .with_context(|| format!("No se puede crear la carpeta de copias {}", dir.display()))?;
+    // Copies hold everything: only their owner reads them (ADR 0012).
+    crate::privacy::restrict(dir, true)?;
     remove_stale_partials(dir);
 
     let src = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .with_context(|| format!("No se puede abrir {} para copiarla", source.display()))?;
     src.busy_timeout(Duration::from_secs(5))?;
-    let stamp: String =
-        src.query_row("SELECT strftime('%Y%m%d-%H%M%S', 'now')", [], |r| r.get(0))?;
-    let target = dir.join(format!("{PREFIX}{stamp}{EXTENSION}"));
+    // Copies are named by the second. One already made this second (two
+    // in a row, or a start right after a crash during an upgrade, H9.1):
+    // wait for the next second once.
+    let target_now = || -> Result<PathBuf> {
+        let stamp: String =
+            src.query_row("SELECT strftime('%Y%m%d-%H%M%S', 'now')", [], |r| r.get(0))?;
+        Ok(dir.join(format!("{PREFIX}{stamp}{EXTENSION}")))
+    };
+    let mut target = target_now()?;
+    if target.exists() {
+        std::thread::sleep(Duration::from_millis(1000));
+        target = target_now()?;
+    }
     if target.exists() {
         bail!("Ya existe una copia de este mismo segundo; inténtalo de nuevo");
     }
@@ -55,6 +67,7 @@ pub fn create_backup(source: &Path, dir: &Path) -> Result<PathBuf> {
     let result = (|| -> Result<()> {
         src.backup(MAIN_DB, &partial, None)
             .context("La copia de SQLite falló")?;
+        crate::privacy::restrict(&partial, false)?;
         make_standalone(&partial)?;
         verify_backup(&partial)?;
         fs::rename(&partial, &target).context("No se puede finalizar la copia")?;

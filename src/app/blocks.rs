@@ -400,8 +400,16 @@ pub(super) fn block_field(
     }
 }
 
+/// What a block dragged by its handle carries: its id (H9.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BlockDrag(pub(super) String);
+
+/// Within this distance of the top or bottom of the page while dragging a
+/// block, the page scrolls.
+const DRAG_SCROLL_EDGE: f32 = 48.0;
+
 /// The hover handle and its menu: convert to another type, move, duplicate,
-/// delete.
+/// delete. Dragging it moves the block (H9.2).
 fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<BlockAction> {
     let p = theme::current(ui.ctx());
     // Interact + paint, not a widget: nothing is allocated, so showing the
@@ -414,10 +422,12 @@ fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<
     let handle = ui.interact(
         rect,
         egui::Id::unique(("silex-block-handle-button", &block.id)),
-        egui::Sense::click(),
+        egui::Sense::click_and_drag(),
     );
     handle
         .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Acciones del bloque"));
+    handle.dnd_set_drag_payload(BlockDrag(block.id.clone()));
+    let handle = handle.on_hover_cursor(egui::CursorIcon::Grab);
     let open = egui::Popup::is_id_open(ui.ctx(), handle_menu_id(&block.id));
     if handle.hovered() || open {
         ui.painter().rect_filled(rect, theme::radius::SM, p.subtle);
@@ -429,7 +439,7 @@ fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<
         icons::font(theme::icon::MD),
         p.text_muted,
     );
-    let handle = handle.on_hover_text("Acciones del bloque");
+    let handle = handle.on_hover_text("Clic: acciones del bloque · Arrastrar: moverlo");
     let mut action = None;
     egui::Popup::menu(&handle)
         .id(handle_menu_id(&block.id))
@@ -902,6 +912,111 @@ impl SilexApp {
     }
 
     /// Index range of the selection (inclusive), if both ends still exist.
+    /// While a block is dragged by its handle: the line where it would
+    /// go, the block's text by the pointer, scrolling near the edges, and
+    /// Esc to give up. On release over the page, returns what to move
+    /// (`first..=last` to the gap `to`): the selection, if the block is in
+    /// it, else the block.
+    fn drag_blocks(
+        &self,
+        ui: &mut egui::Ui,
+        dragged: &str,
+        rects: &[egui::Rect],
+    ) -> Option<(usize, usize, usize)> {
+        let p = theme::current(ui.ctx());
+        let ctx = ui.ctx().clone();
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            egui::DragAndDrop::clear_payload(&ctx);
+            return None;
+        }
+        let index = self.blocks.iter().position(|b| b.id == dragged)?;
+        let (first, last) = self
+            .selection_range()
+            .filter(|(a, b)| (*a..=*b).contains(&index))
+            .unwrap_or((index, index));
+        let pointer = ctx.pointer_interact_pos()?;
+        let page = ui.clip_rect();
+        // Scroll when near the top or bottom of the page.
+        if page.x_range().contains(pointer.x) {
+            let speed = if pointer.y < page.top() + DRAG_SCROLL_EDGE {
+                8.0
+            } else if pointer.y > page.bottom() - DRAG_SCROLL_EDGE {
+                -8.0
+            } else {
+                0.0
+            };
+            if speed != 0.0 {
+                ui.scroll_with_delta(egui::vec2(0.0, speed));
+                ctx.request_repaint();
+            }
+        }
+        // The block's text follows the pointer, on top.
+        let text: String = self.blocks[index].content.chars().take(48).collect();
+        let label = if last > first {
+            format!("{} bloques", last - first + 1)
+        } else if text.trim().is_empty() {
+            "Bloque".to_owned()
+        } else {
+            text
+        };
+        let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("silex_block_drag"));
+        let painter = ctx.layer_painter(layer);
+        let galley =
+            painter.layout_no_wrap(label, egui::TextStyle::Body.resolve(ui.style()), p.text);
+        let at = pointer + egui::vec2(14.0, 6.0);
+        let card = egui::Rect::from_min_size(at, galley.size() + egui::vec2(16.0, 10.0));
+        painter.rect_filled(card, egui::CornerRadius::same(theme::radius::SM), p.bg);
+        painter.rect_stroke(
+            card,
+            egui::CornerRadius::same(theme::radius::SM),
+            egui::Stroke::new(1.0, p.border),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley(at + egui::vec2(8.0, 5.0), galley, p.text);
+        if !page.contains(pointer) || rects.is_empty() {
+            return None;
+        }
+        // The blocks being moved stay marked in their place.
+        for rect in rects.get(first..=last).unwrap_or_default() {
+            ui.painter().rect_filled(
+                rect.with_min_x(rect.left() + GUTTER),
+                egui::CornerRadius::same(theme::radius::SM),
+                p.accent_soft.gamma_multiply(0.5),
+            );
+        }
+        // The gap: before the first block whose middle is below the pointer.
+        let to = rects
+            .iter()
+            .position(|r| pointer.y < r.center().y)
+            .unwrap_or(rects.len());
+        let moves = !(first..=last + 1).contains(&to);
+        if moves {
+            let y = match (to.checked_sub(1).and_then(|i| rects.get(i)), rects.get(to)) {
+                (Some(above), Some(below)) => (above.bottom() + below.top()) / 2.0,
+                (Some(above), None) => above.bottom() + 2.0,
+                (None, Some(below)) => below.top() - 2.0,
+                (None, None) => return None,
+            };
+            // In line with the text of the blocks.
+            let left = rects[0].left() + GUTTER + ui.spacing().item_spacing.x;
+            ui.painter()
+                .hline(left..=rects[0].right(), y, egui::Stroke::new(2.0, p.accent));
+        }
+        let released = ctx.input(|i| i.pointer.any_released());
+        if released && egui::DragAndDrop::take_payload::<BlockDrag>(&ctx).is_some() && moves {
+            return Some((first, last, to));
+        }
+        None
+    }
+
+    /// Moves blocks `first..=last` to the gap `to` (a drop, H9.2): one
+    /// undo step.
+    pub(super) fn drop_blocks(&mut self, first: usize, last: usize, to: usize) {
+        if editor::move_range_to(&mut self.blocks, first, last, to).is_some() {
+            self.mark_dirty();
+        }
+    }
+
     pub(super) fn selection_range(&self) -> Option<(usize, usize)> {
         let sel = self.selection.as_ref()?;
         let a = self.blocks.iter().position(|b| b.id == sel.anchor)?;
@@ -1147,7 +1262,7 @@ impl SilexApp {
             ui.ctx().request_repaint();
             return;
         }
-        self.top_bar(ui, &page_id);
+        self.page_actions(ui, &page_id);
         if self.selected.as_deref() != Some(page_id.as_str()) {
             // The page was trashed (or another opened) from the top bar.
             return;
@@ -1188,6 +1303,7 @@ impl SilexApp {
         let mut block_action: Option<(BlockAction, String)> = None;
         let mut hovered = None;
         let mut open_backlink = None;
+        let mut drop_move = None;
         self.click_modifiers = ui.input(|i| i.modifiers);
         let pointer = ui.ctx().pointer_hover_pos();
         let mut scroll_area = egui::ScrollArea::vertical()
@@ -1207,6 +1323,17 @@ impl SilexApp {
                     ui.set_width(width);
                     ui.add_space(theme::space::XL);
                     edit = self.page_title(ui, &page_id);
+                    // A grey line under the title, as in the window's chrome.
+                    let words = silex_desktop::model::word_count(&self.blocks);
+                    let words = if words == 1 {
+                        "1 palabra".to_owned()
+                    } else {
+                        format!("{words} palabras")
+                    };
+                    ui.horizontal(|ui| {
+                        gutter_space(ui);
+                        ui.label(egui::RichText::new(words).size(13.0).color(p.text_muted));
+                    });
                     // A row of a database shows its properties (H6.2b).
                     if self.row_page.is_some() {
                         ui.add_space(theme::space::SM);
@@ -1224,6 +1351,10 @@ impl SilexApp {
                     let mut clicked_kind = None;
                     let ctx = ui.ctx().clone();
                     let focused = ctx.memory(|m| m.focused());
+                    // A block dragged by its handle (H9.2).
+                    let dragging =
+                        egui::DragAndDrop::payload::<BlockDrag>(&ctx).map(|drag| drag.0.clone());
+                    let mut rects = Vec::with_capacity(self.blocks.len());
                     for (index, (block, number)) in self.blocks.iter_mut().zip(numbers).enumerate()
                     {
                         let field = field_id(self.doc_generation, "block", &block.id);
@@ -1232,6 +1363,7 @@ impl SilexApp {
                             scroll_into_view: scroll_to.as_deref() == Some(block.id.as_str()),
                             selected: selected.is_some_and(|(a, b)| (a..=b).contains(&index)),
                             show_handle: self.hovered_block.as_deref() == Some(block.id.as_str())
+                                || dragging.as_deref() == Some(block.id.as_str())
                                 || egui::Popup::is_id_open(&ctx, handle_menu_id(&block.id)),
                             focused: focused == Some(field),
                             attachment: block
@@ -1249,6 +1381,7 @@ impl SilexApp {
                             ui.add_space(heading_space(block.kind));
                         }
                         let out = block_field(ui, self.doc_generation, block, &view);
+                        rects.push(out.rect);
                         // An image in sight: kept, or decoded if it has no preview (H7.2).
                         if let Some(id) = &block.attachment
                             && self
@@ -1293,6 +1426,9 @@ impl SilexApp {
                     }
                     if let Some((kind, id)) = clicked_kind {
                         self.pending_key = Some((EditorKey::Slash(kind), id));
+                    }
+                    if let Some(dragged) = &dragging {
+                        drop_move = self.drag_blocks(ui, dragged, &rects);
                     }
                     // Files being stored by the attach worker (ADR 0007).
                     if self.files.adding > 0 {
@@ -1360,6 +1496,9 @@ impl SilexApp {
             let result = self.open_clicked(id);
             self.report(result);
         }
+        if let Some((first, last, to)) = drop_move {
+            self.drop_blocks(first, last, to);
+        }
     }
 
     /// The page title, in line with the text of the blocks. Returns the
@@ -1386,40 +1525,17 @@ impl SilexApp {
 
     /// Breadcrumbs on the left; save state, undo/redo, favorite and the
     /// page menu on the right.
-    fn top_bar(&mut self, ui: &mut egui::Ui, page_id: &str) {
+    fn page_actions(&mut self, ui: &mut egui::Ui, page_id: &str) {
         let p = theme::current(ui.ctx());
         let mut action: Option<RowAction> = None;
         let mut extra: Option<&'static str> = None;
         let mut restore_property: Option<String> = None;
-        let ancestors: Vec<(String, String)> = ancestors(&self.pages, page_id)
-            .into_iter()
-            .rev()
-            .filter_map(|id| {
-                self.pages
-                    .iter()
-                    .find(|p| p.id == id)
-                    .map(|p| (id, display_title(&p.title).to_owned()))
-            })
-            .collect();
         let is_favorite = self.favorites.iter().any(|p| p.id == page_id);
         let template = self.template_open();
-        let ghost = |text: egui::RichText| egui::Button::new(text).frame_when_inactive(false);
+        // The page's path is in the window's top bar (`frame.rs`); here,
+        // the page's actions at the right.
         ui.horizontal(|ui| {
-            ui.set_min_height(32.0);
-            for (id, title) in &ancestors {
-                if ui
-                    .add(ghost(egui::RichText::new(title).color(p.text_muted)))
-                    .clicked()
-                {
-                    action = Some(RowAction::Open(id.clone()));
-                }
-                ui.label(
-                    icons::icon(icons::CARET_RIGHT)
-                        .size(14.0)
-                        .color(p.text_faint),
-                );
-            }
-            ui.label(egui::RichText::new(display_title(&self.title)).color(p.text));
+            ui.set_min_height(icons::BUTTON);
             // A template says so, and offers to make a page from it (ADR 0010).
             if template {
                 egui::Frame::new()
@@ -1442,10 +1558,14 @@ impl SilexApp {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let more = ui
-                    .add(ghost(icons::icon(icons::DOTS_THREE).color(p.text_muted)))
-                    .on_hover_text("Más acciones")
-                    .accessible_name("Más acciones de la página");
+                let more = icons::button(
+                    ui,
+                    true,
+                    icons::DOTS_THREE,
+                    p.text_muted,
+                    "Más acciones de la página",
+                    None,
+                );
                 egui::Popup::menu(&more).show(|ui| {
                     if let Some(chosen) = self.page_menu(ui, page_id) {
                         action = Some(chosen);
@@ -1488,11 +1608,7 @@ impl SilexApp {
                 };
                 // A template cannot be a favorite (ADR 0010).
                 if !template
-                    && ui
-                        .add(ghost(icons::icon(icons::STAR).color(star_color)))
-                        .on_hover_text(star_tip)
-                        .accessible_name(star_tip)
-                        .clicked()
+                    && icons::button(ui, true, icons::STAR, star_color, star_tip, None).clicked()
                 {
                     action = Some(RowAction::Favorite(page_id.to_owned(), !is_favorite));
                 }
@@ -1503,14 +1619,16 @@ impl SilexApp {
                     None => (self.history.can_undo(), self.history.can_redo()),
                 };
                 let table = table.is_some();
-                if ui
-                    .add_enabled(
-                        can_redo,
-                        ghost(icons::icon(icons::REDO).color(p.text_muted)),
-                    )
-                    .on_hover_text("Rehacer")
-                    .accessible_name("Rehacer")
-                    .clicked()
+                use egui::{Key, KeyboardShortcut as Sc, Modifiers as M};
+                if icons::button(
+                    ui,
+                    can_redo,
+                    icons::REDO,
+                    p.text_muted,
+                    "Rehacer",
+                    Some(Sc::new(M::COMMAND | M::SHIFT, Key::Z)),
+                )
+                .clicked()
                 {
                     if table {
                         self.redo_table();
@@ -1518,14 +1636,15 @@ impl SilexApp {
                         self.redo();
                     }
                 }
-                if ui
-                    .add_enabled(
-                        can_undo,
-                        ghost(icons::icon(icons::UNDO).color(p.text_muted)),
-                    )
-                    .on_hover_text("Deshacer")
-                    .accessible_name("Deshacer")
-                    .clicked()
+                if icons::button(
+                    ui,
+                    can_undo,
+                    icons::UNDO,
+                    p.text_muted,
+                    "Deshacer",
+                    Some(Sc::new(M::COMMAND, Key::Z)),
+                )
+                .clicked()
                 {
                     if table {
                         self.undo_table();
@@ -1533,13 +1652,8 @@ impl SilexApp {
                         self.undo();
                     }
                 }
-                ui.add_space(theme::space::SM);
-                self.status_bar(ui);
             });
         });
-        let line = ui.available_rect_before_wrap();
-        ui.painter()
-            .hline(line.x_range(), line.top(), egui::Stroke::new(1.0, p.border));
         if let Some(property) = restore_property {
             let result = self.restore_property(&property);
             self.report(result);

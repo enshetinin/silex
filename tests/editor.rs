@@ -618,3 +618,49 @@ fn text_never_merges_with_a_link_block() {
     assert_eq!(apply_slash(&mut blocks, 1, 0, BlockKind::Heading1), None);
     assert_eq!(blocks, before);
 }
+
+#[test]
+fn dropping_blocks_moves_them_to_the_gap() {
+    use silex_desktop::editor::move_range_to;
+    let ids = |blocks: &[Block]| blocks.iter().map(|b| b.id.clone()).collect::<String>();
+    let start = || -> Vec<Block> {
+        ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|id| b(id, Paragraph, 0, id))
+            .collect()
+    };
+    // One block, down and up, to the ends too.
+    let mut blocks = start();
+    assert_eq!(move_range_to(&mut blocks, 1, 1, 4), Some((3, 3)));
+    assert_eq!(ids(&blocks), "acdbe");
+    let mut blocks = start();
+    assert_eq!(move_range_to(&mut blocks, 3, 3, 0), Some((0, 0)));
+    assert_eq!(ids(&blocks), "dabce");
+    let mut blocks = start();
+    assert_eq!(move_range_to(&mut blocks, 0, 0, 5), Some((4, 4)));
+    assert_eq!(ids(&blocks), "bcdea");
+    // A selection keeps its order, given either way round.
+    let mut blocks = start();
+    assert_eq!(move_range_to(&mut blocks, 2, 1, 5), Some((3, 4)));
+    assert_eq!(ids(&blocks), "adebc");
+    let mut blocks = start();
+    assert_eq!(move_range_to(&mut blocks, 3, 4, 1), Some((1, 2)));
+    assert_eq!(ids(&blocks), "adebc");
+    // Dropped on itself (either edge of the range, or inside): nothing.
+    for to in [1, 2, 3, 4] {
+        let mut blocks = start();
+        assert_eq!(move_range_to(&mut blocks, 1, 3, to), None, "{to}");
+        assert_eq!(ids(&blocks), "abcde");
+    }
+    // Out of bounds.
+    let mut blocks = start();
+    assert_eq!(move_range_to(&mut blocks, 4, 5, 0), None);
+    assert_eq!(move_range_to(&mut blocks, 0, 0, 6), None);
+    // Indents and kinds travel with the blocks.
+    let mut blocks = vec![b("a", Todo, 1, "a"), b("b", Paragraph, 0, "b")];
+    move_range_to(&mut blocks, 0, 0, 2);
+    assert_eq!(
+        summary(&blocks),
+        [("b", Paragraph, 0, "b"), ("a", Todo, 1, "a")]
+    );
+}

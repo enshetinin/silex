@@ -175,3 +175,20 @@ fn attachment_names_are_safe_and_unique() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn only_old_temporaries_of_silex_are_cleaned() -> anyhow::Result<()> {
+    use silex_desktop::export::{STALE_AFTER, remove_stale_temporaries};
+    use std::time::Duration;
+    let tmp = TempDir::new()?;
+    fs::create_dir(tmp.0.join(".silex-export-1234"))?;
+    fs::write(tmp.0.join(".silex-5678.tmp"), b"x")?;
+    fs::write(tmp.0.join("Nota.md"), b"mia")?;
+    fs::write(tmp.0.join(".silex-notas.md"), b"mia")?;
+    // Fresh: an export may be running.
+    assert_eq!(remove_stale_temporaries(&tmp.0, STALE_AFTER), 0);
+    // Old (here: any age): Silex's go, the user's stay.
+    assert_eq!(remove_stale_temporaries(&tmp.0, Duration::ZERO), 2);
+    assert_eq!(names(&tmp.0)?, [".silex-notas.md", "Nota.md"]);
+    Ok(())
+}

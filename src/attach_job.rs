@@ -42,7 +42,8 @@ impl Folders {
     }
 }
 
-/// Deletes the copies opened in an earlier session.
+/// Deletes the copies of opened attachments: at the first use in a
+/// session, and when the app closes (ADR 0012).
 pub fn clear_opened(folders: &Folders) -> Result<()> {
     match fs::remove_dir_all(&folders.opened) {
         Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
@@ -194,6 +195,8 @@ fn write_opened(db: &Database, folders: &Folders, attachment: &Attachment) -> Re
     let dir = join_inside(&folders.opened, &[&attachment.id])?;
     fs::create_dir_all(&dir)
         .with_context(|| format!("No se puede crear la carpeta {}", dir.display()))?;
+    // Other users of the computer cannot list or read them (ADR 0012).
+    crate::privacy::restrict(&folders.opened, true)?;
     let path = join_inside(&dir, &[&name])?;
     write_atomic(&path, &db.attachment_data(&attachment.id)?)?;
     Ok(path)

@@ -1445,6 +1445,162 @@ fn backups_menu() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- H9.2: dragging blocks ----
+
+/// A page with four paragraphs: «uno», «dos», «tres» and «cuatro».
+fn drag_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let page = db.create_page("Arrastrar", None)?;
+    let blocks: Vec<Block> = ["uno", "dos", "tres", "cuatro"]
+        .iter()
+        .map(|text| Block {
+            id: (*text).into(),
+            page_id: page.clone(),
+            kind: BlockKind::Paragraph,
+            content: (*text).into(),
+            checked: false,
+            position: 0,
+            indent: 0,
+            attachment: None,
+            link: None,
+        })
+        .collect();
+    db.save_document(&page, "Arrastrar", &blocks)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+/// The rect of the text field of the block that says `text`.
+fn block_rect(harness: &Harness<'_, SilexApp>, text: &str) -> egui::Rect {
+    harness
+        .root()
+        .children_recursive()
+        .find(|n| n.accesskit_node().value().as_deref() == Some(text))
+        .map(|n| n.rect())
+        .unwrap_or_else(|| panic!("block {text:?}"))
+}
+
+/// Presses on the handle of the block that says `text` and moves the
+/// pointer to `to` in a few steps, without releasing.
+fn start_drag(harness: &mut Harness<'_, SilexApp>, text: &str, to: egui::Pos2) {
+    let block = block_rect(harness, text);
+    harness.hover_at(block.center());
+    harness.run();
+    let handle = harness.get_by_label("Acciones del bloque").rect().center();
+    harness.hover_at(handle);
+    harness.run();
+    harness.drag_at(handle);
+    harness.run();
+    for step in 1..=6 {
+        let t = step as f32 / 6.0;
+        harness.hover_at(handle + (to - handle) * t);
+        harness.run();
+    }
+}
+
+fn texts(app: &SilexApp) -> Vec<String> {
+    app.blocks.iter().map(|b| b.content.clone()).collect()
+}
+
+#[test]
+fn a_block_dragged_by_its_handle_moves_and_cmd_z_takes_it_back() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(drag_app()?);
+    // Below «cuatro»: to the end.
+    let below = block_rect(&harness, "cuatro").center_bottom() + egui::vec2(0.0, 6.0);
+    start_drag(&mut harness, "uno", below);
+    harness.drop_at(below);
+    harness.run();
+    assert_eq!(texts(harness.state()), ["dos", "tres", "cuatro", "uno"]);
+    // Saved like any edit, and one Cmd+Z puts it back.
+    harness.state_mut().save_now()?;
+    let page = harness.state().selected.clone().unwrap_or_default();
+    let stored: Vec<String> = harness
+        .state()
+        .db
+        .list_blocks(&page)?
+        .into_iter()
+        .map(|b| b.content)
+        .collect();
+    assert_eq!(stored, ["dos", "tres", "cuatro", "uno"]);
+    harness.state_mut().undo();
+    assert_eq!(texts(harness.state()), ["uno", "dos", "tres", "cuatro"]);
+    Ok(())
+}
+
+#[test]
+fn a_selection_moves_together_and_escape_cancels_a_drag() -> anyhow::Result<()> {
+    let mut app = drag_app()?;
+    app.selection = Some(super::BlockSelection {
+        anchor: "uno".into(),
+        head: "dos".into(),
+    });
+    let mut harness = a11y_harness(app);
+    let below = block_rect(&harness, "cuatro").center_bottom() + egui::vec2(0.0, 6.0);
+    start_drag(&mut harness, "uno", below);
+    harness.drop_at(below);
+    harness.run();
+    assert_eq!(texts(harness.state()), ["tres", "cuatro", "uno", "dos"]);
+
+    // Esc while dragging: nothing moves.
+    let above = block_rect(&harness, "tres").center_top() - egui::vec2(0.0, 2.0);
+    start_drag(&mut harness, "dos", above);
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    harness.drop_at(above);
+    harness.run();
+    assert_eq!(texts(harness.state()), ["tres", "cuatro", "uno", "dos"]);
+    // Dropped where it already is: nothing either.
+    let here = block_rect(&harness, "uno").center();
+    start_drag(&mut harness, "uno", here);
+    harness.drop_at(here);
+    harness.run();
+    assert_eq!(texts(harness.state()), ["tres", "cuatro", "uno", "dos"]);
+    Ok(())
+}
+
+#[test]
+fn block_drag() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), drag_app()?);
+    harness.run();
+    // «uno» held between «tres» and «cuatro».
+    let between = block_rect(&harness, "cuatro").center_top();
+    start_drag(&mut harness, "uno", between);
+    harness.snapshot("block_drag_light");
+    Ok(())
+}
+
+// ---- H7.12: local data kept private ----
+
+#[test]
+fn the_synced_folder_warning_has_names_and_is_not_shown_again() -> anyhow::Result<()> {
+    let root = std::env::temp_dir().join(format!("silex-synced-{}", uuid::Uuid::new_v4()));
+    let folder = root.join("OneDrive - Empresa");
+    std::fs::create_dir_all(&folder)?;
+    let path = folder.join("silex.sqlite3");
+    let mut app = SilexApp::new(Database::open(&path)?)?;
+    app.startup_backup_pending = false;
+    let mut harness = a11y_harness(app);
+    harness.run();
+    assert_accessible(&harness, "synced folder warning");
+    click_button(&mut harness, "No volver a avisar");
+    harness.run();
+    assert!(harness.state().synced_warning.is_none());
+    assert!(harness.state().db.synced_warning_dismissed()?);
+    drop(harness);
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
 // ---- H8.2: the page beside ----
 
 /// «Notas de lectura» open, «Guía de estilo» beside it.
@@ -1953,5 +2109,54 @@ fn links_snapshot(name: &str, picker: bool) -> anyhow::Result<()> {
         harness.run();
     }
     harness.snapshot(name);
+    Ok(())
+}
+
+// ---- A database next to the page beside ----
+
+/// A board next to the page beside, with the page at its minimum width:
+/// the view toolbar must not overlap or spill under the sidebar, and
+/// nothing may be pushed past the window's right edge.
+#[test]
+fn a_narrow_database_beside_a_page_keeps_its_toolbar_and_the_window() -> anyhow::Result<()> {
+    const WIDTH: f32 = 1100.0;
+    let (mut app, _) = board_app()?;
+    let base = app.selected.clone().unwrap_or_default();
+    app.main_width = 1000.0;
+    app.open_beside(&base)?;
+    let mut harness = Harness::builder()
+        .with_size([WIDTH, 760.0])
+        .with_theme(eframe::egui::Theme::Dark)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    // The toolbar measures itself on the first frames.
+    for _ in 0..5 {
+        harness.run();
+    }
+    if enabled() {
+        harness.snapshot("database_beside_dark");
+    }
+
+    // Nothing past the window: the top bar's settings and the panel's «×».
+    for label in ["Ajustes", "Cerrar el panel lateral"] {
+        let rect = harness.get_by_label(label).rect();
+        assert!(rect.right() <= WIDTH, "{label}: {rect:?}");
+    }
+    // The view tabs and the view's menus do not overlap, and the menus
+    // stay inside the page (not under the sidebar).
+    let tabs: Vec<_> = harness
+        .get_all_by_label_contains("Vista «")
+        .map(|n| n.rect())
+        .collect();
+    assert!(!tabs.is_empty());
+    for menu in ["Agrupar", "Propiedades", "Ordenar"] {
+        let menu = harness.get_by_label_contains(menu).rect();
+        assert!(
+            tabs.iter().all(|tab| !tab.intersects(menu)),
+            "{tabs:?} {menu:?}"
+        );
+        assert!(menu.left() >= tabs[0].left(), "{menu:?}");
+    }
     Ok(())
 }

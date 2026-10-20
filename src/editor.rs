@@ -409,6 +409,30 @@ pub fn move_range(blocks: &mut [Block], first: usize, last: usize, up: bool) -> 
     true
 }
 
+/// Moves blocks `first..=last` to the gap `to` (0 = before the first
+/// block, `len` = after the last), as dropping them there with the mouse
+/// (H9.2). Returns the new range, or `None` when nothing moves (a gap
+/// inside or at either edge of the range, or a range out of bounds).
+pub fn move_range_to(
+    blocks: &mut [Block],
+    first: usize,
+    last: usize,
+    to: usize,
+) -> Option<(usize, usize)> {
+    let (first, last) = (first.min(last), first.max(last));
+    if last >= blocks.len() || to > blocks.len() || (first..=last + 1).contains(&to) {
+        return None;
+    }
+    let count = last - first + 1;
+    if to < first {
+        blocks[to..=last].rotate_right(count);
+        Some((to, to + count - 1))
+    } else {
+        blocks[first..to].rotate_left(count);
+        Some((to - count, to - 1))
+    }
+}
+
 /// Inserts copies of blocks `first..=last` right after them, with new ids.
 /// Returns the index range of the copies.
 pub fn duplicate_range(

@@ -148,6 +148,7 @@ fn write_attachments(
 pub fn export_markdown(dir: &Path, title: &str, markdown: &str) -> Result<PathBuf> {
     fs::create_dir_all(dir)
         .with_context(|| format!("No se puede crear la carpeta {}", dir.display()))?;
+    remove_stale_temporaries(dir, STALE_AFTER);
     let mut taken: HashSet<String> = fs::read_dir(dir)
         .with_context(|| format!("No se puede leer la carpeta {}", dir.display()))?
         .filter_map(|e| e.ok())
@@ -157,6 +158,45 @@ pub fn export_markdown(dir: &Path, title: &str, markdown: &str) -> Result<PathBu
     let path = safe_path::join_inside(dir, &[&name])?;
     write_atomic(&path, markdown.as_bytes())?;
     Ok(path)
+}
+
+/// Temporaries older than this are left by an export that was cut short
+/// (the app was killed, H9.1): no export running takes so long.
+pub const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Removes Silex's hidden temporaries in `dir` (`.silex-export-*`
+/// folders and `.silex-*.tmp` files) last changed more than `older_than`
+/// ago. Best effort: what cannot be removed stays for next time. Returns
+/// how many went.
+pub fn remove_stale_temporaries(dir: &Path, older_than: std::time::Duration) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let ours = name.starts_with(".silex-export-")
+            || (name.starts_with(".silex-") && name.ends_with(".tmp"));
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age >= older_than);
+        if !ours || !old {
+            continue;
+        }
+        let path = entry.path();
+        let gone = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        if gone.is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Writes to a temporary file in the same folder, flushes it to disk and
@@ -212,6 +252,7 @@ pub struct WorkspaceExport {
 pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
     fs::create_dir_all(root)
         .with_context(|| format!("No se puede crear la carpeta {}", root.display()))?;
+    remove_stale_temporaries(root, STALE_AFTER);
     let stamp = db.utc_stamp()?;
     let pages = db.list_pages()?;
     let everything: HashSet<String> = pages.iter().map(|p| p.id.clone()).collect();

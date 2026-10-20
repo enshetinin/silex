@@ -607,48 +607,21 @@ impl SilexApp {
         // View tabs (H6.3b) and, on the right, the row count and the view's
         // menus. Their content lines up with the cells' text, at CELL_PAD
         // from each edge.
+        // When the page is narrow (the page beside is open), the menus
+        // show their icons only, so they never overlap the tabs; their
+        // full width from the last frame says whether they fit.
+        let full_width_id = egui::Id::unique("silex-db-toolbar-menus-width");
+        let full_width: f32 = ui.ctx().data(|d| d.get_temp(full_width_id)).unwrap_or(0.0);
         let mut selected_tab = None;
+        let mut compact = false;
         ui.horizontal(|ui| {
             ui.spacing_mut().button_padding.x = CELL_PAD;
             selected_tab = view_tabs(ui, state, &mut actions);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Also at the end of the header, which may be out of sight
-                // in a wide table. A board has one more menu: just «+».
-                let board = state.is_board();
-                let label = if board { "" } else { " Propiedad" };
-                let add = ui
-                    .add(
-                        egui::Button::new((
-                            icons::icon(icons::PLUS).color(p.text_muted),
-                            egui::RichText::new(label).small().color(p.text_muted),
-                        ))
-                        .frame_when_inactive(false),
-                    )
-                    .on_hover_text("Añadir una propiedad")
-                    .accessible_name("Añadir una propiedad");
-                add_property_menu(
-                    ui,
-                    &add,
-                    egui::Id::unique("silex-toolbar-add-property-menu"),
-                    &mut state.new_property,
-                    &mut actions,
-                );
-                if view_menus(ui, state) {
-                    state.view_changed();
-                }
-                // Each column of a board counts its own cards.
-                if board {
-                    return;
-                }
-                let total = state.rows.len();
-                let count = match (state.order.len(), total) {
-                    (_, 1) if state.order.len() == 1 => "1 fila".to_owned(),
-                    (shown, total) if shown == total => format!("{total} filas"),
-                    (shown, 1) => format!("{shown} de 1 fila"),
-                    (shown, total) => format!("{shown} de {total} filas"),
-                };
-                ui.label(egui::RichText::new(count).small().color(p.text_muted));
-            });
+            compact = ui.available_width() - theme::space::LG < full_width;
+            let used = toolbar_menus(ui, state, &mut actions, compact);
+            if !compact {
+                ui.ctx().data_mut(|d| d.insert_temp(full_width_id, used));
+            }
         });
         if state.is_board() {
             self.draw_board(ui, state, selected_tab, &mut actions, &mut cells);
@@ -1445,4 +1418,55 @@ fn new_row_button(ui: &mut egui::Ui, width: f32) -> egui::Response {
     );
     focus_ring(ui, rect, &response);
     response
+}
+
+/// The row count and the view's menus, right to left from the row's end:
+/// «+ Propiedad», then «Filtrar», «Ordenar»… (H6.3a). Returns the width
+/// they took.
+fn toolbar_menus(
+    ui: &mut egui::Ui,
+    state: &mut DatabaseState,
+    actions: &mut Vec<TableAction>,
+    compact: bool,
+) -> f32 {
+    let p = theme::current(ui.ctx());
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // Also at the end of the header, which may be out of sight in a
+        // wide table. A board has one more menu: just «+».
+        let board = state.is_board();
+        let label = if board || compact { "" } else { " Propiedad" };
+        let add = ui
+            .add(
+                egui::Button::new((
+                    icons::icon(icons::PLUS).color(p.text_muted),
+                    egui::RichText::new(label).small().color(p.text_muted),
+                ))
+                .frame_when_inactive(false),
+            )
+            .on_hover_text("Añadir una propiedad")
+            .accessible_name("Añadir una propiedad");
+        add_property_menu(
+            ui,
+            &add,
+            egui::Id::unique("silex-toolbar-add-property-menu"),
+            &mut state.new_property,
+            actions,
+        );
+        if view_menus(ui, state, compact) {
+            state.view_changed();
+        }
+        // Each column of a board counts its own cards.
+        if !board && !compact {
+            let total = state.rows.len();
+            let count = match (state.order.len(), total) {
+                (_, 1) if state.order.len() == 1 => "1 fila".to_owned(),
+                (shown, total) if shown == total => format!("{total} filas"),
+                (shown, 1) => format!("{shown} de 1 fila"),
+                (shown, total) => format!("{shown} de {total} filas"),
+            };
+            ui.label(egui::RichText::new(count).small().color(p.text_muted));
+        }
+        ui.min_rect().width()
+    })
+    .inner
 }
