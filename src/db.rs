@@ -1175,7 +1175,7 @@ impl Database {
 
     /// Saves the page as it is stored now as a version, however recent the
     /// last one is (before restoring a version, ADR 0009). Returns false if
-    /// it is the same as the last version, or the page has no blocks.
+    /// it is the same as the last version, or the page has nothing in its blocks.
     pub fn save_version(&mut self, page_id: &str) -> Result<bool> {
         let tx = self.conn.transaction()?;
         let title: Option<String> = tx
@@ -1966,7 +1966,7 @@ fn read_block(r: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
 /// out its old versions, inside the caller's transaction. Unless `force`,
 /// nothing is saved if the last version is younger than
 /// [`versions::MIN_GAP_MINUTES`]. Never saves a copy of the last version,
-/// nor a page without blocks. Returns whether it saved one.
+/// nor a page without anything in its blocks. Returns whether it saved one.
 fn save_version(
     tx: &Connection,
     clock: Option<&str>,
@@ -1975,8 +1975,11 @@ fn save_version(
     blocks: &[Block],
     force: bool,
 ) -> Result<bool> {
-    // An empty page has nothing worth restoring.
-    if blocks.is_empty() {
+    // An empty page (no blocks, or only empty ones, as when a new page
+    // gets its first block) has nothing worth restoring.
+    let empty =
+        |b: &Block| b.content.trim().is_empty() && b.attachment.is_none() && b.link.is_none();
+    if blocks.iter().all(empty) {
         return Ok(false);
     }
     let now: String = match clock {

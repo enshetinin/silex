@@ -210,6 +210,7 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - Con VoiceOver: cada fila se anuncia como enlace con el título de la página.
 
 ## 23. Historial de versiones (H7.7–H7.8)
+Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; después `SILEX_DB_PATH=/tmp/silex-qa.sqlite3 cargo run --release`), las páginas de «QA · Hito 7» (en Favoritos) traen lo necesario para las secciones 17–23: adjuntos (imagen, PDF, script, dos de 18 MB y uno sin usar), enlaces (también a una fila y a una página en la papelera), backlinks y versiones de días anteriores en «QA · Historial».
 - Edita una página con algo de texto, espera más de 10 minutos y vuelve a editarla. «…» → «Historial de versiones…» lista una versión con la hora local («Hoy, 17:40»), no en UTC.
 - ↑ ↓ eligen versión y la de la derecha cambia; no se puede editar. Las casillas, las listas, las citas, los archivos y los enlaces se ven como en la página.
 - «Restaurar esta versión» (o Intro): la página vuelve a esa versión y lo dice. Cmd+Z la devuelve a como estaba. Abre el historial otra vez: lo de antes de restaurar es también una versión.

@@ -60,6 +60,7 @@ Una sola regla: **al guardar una página, si su última versión tiene más de 1
 - Escribiendo sin parar sale una versión cada 10 minutos; una página que no se toca no genera ninguna.
 - No se guarda una versión igual a la anterior.
   - *Actualización (H7.7):* tampoco una página sin bloques: no hay nada que restaurar. Así, crear una página y escribir en ella no deja una versión vacía.
+  - *Actualización (semilla de QA):* ni una página cuyos bloques están todos vacíos (sin texto, archivo ni enlace), como una página nueva tras «Añadir bloque».
 - Antes de restaurar una versión se guarda el estado actual, sin esperar los 10 minutos: restaurar nunca pierde nada.
 
 Solo se versiona el **título y los bloques**. Mover, renombrar desde la barra lateral, favoritos y papelera no crean versiones (tienen sus propias formas de volver atrás). Las propiedades de las filas y la tabla de una base de datos quedan fuera (véase la pregunta 4).

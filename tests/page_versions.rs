@@ -97,6 +97,26 @@ fn a_save_keeps_how_the_page_was_at_most_every_ten_minutes() -> anyhow::Result<(
 }
 
 #[test]
+fn a_page_with_only_empty_blocks_leaves_no_version() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let page = db.create_page("Nueva", None)?;
+    // «Añadir bloque» on a new page, then typing in it.
+    let empty = block(&page, "  ");
+    db.set_clock(Some(&at(0)));
+    db.save_document(&page, "Nueva", std::slice::from_ref(&empty))?;
+    db.set_clock(Some(&at(30)));
+    let typed = Block {
+        content: "hola".into(),
+        ..empty
+    };
+    db.save_document(&page, "Nueva", &[typed])?;
+    assert!(db.page_versions(&page)?.is_empty());
+    // With some text, it can be kept.
+    assert!(db.save_version(&page)?);
+    Ok(())
+}
+
+#[test]
 fn saving_a_version_by_hand_skips_the_wait_but_not_copies() -> anyhow::Result<()> {
     let (mut db, page, _) = diario()?;
     db.set_clock(Some(&at(1)));
