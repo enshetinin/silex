@@ -271,3 +271,10 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - Arrastra y pulsa Esc antes de soltar: no se mueve nada. Soltar sobre el propio bloque tampoco mueve nada.
 - En una página larga (la semilla), arrastra hasta el borde de arriba o de abajo: la página se desplaza sola.
 - Arrastra una tarea marcada, una lista sangrada, un archivo y un enlace: llegan con su tipo, su sangría y su contenido. Cierra y abre la app: el orden se mantiene.
+
+## 30. Tablas al estilo nuevo (H10.2)
+- Abre «Lecturas» en claro y en oscuro: filas más altas, solo líneas horizontales y el estado como una píldora con punto, legible en ambos temas.
+- Pasa el ratón por una fila y selecciona una celda: la píldora se sigue leyendo sobre el gris.
+- Cambia el color de una opción: la píldora toma el nuevo color en la tabla, el tablero y el menú de opciones.
+- Un nombre de opción largo en una columna estrecha se corta con «…» sin salirse de la celda.
+- Las flechas, Tab y el clic en las cabeceras siguen funcionando igual que antes.

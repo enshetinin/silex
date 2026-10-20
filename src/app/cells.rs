@@ -454,7 +454,7 @@ pub(super) fn paint_cell_text(
     ui.painter().galley(at, galley, color);
 }
 
-/// An option's colored tag, starting at `left_center`, at most `max_width` wide.
+/// An option as a pill, starting at `left_center`, at most `max_width` wide.
 pub(super) fn paint_tag(
     ui: &egui::Ui,
     left_center: egui::Pos2,
@@ -464,8 +464,17 @@ pub(super) fn paint_tag(
     paint_tag_on(ui, ui.painter(), left_center, option, max_width);
 }
 
+/// Height of an option pill.
+const PILL_HEIGHT: f32 = 22.0;
+/// Room left and right of a pill's dot and text.
+const PILL_PAD: f32 = 8.0;
+/// Diameter of a pill's dot.
+const PILL_DOT: f32 = 6.0;
+
 /// [`paint_tag`] with another painter (a card being dragged, on top).
-/// Returns the tag's rect.
+/// The pill (H10.2) is a 1 px outline with a dot and the name in the
+/// option's color, and no fill, so it reads on any row or card.
+/// Returns the pill's rect.
 pub(super) fn paint_tag_on(
     ui: &egui::Ui,
     painter: &egui::Painter,
@@ -473,21 +482,37 @@ pub(super) fn paint_tag_on(
     option: &SelectOption,
     max_width: f32,
 ) -> egui::Rect {
-    let (bg, fg) = theme::option_colors(ui.ctx(), option.color);
-    let pad = egui::vec2(6.0, 2.0);
-    let galley = egui::WidgetText::from(egui::RichText::new(&option.name).color(fg)).into_galley(
-        ui,
-        Some(egui::TextWrapMode::Truncate),
-        (max_width - 2.0 * pad.x).max(0.0),
-        egui::TextStyle::Body,
+    let p = theme::current(ui.ctx());
+    let (_, fg) = theme::option_colors(ui.ctx(), option.color);
+    let gap = 6.0;
+    let galley = egui::WidgetText::from(egui::RichText::new(&option.name).small().color(fg))
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Truncate),
+            (max_width - 2.0 * PILL_PAD - PILL_DOT - gap).max(0.0),
+            egui::TextStyle::Body,
+        );
+    let size = egui::vec2(
+        2.0 * PILL_PAD + PILL_DOT + gap + galley.size().x,
+        PILL_HEIGHT,
     );
-    let size = galley.size() + 2.0 * pad;
     let rect = egui::Rect::from_min_size(
         egui::pos2(left_center.x, left_center.y - size.y / 2.0),
         size,
     );
-    painter.rect_filled(rect, egui::CornerRadius::same(theme::radius::SM), bg);
-    painter.galley(rect.min + pad, galley, fg);
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::same(theme::radius::MD),
+        egui::Stroke::new(1.0, p.border_strong),
+        egui::StrokeKind::Inside,
+    );
+    let dot = egui::pos2(rect.left() + PILL_PAD + PILL_DOT / 2.0, rect.center().y);
+    painter.circle_filled(dot, PILL_DOT / 2.0, fg);
+    let text = egui::pos2(
+        rect.left() + PILL_PAD + PILL_DOT + gap,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    painter.galley(text, galley, fg);
     rect
 }
 

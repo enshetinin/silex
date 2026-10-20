@@ -24,6 +24,8 @@ pub struct Palette {
     /// Pressed state on the canvas.
     pub pressed: Color32,
     pub border: Color32,
+    /// Outline of small controls on the canvas (option pills).
+    pub border_strong: Color32,
     pub text: Color32,
     /// Secondary text (meta, labels). Meets AA on the canvas.
     pub text_muted: Color32,
@@ -62,6 +64,7 @@ pub const LIGHT: Palette = Palette {
     subtle: hex(0xF4F4F5),
     pressed: hex(0xE9E9EB),
     border: hex(0xE4E4E7),
+    border_strong: hex(0xD4D4D8),
     text: hex(0x18181B),
     text_muted: hex(0x5F5F68),
     text_faint: hex(0x8A8A92),
@@ -87,6 +90,7 @@ pub const DARK: Palette = Palette {
     subtle: hex(0x232326),
     pressed: hex(0x2A2A2E),
     border: hex(0x29292D),
+    border_strong: hex(0x323236),
     text: hex(0xEDEDEF),
     text_muted: hex(0x8E8E95),
     text_faint: hex(0x66666E),
@@ -108,6 +112,8 @@ pub const DARK: Palette = Palette {
 
 /// Background and text of a select option's tag (H6.2), in the order of
 /// [`OptionColor::ALL`]: gray, blue, green, yellow, orange, red, purple, pink.
+/// Pills (H10.2) draw their dot and text in the second color with no fill;
+/// the first one is the color swatch's fill in the option menus.
 const LIGHT_TAGS: [(Color32, Color32); 8] = [
     (hex(0xECEEF1), hex(0x3F4651)),
     (hex(0xDCEBFB), hex(0x1A4F85)),
@@ -472,15 +478,31 @@ mod tests {
         check("oscuro", &pairs(&DARK));
     }
 
-    /// Option tags: their text on their background, and the tag against
-    /// the canvas and a hovered row is not required (the text carries it).
+    /// Option pills: their text, in the option's color, on every surface
+    /// a pill is drawn on (rows at rest, hovered or selected, menus, board
+    /// columns and cards, a column a card is dragged over).
     #[test]
     fn option_tags_meet_wcag_aa() {
-        for (theme, tags) in [("claro", &LIGHT_TAGS), ("oscuro", &DARK_TAGS)] {
-            let pairs: Vec<_> = OptionColor::ALL
+        for (theme, p, tags) in [
+            ("claro", &LIGHT, &LIGHT_TAGS),
+            ("oscuro", &DARK, &DARK_TAGS),
+        ] {
+            let surfaces = [
+                ("bg", p.bg),
+                ("surface", p.surface),
+                ("subtle", p.subtle),
+                ("pressed", p.pressed),
+                ("accent_soft", p.accent_soft),
+            ];
+            let mut named = Vec::new();
+            for (color, (_, fg)) in OptionColor::ALL.iter().zip(tags.iter()) {
+                for (surface, bg) in surfaces {
+                    named.push((format!("{} / {surface}", color.as_str()), *fg, bg));
+                }
+            }
+            let pairs: Vec<_> = named
                 .iter()
-                .zip(tags.iter())
-                .map(|(color, (bg, fg))| (color.as_str(), *fg, *bg, TEXT))
+                .map(|(what, fg, bg)| (what.as_str(), *fg, *bg, TEXT))
                 .collect();
             check(theme, &pairs);
         }

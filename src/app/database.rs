@@ -147,10 +147,10 @@ impl DatabaseState {
     }
 }
 
-/// Height of a table row.
-const ROW_HEIGHT: f32 = 34.0;
+/// Height of a table row (H10.2).
+const ROW_HEIGHT: f32 = 40.0;
 /// Height of the header row.
-const HEADER_HEIGHT: f32 = 30.0;
+const HEADER_HEIGHT: f32 = 36.0;
 /// The name column takes the room left by the others, but not less.
 const NAME_MIN_WIDTH: f32 = 240.0;
 /// The «+» column that adds a property.
@@ -767,8 +767,6 @@ impl SilexApp {
                 egui::vec2(column_width(property.kind), rect.height()),
             );
             x = cell.right();
-            ui.painter()
-                .vline(cell.left(), cell.y_range(), (1.0, p.border));
             let button = ui
                 .interact(cell, property_header_id(&property.id), egui::Sense::click())
                 .on_hover_text("Opciones de la propiedad");
@@ -830,8 +828,6 @@ impl SilexApp {
             egui::pos2(x, rect.top()),
             egui::vec2(ADD_COLUMN_WIDTH, rect.height()),
         );
-        ui.painter()
-            .vline(add.left(), add.y_range(), (1.0, p.border));
         let button = ui
             .interact(
                 add,
@@ -970,8 +966,6 @@ impl SilexApp {
                     egui::vec2(column_width(property.kind), rect.height()),
                 );
                 x = rect.right();
-                ui.painter()
-                    .vline(rect.left(), rect.y_range(), (1.0, p.border));
                 let cell = Cell {
                     rect,
                     row,
@@ -987,7 +981,6 @@ impl SilexApp {
                     *cursor = Some((index, column));
                 }
             }
-            ui.painter().vline(x, rect.y_range(), (1.0, p.border));
             if focus.as_ref().is_some_and(|(id, _)| *id == row.id) {
                 *focus = None;
             }
