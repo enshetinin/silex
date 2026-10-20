@@ -63,6 +63,7 @@
   - `link_page_id TEXT REFERENCES pages(id) ON DELETE SET NULL`, con `CHECK (kind = 'page_link' OR link_page_id IS NULL)` e índice parcial `blocks_link_idx`, que sirve para los backlinks.
 - El `content` de un enlace es el título de su destino, para la búsqueda y la exportación. `save_document` lo toma del título actual al guardar, y `rename_page` y `save_document` (al cambiar el título de la página) actualizan los enlaces que apuntan a ella, en la misma transacción.
 - `page_link_targets` lee los destinos de los enlaces de una página, también los que están en la papelera.
+- `backlinks` (H7.6) lee las páginas vivas que enlazan a una, sin ella misma, con `blocks_link_idx`. No cambia el esquema.
 - Probado: v6→v7 y v1→v7 conservando los `rowid` y los adjuntos, un fallo a mitad que deja la v6 intacta, y una copia v6 restaurada y actualizada.
 
 ## Evolución

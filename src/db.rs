@@ -1303,6 +1303,22 @@ impl Database {
         Ok(targets)
     }
 
+    /// The live pages with a link to `page_id`, without itself (ADR 0008,
+    /// «Enlazada desde»). Pages in the trash are left out. Uses the
+    /// partial index on `link_page_id`.
+    pub fn backlinks(&self, page_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT p.id
+             FROM blocks b JOIN pages p ON p.id = b.page_id
+             WHERE b.link_page_id = ?1 AND p.id <> ?1 AND p.deleted_at IS NULL
+             ORDER BY p.title, p.id",
+        )?;
+        let ids = stmt
+            .query_map([page_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(ids)
+    }
+
     /// An attachment's details, without its data.
     pub fn attachment(&self, id: &str) -> Result<Option<Attachment>> {
         self.conn

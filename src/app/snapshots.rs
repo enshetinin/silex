@@ -1508,6 +1508,115 @@ fn link_picker() -> anyhow::Result<()> {
     links_snapshot("link_picker_light", true)
 }
 
+/// «Recetas» open, linked from «Diario», from «Pan» (inside it) and from
+/// the row «Zumos» of «Lecturas»; «Agenda», in the trash, links too.
+fn backlinks_app() -> anyhow::Result<(SilexApp, String)> {
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let recetas = db.create_page("Recetas", None)?;
+    let pan = db.create_page("Pan", Some(&recetas))?;
+    let diario = db.create_page("Diario", None)?;
+    let agenda = db.create_page("Agenda", None)?;
+    let base = db.create_database("Lecturas", None)?;
+    let zumos = db.create_row(&base, "Zumos")?;
+    let link = |page: &str| Block {
+        id: uuid::Uuid::new_v4().to_string(),
+        page_id: page.into(),
+        kind: BlockKind::PageLink,
+        content: String::new(),
+        checked: false,
+        position: 0,
+        indent: 0,
+        attachment: None,
+        link: Some(recetas.clone()),
+    };
+    for (page, title) in [
+        (&diario, "Diario"),
+        (&pan, "Pan"),
+        (&agenda, "Agenda"),
+        (&zumos, "Zumos"),
+    ] {
+        db.save_document(page, title, &[link(page)])?;
+    }
+    db.trash_page(&agenda)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(recetas)?;
+    Ok((app, diario))
+}
+
+#[test]
+fn backlinks_are_listed_named_and_open_their_page() -> anyhow::Result<()> {
+    let (app, diario) = backlinks_app()?;
+    let mut harness = a11y_harness(app);
+    assert_accessible(&harness, "backlinks");
+    assert!(harness.query_by_label("Enlazada desde").is_some());
+    let links: Vec<String> = harness
+        .root()
+        .children_recursive()
+        .map(|n| n.accesskit_node())
+        .filter(|n| n.role() == egui::accesskit::Role::Link)
+        .filter_map(|n| n.label())
+        .collect();
+    // By title; not «Agenda», which is in the trash.
+    assert_eq!(links, ["Diario", "Pan", "Zumos"]);
+
+    // A click opens the page; «Diario» is linked from nobody.
+    harness
+        .get_all_by_label("Diario")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Link)
+        .expect("the «Diario» backlink")
+        .click();
+    harness.run();
+    assert_eq!(harness.state().selected.as_deref(), Some(diario.as_str()));
+    assert!(harness.query_by_label("Enlazada desde").is_none());
+    Ok(())
+}
+
+#[test]
+fn backlinks_open_with_the_keyboard_and_follow_the_trash() -> anyhow::Result<()> {
+    let (app, diario) = backlinks_app()?;
+    let mut harness = a11y_harness(app);
+    // Trashing a page that links here takes it out of the list at once.
+    harness.state_mut().trash_page(&diario)?;
+    harness.run();
+    let recetas = harness.state().selected.clone();
+    assert!(harness.query_by_label("Diario").is_none());
+    let zumos = harness
+        .get_all_by_label("Zumos")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Link)
+        .expect("the «Zumos» backlink");
+    zumos.focus();
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    let state = harness.state();
+    assert_ne!(state.selected, recetas);
+    // A row opens as a row, with its properties.
+    assert!(state.row_page.is_some());
+    // The row shows its blocks, then nothing linked to it.
+    assert!(harness.query_by_label("Enlazada desde").is_none());
+    Ok(())
+}
+
+#[test]
+fn backlinks() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            backlinks_app()?.0,
+        );
+    harness.run();
+    harness.snapshot("backlinks_light");
+    Ok(())
+}
+
 fn links_snapshot(name: &str, picker: bool) -> anyhow::Result<()> {
     if !enabled() {
         return Ok(());

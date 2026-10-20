@@ -118,7 +118,7 @@ pub(super) fn heading_space(kind: BlockKind) -> f32 {
 }
 
 /// Indents a row (title, menus, buttons) to where block text starts.
-fn gutter_space(ui: &mut egui::Ui) {
+pub(super) fn gutter_space(ui: &mut egui::Ui) {
     ui.add_space(GUTTER + ui.spacing().item_spacing.x);
 }
 
@@ -1180,6 +1180,7 @@ impl SilexApp {
         let mut edit: Option<EditKind> = None;
         let mut block_action: Option<(BlockAction, String)> = None;
         let mut hovered = None;
+        let mut open_backlink = None;
         let pointer = ui.ctx().pointer_hover_pos();
         egui::ScrollArea::vertical()
             .id_salt("silex_editor_blocks")
@@ -1331,6 +1332,8 @@ impl SilexApp {
                                 self.mark_dirty();
                             }
                         });
+                        // The pages that link here (H7.6).
+                        open_backlink = self.backlinks_section(ui);
                         ui.add_space(theme::space::XXL);
                     });
                 });
@@ -1341,6 +1344,10 @@ impl SilexApp {
         }
         if let Some((action, id)) = block_action {
             self.block_action(action, &id);
+        }
+        if let Some(id) = open_backlink {
+            let result = self.open_page(id);
+            self.report(result);
         }
     }
 

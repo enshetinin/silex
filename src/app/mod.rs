@@ -253,7 +253,7 @@ impl SilexApp {
             self.expanded.extend(ancestors(&self.pages, &id));
             self.selected = Some(id);
             self.links.picker = None;
-            self.load_link_targets()?;
+            self.load_links()?;
             self.rebuild_tree();
         }
         Ok(())
@@ -262,7 +262,7 @@ impl SilexApp {
     fn reload_pages(&mut self) -> Result<()> {
         self.pages = self.db.list_pages()?;
         // A linked page may have gone to the trash, or come back.
-        self.load_link_targets()?;
+        self.load_links()?;
         self.trash_count = self.db.trash_count()?;
         self.favorites = self.db.list_favorites()?;
         self.rebuild_tree();

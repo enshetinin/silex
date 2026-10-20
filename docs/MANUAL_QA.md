@@ -199,3 +199,11 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - Envía la página enlazada a la papelera: la tarjeta la muestra tachada «en la papelera». Ábrela: pregunta si restaurarla; «Restaurar y abrir» la devuelve y la abre.
 - «Exportar todo a Markdown»: en la carpeta exportada, abre el `.md` de una página con enlaces en un visor de Markdown: el enlace abre el `.md` de la otra página, también en subcarpetas.
 - «…» → «Exportar a Markdown» de una sola página: los enlaces salen como texto.
+
+## 22. Backlinks (H7.6)
+- Enlaza «Recetas» desde dos páginas y desde una fila de una base. Abre «Recetas»: al final aparece «Enlazada desde» con las tres, en orden alfabético, con su ruta en gris (la fila, con el nombre de su base).
+- Una página con dos enlaces a «Recetas» aparece una sola vez. Una página sin enlaces hacia ella no muestra la sección.
+- Clic en una de ellas: se abre. Con Tab hasta una y con Intro, también.
+- Envía a la papelera una de las páginas que enlazan y vuelve a «Recetas»: ya no aparece. Restáurala: vuelve.
+- Renombra una de las páginas que enlazan: la sección muestra el título nuevo.
+- Con VoiceOver: cada fila se anuncia como enlace con el título de la página.

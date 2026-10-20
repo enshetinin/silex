@@ -55,6 +55,8 @@ pub(super) struct Links {
     pub(super) picker: Option<LinkPicker>,
     /// A page in the trash the user wants to open: asked first.
     pub(super) restore: Option<(String, String)>,
+    /// The live pages that link to the open one («Enlazada desde», H7.6).
+    pub(super) backlinks: Vec<String>,
 }
 
 /// «Proyecto › Diseño»: the titles above a page, root first.
@@ -202,19 +204,39 @@ pub(super) fn link_card(
     (response, action)
 }
 
-/// One page in the picker: icon, title and path in gray, the whole width.
-fn picker_row(ui: &mut egui::Ui, page: &Page, path: &str, selected: bool) -> egui::Response {
+/// The pages of «Enlazada desde» with their paths: those of `ids` still
+/// live, by title (without accents or case), then by path.
+pub(super) fn backlink_rows<'a>(pages: &'a [Page], ids: &[String]) -> Vec<(&'a Page, String)> {
+    let mut rows: Vec<(String, &Page, String)> = ids
+        .iter()
+        .filter_map(|id| pages.iter().find(|p| p.id == *id))
+        .map(|p| (fold(display_title(&p.title)), p, page_path(pages, &p.id)))
+        .collect();
+    rows.sort_by(|a, b| (&a.0, &a.2).cmp(&(&b.0, &b.2)));
+    rows.into_iter().map(|(_, p, path)| (p, path)).collect()
+}
+
+/// One page in a list: icon, title and path in gray, the whole width.
+/// `role` is a button in the picker and a link under the page.
+fn page_row(
+    ui: &mut egui::Ui,
+    page: &Page,
+    path: &str,
+    selected: bool,
+    role: egui::Role,
+) -> egui::Response {
     let p = theme::current(ui.ctx());
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
     let title = display_title(&page.title);
-    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, title));
+    response.widget_info(|| egui::WidgetInfo::selected(role, true, selected, title));
     let radius = egui::CornerRadius::same(theme::radius::SM);
     if selected {
         ui.painter().rect_filled(rect, radius, p.accent_soft);
-    } else if response.hovered() {
+    } else if response.hovered() || response.has_focus() {
         ui.painter().rect_filled(rect, radius, p.subtle);
     }
+    focus_ring(ui, rect, &response);
     let icon = if page.kind == PageKind::Database {
         icons::TABLE
     } else {
@@ -253,18 +275,63 @@ fn picker_row(ui: &mut egui::Ui, page: &Page, path: &str, selected: bool) -> egu
 
 impl SilexApp {
     /// What the database knows of the pages the open page links to (to
-    /// tell those in the trash).
-    pub(super) fn load_link_targets(&mut self) -> Result<()> {
-        self.links.targets = match &self.selected {
-            Some(page) => self
-                .db
-                .page_link_targets(page)?
-                .into_iter()
-                .map(|t| (t.id.clone(), t))
-                .collect(),
-            None => HashMap::new(),
+    /// tell those in the trash), and of the pages that link to it.
+    pub(super) fn load_links(&mut self) -> Result<()> {
+        let Some(page) = &self.selected else {
+            self.links.targets.clear();
+            self.links.backlinks.clear();
+            return Ok(());
         };
+        self.links.targets = self
+            .db
+            .page_link_targets(page)?
+            .into_iter()
+            .map(|t| (t.id.clone(), t))
+            .collect();
+        self.links.backlinks = self.db.backlinks(page)?;
         Ok(())
+    }
+
+    /// «Enlazada desde»: the live pages that link to the open one, under
+    /// its blocks; nothing if there are none. Returns the page clicked.
+    pub(super) fn backlinks_section(&self, ui: &mut egui::Ui) -> Option<String> {
+        let rows = backlink_rows(&self.pages, &self.links.backlinks);
+        if rows.is_empty() {
+            return None;
+        }
+        let p = theme::current(ui.ctx());
+        let mut open = None;
+        ui.add_space(theme::space::XL);
+        ui.horizontal_top(|ui| {
+            gutter_space(ui);
+            ui.vertical(|ui| {
+                ui.separator();
+                ui.add_space(theme::space::SM);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Enlazada desde")
+                            .text_style(egui::TextStyle::Small)
+                            .strong()
+                            .color(p.text_muted),
+                    );
+                    ui.label(
+                        egui::RichText::new(rows.len().to_string())
+                            .text_style(egui::TextStyle::Small)
+                            .color(p.text_faint),
+                    );
+                });
+                ui.add_space(theme::space::XS);
+                for (page, path) in &rows {
+                    if page_row(ui, page, path, false, egui::Role::Link)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        open = Some(page.id.clone());
+                    }
+                }
+            });
+        });
+        open
     }
 
     /// Opens the page a link points at; one in the trash is offered for
@@ -440,7 +507,8 @@ impl SilexApp {
                 .show(ui, |ui| {
                     for (i, page) in matches.iter().enumerate() {
                         let path = page_path(pages, &page.id);
-                        let row = picker_row(ui, page, &path, i == picker.selected);
+                        let row =
+                            page_row(ui, page, &path, i == picker.selected, egui::Role::Button);
                         if i == picker.selected {
                             row.scroll_to_me(None);
                         }
@@ -546,6 +614,32 @@ mod tests {
         assert_eq!(titles("", None).len(), 5);
         assert_eq!(page_path(&pages, "3"), "Recetas");
         assert_eq!(page_path(&pages, "1"), "");
+    }
+
+    #[test]
+    fn backlinks_go_by_title_without_accents_and_skip_pages_not_live() {
+        let pages = vec![
+            page("1", "Recetas", None),
+            page("2", "Pan", Some("1")),
+            page("3", "Árbol", None),
+            page("4", "zumos", None),
+            page("5", "Pan", None),
+        ];
+        let ids: Vec<String> = ["4", "2", "9", "3", "5"].map(String::from).into();
+        let rows: Vec<(&str, String)> = backlink_rows(&pages, &ids)
+            .into_iter()
+            .map(|(p, path)| (p.id.as_str(), path))
+            .collect();
+        // «9» is not live (in the trash, or gone); same titles by path.
+        assert_eq!(
+            rows,
+            [
+                ("3", String::new()),
+                ("5", String::new()),
+                ("2", "Recetas".to_owned()),
+                ("4", String::new()),
+            ]
+        );
     }
 
     #[test]

@@ -120,6 +120,108 @@ fn impossible_links_are_refused() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- Backlinks (H7.6) ----
+
+#[test]
+fn backlinks_list_the_live_pages_that_link_once_each() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let (diario, recetas, _) = linked(&mut db)?;
+    assert!(db.backlinks(&diario)?.is_empty(), "nobody links to it");
+
+    // Two links from one page count once; titles in order.
+    let agenda = db.create_page("Agenda", None)?;
+    db.save_document(
+        &agenda,
+        "Agenda",
+        &[
+            block(&agenda, BlockKind::PageLink, "", Some(&recetas)),
+            block(&agenda, BlockKind::PageLink, "", Some(&recetas)),
+        ],
+    )?;
+    // A row of a database links too (rows are pages).
+    let base = db.create_database("Lecturas", None)?;
+    let fila = db.create_row(&base, "Zumos")?;
+    db.save_document(
+        &fila,
+        "Zumos",
+        &[block(&fila, BlockKind::PageLink, "", Some(&recetas))],
+    )?;
+    // A link to itself is not a backlink.
+    db.save_document(
+        &recetas,
+        "Recetas",
+        &[block(&recetas, BlockKind::PageLink, "", Some(&recetas))],
+    )?;
+    assert_eq!(
+        db.backlinks(&recetas)?,
+        [agenda.clone(), diario.clone(), fila]
+    );
+
+    // A page in the trash is not shown, and is again once restored; the
+    // trashed database takes its row with it.
+    db.trash_page(&diario)?;
+    db.trash_page(&base)?;
+    assert_eq!(db.backlinks(&recetas)?, std::slice::from_ref(&agenda));
+    db.restore_page(&diario)?;
+    assert_eq!(db.backlinks(&recetas)?, [agenda.clone(), diario.clone()]);
+
+    // Removing the link removes the backlink.
+    db.save_document(&agenda, "Agenda", &[])?;
+    assert_eq!(db.backlinks(&recetas)?, [diario]);
+    // A page that links nowhere, or does not exist, has none.
+    assert!(db.backlinks("no-existe")?.is_empty());
+    Ok(())
+}
+
+/// Manual: `cargo test --release --test page_links -- --ignored --nocapture`.
+/// 1000 pages and 10 000 links; prints timings, never fails on speed.
+#[test]
+#[ignore = "scale smoke test; run manually"]
+fn backlinks_scale_smoke() -> anyhow::Result<()> {
+    use std::time::Instant;
+    let mut db = Database::open_in_memory()?;
+    let mut ids = Vec::new();
+    for n in 0..1000 {
+        ids.push(db.create_page(&format!("Página {n}"), None)?);
+    }
+    let start = Instant::now();
+    for (n, page) in ids.iter().enumerate() {
+        // 10 links per page; page 0 is linked from every page.
+        let blocks: Vec<Block> = (0..10)
+            .map(|k| {
+                let target = if k == 0 { 0 } else { (n * 7 + k * 131) % 1000 };
+                block(page, BlockKind::PageLink, "", Some(&ids[target]))
+            })
+            .collect();
+        db.save_document(page, &format!("Página {n}"), &blocks)?;
+    }
+    println!("guardar 10 000 enlaces: {:?}", start.elapsed());
+
+    let t = Instant::now();
+    let popular = db.backlinks(&ids[0])?;
+    println!(
+        "backlinks de la página más enlazada ({}): {:?}",
+        popular.len(),
+        t.elapsed()
+    );
+    assert_eq!(popular.len(), 999);
+
+    let t = Instant::now();
+    let mut total = 0;
+    for id in &ids[1..101] {
+        total += db.backlinks(id)?.len();
+    }
+    println!(
+        "backlinks de 100 páginas ({total} en total): {:?}",
+        t.elapsed()
+    );
+
+    let t = Instant::now();
+    db.rename_page(&ids[0], "Portada")?;
+    println!("renombrar la página más enlazada: {:?}", t.elapsed());
+    Ok(())
+}
+
 // ---- Markdown export ----
 
 #[test]

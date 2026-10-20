@@ -46,6 +46,7 @@ Requisitos:
 - **El bloque de enlace** es una tarjeta enfocable con el icono de la página (o de la base de datos), su título actual y su ruta («Proyecto › Diseño») en gris. Un clic o Intro abre la página destino, y Retroceso/Supr la borran (Cmd+Z la devuelve), como el bloque `file`.
 - **Destino en la papelera:** la tarjeta lo dice («en la papelera») y abrirla ofrece restaurarla. El enlace vuelve a funcionar al restaurarla, porque nunca se rompió.
 - **Backlinks:** al final de cada página, una sección «Enlazada desde» lista las páginas vivas que la enlazan (título y ruta, en orden alfabético), sin las que están en la papelera. Un clic las abre. Si no hay ninguna, la sección no aparece. Se lee al abrir la página (una consulta indexada).
+  - *Actualización (H7.6):* también se relee al mandar a la papelera, restaurar, mover o renombrar páginas, así que la lista no se queda vieja. Una página que se enlaza a sí misma no aparece. Intro sobre una fila enfocada también la abre. Una base de datos muestra su tabla en lugar de bloques y no tiene la sección: sus filas sí.
 - **Bases de datos:** se puede enlazar a una base o a una fila (son páginas), y una fila muestra sus backlinks bajo sus bloques.
 - **Deshacer:** el bloque entra y sale del documento como cualquier otro (ADR 0004).
 
