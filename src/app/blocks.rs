@@ -1262,7 +1262,7 @@ impl SilexApp {
             ui.ctx().request_repaint();
             return;
         }
-        self.top_bar(ui, &page_id);
+        self.page_actions(ui, &page_id);
         if self.selected.as_deref() != Some(page_id.as_str()) {
             // The page was trashed (or another opened) from the top bar.
             return;
@@ -1323,6 +1323,17 @@ impl SilexApp {
                     ui.set_width(width);
                     ui.add_space(theme::space::XL);
                     edit = self.page_title(ui, &page_id);
+                    // A grey line under the title, as in the window's chrome.
+                    let words = silex_desktop::model::word_count(&self.blocks);
+                    let words = if words == 1 {
+                        "1 palabra".to_owned()
+                    } else {
+                        format!("{words} palabras")
+                    };
+                    ui.horizontal(|ui| {
+                        gutter_space(ui);
+                        ui.label(egui::RichText::new(words).size(13.0).color(p.text_muted));
+                    });
                     // A row of a database shows its properties (H6.2b).
                     if self.row_page.is_some() {
                         ui.add_space(theme::space::SM);
@@ -1514,40 +1525,17 @@ impl SilexApp {
 
     /// Breadcrumbs on the left; save state, undo/redo, favorite and the
     /// page menu on the right.
-    fn top_bar(&mut self, ui: &mut egui::Ui, page_id: &str) {
+    fn page_actions(&mut self, ui: &mut egui::Ui, page_id: &str) {
         let p = theme::current(ui.ctx());
         let mut action: Option<RowAction> = None;
         let mut extra: Option<&'static str> = None;
         let mut restore_property: Option<String> = None;
-        let ancestors: Vec<(String, String)> = ancestors(&self.pages, page_id)
-            .into_iter()
-            .rev()
-            .filter_map(|id| {
-                self.pages
-                    .iter()
-                    .find(|p| p.id == id)
-                    .map(|p| (id, display_title(&p.title).to_owned()))
-            })
-            .collect();
         let is_favorite = self.favorites.iter().any(|p| p.id == page_id);
         let template = self.template_open();
-        let ghost = |text: egui::RichText| egui::Button::new(text).frame_when_inactive(false);
+        // The page's path is in the window's top bar (`frame.rs`); here,
+        // the page's actions at the right.
         ui.horizontal(|ui| {
-            ui.set_min_height(32.0);
-            for (id, title) in &ancestors {
-                if ui
-                    .add(ghost(egui::RichText::new(title).color(p.text_muted)))
-                    .clicked()
-                {
-                    action = Some(RowAction::Open(id.clone()));
-                }
-                ui.label(
-                    icons::icon(icons::CARET_RIGHT)
-                        .size(14.0)
-                        .color(p.text_faint),
-                );
-            }
-            ui.label(egui::RichText::new(display_title(&self.title)).color(p.text));
+            ui.set_min_height(icons::BUTTON);
             // A template says so, and offers to make a page from it (ADR 0010).
             if template {
                 egui::Frame::new()
@@ -1570,10 +1558,14 @@ impl SilexApp {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let more = ui
-                    .add(ghost(icons::icon(icons::DOTS_THREE).color(p.text_muted)))
-                    .on_hover_text("Más acciones")
-                    .accessible_name("Más acciones de la página");
+                let more = icons::button(
+                    ui,
+                    true,
+                    icons::DOTS_THREE,
+                    p.text_muted,
+                    "Más acciones de la página",
+                    None,
+                );
                 egui::Popup::menu(&more).show(|ui| {
                     if let Some(chosen) = self.page_menu(ui, page_id) {
                         action = Some(chosen);
@@ -1616,11 +1608,7 @@ impl SilexApp {
                 };
                 // A template cannot be a favorite (ADR 0010).
                 if !template
-                    && ui
-                        .add(ghost(icons::icon(icons::STAR).color(star_color)))
-                        .on_hover_text(star_tip)
-                        .accessible_name(star_tip)
-                        .clicked()
+                    && icons::button(ui, true, icons::STAR, star_color, star_tip, None).clicked()
                 {
                     action = Some(RowAction::Favorite(page_id.to_owned(), !is_favorite));
                 }
@@ -1631,14 +1619,16 @@ impl SilexApp {
                     None => (self.history.can_undo(), self.history.can_redo()),
                 };
                 let table = table.is_some();
-                if ui
-                    .add_enabled(
-                        can_redo,
-                        ghost(icons::icon(icons::REDO).color(p.text_muted)),
-                    )
-                    .on_hover_text("Rehacer")
-                    .accessible_name("Rehacer")
-                    .clicked()
+                use egui::{Key, KeyboardShortcut as Sc, Modifiers as M};
+                if icons::button(
+                    ui,
+                    can_redo,
+                    icons::REDO,
+                    p.text_muted,
+                    "Rehacer",
+                    Some(Sc::new(M::COMMAND | M::SHIFT, Key::Z)),
+                )
+                .clicked()
                 {
                     if table {
                         self.redo_table();
@@ -1646,14 +1636,15 @@ impl SilexApp {
                         self.redo();
                     }
                 }
-                if ui
-                    .add_enabled(
-                        can_undo,
-                        ghost(icons::icon(icons::UNDO).color(p.text_muted)),
-                    )
-                    .on_hover_text("Deshacer")
-                    .accessible_name("Deshacer")
-                    .clicked()
+                if icons::button(
+                    ui,
+                    can_undo,
+                    icons::UNDO,
+                    p.text_muted,
+                    "Deshacer",
+                    Some(Sc::new(M::COMMAND, Key::Z)),
+                )
+                .clicked()
                 {
                     if table {
                         self.undo_table();
@@ -1661,13 +1652,8 @@ impl SilexApp {
                         self.undo();
                     }
                 }
-                ui.add_space(theme::space::SM);
-                self.status_bar(ui);
             });
         });
-        let line = ui.available_rect_before_wrap();
-        ui.painter()
-            .hline(line.x_range(), line.top(), egui::Stroke::new(1.0, p.border));
         if let Some(property) = restore_property {
             let result = self.restore_property(&property);
             self.report(result);

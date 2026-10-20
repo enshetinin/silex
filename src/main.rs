@@ -11,7 +11,8 @@ fn main() -> Result<()> {
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Silex")
         .with_app_id(app::APP_ID)
-        .with_inner_size([1100.0, 760.0]);
+        .with_inner_size([1100.0, 760.0])
+        .with_min_inner_size(app::MIN_WINDOW);
     if let Some(icon) = app::window_icon() {
         viewport = viewport.with_icon(icon);
     }

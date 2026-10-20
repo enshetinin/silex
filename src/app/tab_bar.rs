@@ -16,7 +16,9 @@ pub(super) struct Parked {
 }
 
 /// Height of the tab bar.
-const TAB_HEIGHT: f32 = 30.0;
+const TAB_HEIGHT: f32 = 26.0;
+/// Space between the track's edge and the tabs.
+const TRACK_PAD: f32 = 3.0;
 /// Widest a tab gets.
 const TAB_MAX_WIDTH: f32 = 200.0;
 
@@ -86,10 +88,20 @@ impl SilexApp {
         let p = theme::current(ui.ctx());
         let mut action = None;
         let count = self.tabs.len() as f32;
+        // A segmented control: the tabs sit in a track, inset by PAD, and
+        // the open one is a raised chip.
         let spacing = 2.0;
-        let width = ((ui.available_width() - spacing * (count - 1.0)) / count).min(TAB_MAX_WIDTH);
+        // Each tab as wide as its title, up to an equal share of the row.
+        let max_width = ((ui.available_width() - 2.0 * TRACK_PAD - spacing * (count - 1.0))
+            / count)
+            .min(TAB_MAX_WIDTH);
+        let font = egui::FontId::proportional(13.0);
+        let track = ui.painter().add(egui::Shape::Noop);
+        ui.add_space(TRACK_PAD);
+        let dark = ui.visuals().dark_mode;
         let row = ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = spacing;
+            ui.add_space(TRACK_PAD);
             for (index, id) in self.tabs.ids().iter().enumerate() {
                 let active = index == self.tabs.active();
                 // The open page's title as it is being typed.
@@ -102,31 +114,31 @@ impl SilexApp {
                     }
                 };
                 let title = display_title(&title).to_owned();
+                // Icon, title and room for «×» (kept on every tab, so a tab
+                // does not change width under the pointer).
+                let text = ui.fonts_mut(|f| {
+                    f.layout_no_wrap(title.clone(), font.clone(), p.text)
+                        .size()
+                        .x
+                });
+                let width = (8.0 + theme::icon::MD + 6.0 + text + 6.0 + 20.0 + 4.0).min(max_width);
                 let (rect, response) =
                     ui.allocate_exact_size(egui::vec2(width, TAB_HEIGHT), egui::Sense::click());
                 response.widget_info(|| {
                     egui::WidgetInfo::selected(egui::Role::Tab, true, active, &title)
                 });
-                let radius = egui::CornerRadius {
-                    nw: theme::radius::MD,
-                    ne: theme::radius::MD,
-                    sw: 0,
-                    se: 0,
-                };
-                let fill = if active {
-                    p.bg
-                } else if response.hovered() {
-                    p.subtle
-                } else {
-                    p.sidebar_bg
-                };
-                ui.painter().rect_filled(rect, radius, fill);
+                let radius = egui::CornerRadius::same(theme::radius::MD);
                 if active {
-                    ui.painter().hline(
-                        rect.x_range(),
-                        rect.top() + 1.0,
-                        egui::Stroke::new(2.0, p.accent),
+                    let chip = if dark { p.pressed } else { p.bg };
+                    ui.painter().rect(
+                        rect,
+                        radius,
+                        chip,
+                        egui::Stroke::new(1.0, p.border),
+                        egui::StrokeKind::Inside,
                     );
+                } else if response.hovered() {
+                    ui.painter().rect_filled(rect, radius, p.pressed);
                 }
                 focus_ring(ui, rect, &response);
                 let icon = if kind == Some(PageKind::Database) {
@@ -152,10 +164,10 @@ impl SilexApp {
                 } else {
                     rect.right() - 8.0
                 };
-                let left = at.right() + theme::space::XS;
+                let left = at.right() + 6.0;
                 let mut job = egui::text::LayoutJob::simple_singleline(
                     title.clone(),
-                    egui::TextStyle::Body.resolve(ui.style()),
+                    font.clone(),
                     if active { p.text } else { p.text_muted },
                 );
                 job.wrap = egui::text::TextWrapping::truncate_at_width((right - left).max(0.0));
@@ -203,12 +215,22 @@ impl SilexApp {
                 }
             }
         });
-        // A line under the tabs, across the page.
-        let line = row.response.rect;
-        ui.painter().hline(
-            ui.max_rect().x_range(),
-            line.bottom(),
-            egui::Stroke::new(1.0, p.border),
+        ui.add_space(TRACK_PAD);
+        // The track behind the tabs, drawn under them.
+        let rect = row
+            .response
+            .rect
+            .expand2(egui::vec2(0.0, TRACK_PAD))
+            .with_max_x(row.response.rect.right() + TRACK_PAD - spacing);
+        ui.painter().set(
+            track,
+            egui::epaint::RectShape::new(
+                rect,
+                egui::CornerRadius::same(theme::radius::MD + 2),
+                p.subtle,
+                egui::Stroke::new(1.0, p.border),
+                egui::StrokeKind::Inside,
+            ),
         );
         let result = match action {
             Some(TabAction::Select(index)) => self.select_tab(index),

@@ -42,7 +42,9 @@ pub(super) enum RowAction {
 }
 
 /// Height of every sidebar row.
-const ROW_HEIGHT: f32 = 28.0;
+const ROW_HEIGHT: f32 = 30.0;
+/// From a row's icon to its label (16 px icon + 10 px).
+const ICON_TO_LABEL: f32 = 26.0;
 /// Width of the caret slot before a row's icon.
 const CARET_SLOT: f32 = 22.0;
 /// Indent per tree level: one caret slot, so a child's caret sits under
@@ -52,6 +54,11 @@ const ROW_INDENT: f32 = CARET_SLOT;
 /// Dark sidebar styling for this `Ui` (popups opened from it keep the
 /// normal theme, since they live on their own layer).
 fn sidebar_style(ui: &mut egui::Ui, p: &theme::Palette) {
+    // Compact text, as in the rest of the window's chrome.
+    let style = ui.style_mut();
+    style
+        .text_styles
+        .insert(egui::TextStyle::Body, egui::FontId::proportional(13.0));
     let v = ui.visuals_mut();
     v.override_text_color = Some(p.sidebar_text);
     v.weak_text_color = Some(p.sidebar_muted);
@@ -87,22 +94,36 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
 /// Section title with a "+" at the right; returns the "+" button.
 fn section_header_with_add(ui: &mut egui::Ui, title: &str, tooltip: &str) -> egui::Response {
     ui.add_space(theme::space::XS);
-    let button = ui
-        .horizontal(|ui| {
-            ui.add_space(theme::space::SM);
-            ui.label(egui::RichText::new(title).small().weak());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(
-                    egui::Button::new(icons::icon(icons::PLUS).weak()).frame_when_inactive(false),
-                )
-                .on_hover_text(tooltip)
-                .accessible_name(tooltip)
-            })
-            .inner
-        })
-        .inner;
+    // Laid out by hand like the rows, so "+" shares the centre of the rows'
+    // "…" button (row edge − 16 px) and the title lines up with their icons.
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), icons::BUTTON),
+        egui::Sense::hover(),
+    );
+    let p = theme::current(ui.ctx());
+    ui.painter().text(
+        egui::pos2(rect.left() + theme::space::SM, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::TextStyle::Small.resolve(ui.style()),
+        p.sidebar_muted,
+    );
+    let button = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - 16.0, rect.center().y),
+        egui::Vec2::splat(icons::BUTTON),
+    );
+    // A child Ui: placing the button does not move this Ui's cursor.
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(button));
+    let response = icons::button(
+        &mut child,
+        true,
+        icons::PLUS,
+        p.sidebar_muted,
+        tooltip,
+        None,
+    );
     ui.add_space(2.0);
-    button
+    response
 }
 
 /// What a sidebar row shows.
@@ -173,22 +194,6 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
     };
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(theme::radius::MD), fill);
-    if parts.selected {
-        // Selected page: an accent bar along the left edge, following the
-        // row's rounded corners.
-        let bar = egui::Rect::from_min_size(rect.left_top(), egui::vec2(3.0, rect.height()));
-        let r = theme::radius::MD;
-        ui.painter().rect_filled(
-            bar,
-            egui::CornerRadius {
-                nw: r,
-                sw: r,
-                ne: 0,
-                se: 0,
-            },
-            p.sidebar_selected_text,
-        );
-    }
     if row.has_focus() {
         // Keyboard focus: an outline, distinct from hover and selection.
         ui.painter().rect_stroke(
@@ -259,7 +264,7 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
             p.sidebar_muted
         },
     );
-    x += 26.0;
+    x += ICON_TO_LABEL;
 
     let mut right = rect.right() - theme::space::XS;
     let (mut plus, mut more) = (None, None);
@@ -675,26 +680,8 @@ impl SilexApp {
         let p = theme::current(ui.ctx());
         sidebar_style(ui, p);
 
-        ui.label(
-            egui::RichText::new("Silex")
-                .text_style(egui::TextStyle::Name(theme::text::H3.into()))
-                .color(p.sidebar_text),
-        );
-        ui.add_space(theme::space::MD);
-        let new_page = ui.add_sized(
-            [ui.available_width(), 32.0],
-            egui::Button::new((
-                icons::icon(icons::PLUS).color(p.on_accent),
-                egui::RichText::new("Nueva página").color(p.on_accent),
-            ))
-            .fill(p.accent_strong)
-            .corner_radius(theme::radius::MD),
-        );
-        if new_page.clicked() {
-            let result = self.create_root_page("Sin título");
-            self.report(result);
-        }
-        ui.add_space(theme::space::SM);
+        // «Silex» is in the window's top bar; a new page is «Páginas +»
+        // (or Cmd+N).
         self.search_button(ui, p);
         ui.add_space(theme::space::MD);
 
@@ -743,16 +730,53 @@ impl SilexApp {
 
     /// Looks like a search box; opens the search window (also Cmd+K).
     fn search_button(&mut self, ui: &mut egui::Ui, p: &theme::Palette) {
-        let hint = format!("{}+K", cmd_label(ui.ctx()));
-        let button = ui.add(
-            egui::Button::new((
-                icons::icon(icons::SEARCH).color(p.sidebar_muted),
-                egui::RichText::new("Buscar").color(p.sidebar_muted),
-            ))
-            .shortcut_text(egui::RichText::new(hint).small().color(p.sidebar_muted))
-            .fill(p.sidebar_hover)
-            .corner_radius(theme::radius::MD)
-            .min_size(egui::vec2(ui.available_width(), 32.0)),
+        // Painted like a row (icon and text where the rows have theirs),
+        // with a 1 px border instead of a fill.
+        let (rect, button) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ROW_HEIGHT),
+            egui::Sense::click(),
+        );
+        button.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Buscar"));
+        let active = button.hovered() || button.has_focus();
+        let radius = egui::CornerRadius::same(theme::radius::MD);
+        if active {
+            ui.painter().rect_filled(rect, radius, p.sidebar_hover);
+        }
+        ui.painter().rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(
+                1.0,
+                if button.has_focus() {
+                    p.accent
+                } else {
+                    p.border
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+        let cy = rect.center().y;
+        let x = rect.left() + theme::space::SM;
+        ui.painter().text(
+            egui::pos2(x, cy),
+            egui::Align2::LEFT_CENTER,
+            icons::SEARCH,
+            icons::font(theme::icon::MD),
+            p.sidebar_muted,
+        );
+        ui.painter().text(
+            egui::pos2(x + ICON_TO_LABEL, cy),
+            egui::Align2::LEFT_CENTER,
+            "Buscar",
+            egui::TextStyle::Body.resolve(ui.style()),
+            p.sidebar_muted,
+        );
+        ui.painter().text(
+            egui::pos2(rect.right() - theme::space::SM, cy),
+            egui::Align2::RIGHT_CENTER,
+            format!("{}+K", cmd_label(ui.ctx())),
+            egui::TextStyle::Small.resolve(ui.style()),
+            p.sidebar_muted,
         );
         if button.clicked() {
             self.open_search(ui.ctx());
@@ -822,10 +846,6 @@ impl SilexApp {
         );
         egui::Popup::menu(&shortcuts.row).show(Self::shortcuts_help);
 
-        let settings = sidebar_row(ui, &RowParts::nav(icons::SETTINGS, "Ajustes", None));
-        egui::Popup::menu(&settings.row)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| self.settings_menu(ui));
         let _ = p;
     }
 
@@ -885,7 +905,10 @@ impl SilexApp {
                     (format!("{cmd}+S"), "Guardar ahora"),
                     (format!("{cmd}+Z / {cmd}+Mayús+Z"), "Deshacer / rehacer"),
                     ("/".to_owned(), "Cambiar el tipo de bloque"),
-                    ("Arrastrar el asa".to_owned(), "Mover el bloque (Esc cancela)"),
+                    (
+                        "Arrastrar el asa".to_owned(),
+                        "Mover el bloque (Esc cancela)",
+                    ),
                     ("Clic derecho".to_owned(), "Acciones de una página"),
                     (
                         format!("{cmd}+ / {cmd}− / {cmd}+0"),

@@ -19,6 +19,7 @@ mod date_picker;
 mod dialogs;
 mod document;
 mod files;
+mod frame;
 pub mod icons;
 mod jobs;
 mod links;
@@ -53,6 +54,11 @@ use self::{
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
 /// entry the Linux packages install (`silex-desktop.desktop`, ADR 0005).
 pub const APP_ID: &str = "silex-desktop";
+
+/// Smallest window at 100 % (logical points): the sidebar at its narrowest
+/// (220) and a page at its narrowest (`MIN_PAGE_WIDTH`, 480) with its
+/// margins. Scaled with the interface size, so a zoomed page still fits.
+pub const MIN_WINDOW: egui::Vec2 = egui::vec2(760.0, 480.0);
 
 /// The app icon for the window, taskbar and (unbundled) macOS Dock.
 /// `None` if the embedded image cannot be read: the app starts anyway.
@@ -156,6 +162,8 @@ pub struct SilexApp {
     side: Option<SidePanel>,
     /// Width left of the window after the sidebar, as of the last frame.
     main_width: f32,
+    /// Interface size the window's minimum size was last set for.
+    min_window_zoom: u16,
     /// The database is in a synced folder: warned at start (ADR 0012).
     synced_warning: Option<SyncedWarning>,
     slash: Option<SlashMenu>,
@@ -253,6 +261,7 @@ impl SilexApp {
             click_modifiers: egui::Modifiers::NONE,
             side: None,
             main_width: 0.0,
+            min_window_zoom: 100,
             synced_warning: None,
             slash: None,
             slash_dismissed: None,
@@ -708,6 +717,13 @@ impl SilexApp {
             };
             self.set_settings(ctx, settings);
         }
+        // The window's minimum size follows the interface size.
+        if zoom != self.min_window_zoom {
+            self.min_window_zoom = zoom;
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(
+                MIN_WINDOW * f32::from(zoom) / 100.0,
+            ));
+        }
     }
 
     fn report<T>(&mut self, result: Result<T>) {
@@ -719,6 +735,12 @@ impl SilexApp {
     /// Sidebar and editor columns.
     fn layout(&mut self, ui: &mut egui::Ui) {
         let p = theme::current(ui.ctx());
+        egui::Panel::top("silex_top_bar")
+            .exact_size(frame::TOP_BAR)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(p.bg))
+            .show(ui, |ui| self.window_bar(ui));
         egui::Panel::left("silex_sidebar")
             .resizable(true)
             .default_size(260.0)
@@ -735,7 +757,7 @@ impl SilexApp {
             .frame(
                 egui::Frame::new()
                     .fill(p.bg)
-                    .inner_margin(egui::Margin::symmetric(24, 16)),
+                    .inner_margin(egui::Margin::symmetric(24, 14)),
             )
             .show(ui, |ui| self.editor(ui));
     }

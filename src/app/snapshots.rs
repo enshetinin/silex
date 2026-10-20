@@ -2111,3 +2111,52 @@ fn links_snapshot(name: &str, picker: bool) -> anyhow::Result<()> {
     harness.snapshot(name);
     Ok(())
 }
+
+// ---- A database next to the page beside ----
+
+/// A board next to the page beside, with the page at its minimum width:
+/// the view toolbar must not overlap or spill under the sidebar, and
+/// nothing may be pushed past the window's right edge.
+#[test]
+fn a_narrow_database_beside_a_page_keeps_its_toolbar_and_the_window() -> anyhow::Result<()> {
+    const WIDTH: f32 = 1100.0;
+    let (mut app, _) = board_app()?;
+    let base = app.selected.clone().unwrap_or_default();
+    app.main_width = 1000.0;
+    app.open_beside(&base)?;
+    let mut harness = Harness::builder()
+        .with_size([WIDTH, 760.0])
+        .with_theme(eframe::egui::Theme::Dark)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    // The toolbar measures itself on the first frames.
+    for _ in 0..5 {
+        harness.run();
+    }
+    if enabled() {
+        harness.snapshot("database_beside_dark");
+    }
+
+    // Nothing past the window: the top bar's settings and the panel's «×».
+    for label in ["Ajustes", "Cerrar el panel lateral"] {
+        let rect = harness.get_by_label(label).rect();
+        assert!(rect.right() <= WIDTH, "{label}: {rect:?}");
+    }
+    // The view tabs and the view's menus do not overlap, and the menus
+    // stay inside the page (not under the sidebar).
+    let tabs: Vec<_> = harness
+        .get_all_by_label_contains("Vista «")
+        .map(|n| n.rect())
+        .collect();
+    assert!(!tabs.is_empty());
+    for menu in ["Agrupar", "Propiedades", "Ordenar"] {
+        let menu = harness.get_by_label_contains(menu).rect();
+        assert!(
+            tabs.iter().all(|tab| !tab.intersects(menu)),
+            "{tabs:?} {menu:?}"
+        );
+        assert!(menu.left() >= tabs[0].left(), "{menu:?}");
+    }
+    Ok(())
+}

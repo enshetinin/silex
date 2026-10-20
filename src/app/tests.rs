@@ -4052,3 +4052,38 @@ fn a_database_in_a_synced_folder_is_warned_about_until_told_not_to() -> anyhow::
     assert!(app.synced_warning.is_none());
     Ok(())
 }
+
+/// The window's minimum size follows the interface size, so a zoomed
+/// sidebar and page still fit side by side.
+#[test]
+fn the_window_minimum_grows_with_the_interface_size() -> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let min_sizes = |ctx: &egui::Context, app: &mut SilexApp| -> Vec<egui::Vec2> {
+        let input = egui::RawInput::default();
+        let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+        output.textures_delta.clear();
+        output
+            .viewport_output
+            .values()
+            .flat_map(|v| v.commands.iter())
+            .filter_map(|c| match c {
+                egui::ViewportCommand::MinInnerSize(size) => Some(*size),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    let ctx = egui::Context::default();
+    // At 100 % the window already has it (`main.rs`): nothing to send.
+    assert!(min_sizes(&ctx, &mut app).is_empty());
+    app.run_command(&ctx, Command::ZoomIn)?;
+    let sent = min_sizes(&ctx, &mut app);
+    let expected = MIN_WINDOW * 1.1;
+    assert!(
+        sent.iter().any(|s| (*s - expected).length() < 0.01),
+        "{sent:?}"
+    );
+    // Sent once, not on every frame.
+    assert!(min_sizes(&ctx, &mut app).is_empty());
+    Ok(())
+}

@@ -18,9 +18,9 @@ pub(super) fn filter_value_id(index: usize) -> egui::Id {
 
 /// «Filtrar», «Ordenar» and «Columnas» (on a board, «Propiedades» and
 /// «Agrupar»), added right to left after «Propiedad». Each shows how many
-/// rules it has and is accented then. Returns whether the view's settings
-/// changed.
-pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState) -> bool {
+/// rules it has and is accented then; `compact` shows icons only. Returns
+/// whether the view's settings changed.
+pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState, compact: bool) -> bool {
     let DatabaseState {
         views,
         view,
@@ -48,7 +48,7 @@ pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState) -> bool {
         (true, 1) => "Propiedades (1 oculta)".to_owned(),
         (true, n) => format!("Propiedades ({n} ocultas)"),
     };
-    let button = toolbar_button(ui, icons::EYE, &label, hidden > 0);
+    let button = toolbar_button(ui, icons::EYE, &label, hidden > 0, compact);
     if button.clicked() {
         *view_picker = None;
     }
@@ -62,7 +62,13 @@ pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState) -> bool {
     });
 
     let label = counted("Ordenar", config.sorts.len());
-    let button = toolbar_button(ui, icons::ARROWS_DOWN_UP, &label, !config.sorts.is_empty());
+    let button = toolbar_button(
+        ui,
+        icons::ARROWS_DOWN_UP,
+        &label,
+        !config.sorts.is_empty(),
+        compact,
+    );
     if button.clicked() {
         *view_picker = None;
     }
@@ -71,7 +77,13 @@ pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState) -> bool {
     });
 
     let label = counted("Filtrar", config.filters.len());
-    let button = toolbar_button(ui, icons::FUNNEL, &label, !config.filters.is_empty());
+    let button = toolbar_button(
+        ui,
+        icons::FUNNEL,
+        &label,
+        !config.filters.is_empty(),
+        compact,
+    );
     if button.clicked() {
         *view_picker = None;
     }
@@ -85,7 +97,7 @@ pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState) -> bool {
             Some(p) => format!("Agrupar: {}", p.name),
             None => "Agrupar".to_owned(),
         };
-        let button = toolbar_button(ui, icons::KANBAN, &label, false);
+        let button = toolbar_button(ui, icons::KANBAN, &label, false, compact);
         menu_from(&button, "silex-group-menu", 240.0).show(|ui| {
             changed |= group_menu(ui, config, properties);
         });
@@ -126,14 +138,24 @@ fn counted(label: &str, count: usize) -> String {
     }
 }
 
-/// A small toolbar button, accented while its rules are in use.
-fn toolbar_button(ui: &mut egui::Ui, icon: &str, label: &str, active: bool) -> egui::Response {
+/// A small toolbar button, accented while its rules are in use. Compact
+/// (a narrow page): the icon alone, with the label as its tooltip.
+fn toolbar_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    active: bool,
+    compact: bool,
+) -> egui::Response {
     let p = theme::current(ui.ctx());
     let color = if active {
         p.accent_strong
     } else {
         p.text_muted
     };
+    if compact {
+        return icons::button(ui, true, icon, color, label, None);
+    }
     ui.add(
         egui::Button::new((
             icons::icon(icon).color(color),

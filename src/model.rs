@@ -358,3 +358,16 @@ pub struct TrashItem {
     pub deleted_at: String,
     pub subpages: usize,
 }
+
+/// Words in a page's text blocks (title not included), shown under the
+/// title. A word is a run of characters with at least one letter or digit,
+/// so dashes and emoji alone do not count. Files and page links are cards,
+/// not text.
+pub fn word_count(blocks: &[Block]) -> usize {
+    blocks
+        .iter()
+        .filter(|b| b.kind.is_text())
+        .flat_map(|b| b.content.split_whitespace())
+        .filter(|w| w.chars().any(char::is_alphanumeric))
+        .count()
+}

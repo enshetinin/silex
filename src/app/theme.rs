@@ -1,5 +1,5 @@
 //! Design system: color tokens for light and dark, spacing, type scale and
-//! fonts (Inter + Phosphor icons, see `assets/fonts/README.md`).
+//! fonts (Inter + Lucide icons, see `assets/fonts/README.md`).
 //!
 //! Every color the UI uses comes from a [`Palette`]; text/background pairs
 //! are checked for WCAG AA contrast in the tests below.
@@ -40,12 +40,12 @@ pub struct Palette {
     pub danger: Color32,
     pub warning: Color32,
     pub success: Color32,
-    /// Sidebar: same family as the canvas; the selected page is tinted
-    /// with the accent and marked with a bar on its left edge.
+    /// Sidebar: a neutral grey of the canvas' family, split from the page
+    /// by a 1 px line; the selected page is a grey fill.
     pub sidebar_bg: Color32,
     pub sidebar_hover: Color32,
     pub sidebar_selected: Color32,
-    /// Label, icon and left bar of the selected page.
+    /// Label and icon of the selected page.
     pub sidebar_selected_text: Color32,
     pub sidebar_text: Color32,
     pub sidebar_muted: Color32,
@@ -59,12 +59,12 @@ const fn hex(rgb: u32) -> Color32 {
 pub const LIGHT: Palette = Palette {
     bg: hex(0xFFFFFF),
     surface: hex(0xFFFFFF),
-    subtle: hex(0xF2F4F7),
-    pressed: hex(0xE6E9EE),
-    border: hex(0xE3E6EB),
-    text: hex(0x1A1D22),
-    text_muted: hex(0x5D6470),
-    text_faint: hex(0x8C939E),
+    subtle: hex(0xF4F4F5),
+    pressed: hex(0xE9E9EB),
+    border: hex(0xE4E4E7),
+    text: hex(0x18181B),
+    text_muted: hex(0x5F5F68),
+    text_faint: hex(0x8A8A92),
     accent: hex(0x2F8FE0),
     accent_strong: hex(0x1F6FB8),
     on_accent: hex(0xFFFFFF),
@@ -72,38 +72,38 @@ pub const LIGHT: Palette = Palette {
     danger: hex(0xC62828),
     warning: hex(0x9A5800),
     success: hex(0x2E7D32),
-    sidebar_bg: hex(0xF7F8FA),
-    sidebar_hover: hex(0xECEEF2),
-    sidebar_selected: hex(0xE1EDFB),
-    sidebar_selected_text: hex(0x1A62A8),
-    sidebar_text: hex(0x1A1D22),
-    sidebar_muted: hex(0x5D6470),
-    code_bg: hex(0xF4F5F7),
+    sidebar_bg: hex(0xFAFAFA),
+    sidebar_hover: hex(0xF1F1F2),
+    sidebar_selected: hex(0xE9E9EB),
+    sidebar_selected_text: hex(0x18181B),
+    sidebar_text: hex(0x3F3F46),
+    sidebar_muted: hex(0x5F5F68),
+    code_bg: hex(0xF4F4F5),
 };
 
 pub const DARK: Palette = Palette {
-    bg: hex(0x0F1114),
-    surface: hex(0x1A1D22),
-    subtle: hex(0x1A1E24),
-    pressed: hex(0x242930),
-    border: hex(0x262B32),
-    text: hex(0xE8EAED),
-    text_muted: hex(0xA0A7B1),
-    text_faint: hex(0x6E7680),
+    bg: hex(0x18181A),
+    surface: hex(0x1F1F22),
+    subtle: hex(0x232326),
+    pressed: hex(0x2A2A2E),
+    border: hex(0x29292D),
+    text: hex(0xEDEDEF),
+    text_muted: hex(0x8E8E95),
+    text_faint: hex(0x66666E),
     accent: hex(0x5AB4F5),
     accent_strong: hex(0x6BBEF7),
-    on_accent: hex(0x0F1114),
-    accent_soft: hex(0x142536),
+    on_accent: hex(0x0B0B0C),
+    accent_soft: hex(0x182634),
     danger: hex(0xEF6B6B),
     warning: hex(0xE0A04B),
     success: hex(0x5BC583),
-    sidebar_bg: hex(0x0F1114),
-    sidebar_hover: hex(0x1A1E24),
-    sidebar_selected: hex(0x142536),
-    sidebar_selected_text: hex(0x7CC4F8),
-    sidebar_text: hex(0xE8EAED),
-    sidebar_muted: hex(0xA0A7B1),
-    code_bg: hex(0x1A1E24),
+    sidebar_bg: hex(0x18181A),
+    sidebar_hover: hex(0x232326),
+    sidebar_selected: hex(0x2A2A2E),
+    sidebar_selected_text: hex(0xEDEDEF),
+    sidebar_text: hex(0xC9C9CE),
+    sidebar_muted: hex(0x8E8E95),
+    code_bg: hex(0x1F1F22),
 };
 
 /// Background and text of a select option's tag (H6.2), in the order of
@@ -163,8 +163,8 @@ pub mod radius {
 
 /// Icon sizes (px): 18 in rows, menus and toolbars; 20 in the window frame.
 pub mod icon {
-    pub const MD: f32 = 18.0;
-    pub const LG: f32 = 20.0;
+    pub const MD: f32 = 16.0;
+    pub const LG: f32 = 18.0;
 }
 
 /// Named text styles beyond egui's built-in ones.
@@ -216,16 +216,18 @@ fn fonts() -> FontDefinitions {
         "Inter-SemiBold",
         include_bytes!("../../assets/fonts/Inter-SemiBold.ttf"),
     );
+    // Measured on the snapshots: at 16 px next to 13–14 px Inter, Lucide's
+    // glyphs and the text share a centre line, so no vertical tweak.
     insert(
         &mut fonts,
-        "Phosphor",
-        include_bytes!("../../assets/fonts/Phosphor-Regular.ttf"),
+        "Lucide",
+        include_bytes!("../../assets/fonts/Lucide.ttf"),
     );
 
     // Icons get a family of their own and are always drawn with it. They
     // cannot share a fallback chain with text: Inter has 745 glyphs in the
-    // Private Use Area (17 of them on our icons' codepoints), and Phosphor
-    // has empty ASCII glyphs (used for icon-name ligatures).
+    // Private Use Area, where icon fonts put their glyphs, so text would
+    // pick Inter's glyph instead of the icon.
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
     proportional.insert(0, "Inter".to_owned());
     let mut semibold = vec!["Inter-SemiBold".to_owned()];
@@ -235,7 +237,7 @@ fn fonts() -> FontDefinitions {
         .insert(FontFamily::Name(SEMIBOLD.into()), semibold);
     fonts.families.insert(
         FontFamily::Name(crate::app::icons::FAMILY.into()),
-        vec!["Phosphor".to_owned()],
+        vec!["Lucide".to_owned()],
     );
     fonts
 }
@@ -246,7 +248,7 @@ fn style(p: &Palette, dark: bool) -> egui::Style {
     style.text_styles = [
         (TextStyle::Small, FontId::proportional(12.0)),
         (TextStyle::Body, FontId::proportional(14.0)),
-        (TextStyle::Button, FontId::proportional(14.0)),
+        (TextStyle::Button, FontId::proportional(13.0)),
         (TextStyle::Monospace, FontId::monospace(13.0)),
         (TextStyle::Heading, FontId::new(20.0, semibold())),
         (
@@ -513,20 +515,17 @@ mod tests {
             assert!(has(c, FontFamily::Proportional), "{c:?}");
         }
 
-        // The icon family is Phosphor alone, and text families never use it.
+        // The icon family is Lucide alone, and text families never use it.
         let fonts = fonts();
         let icons = FontFamily::Name(crate::app::icons::FAMILY.into());
-        assert_eq!(fonts.families[&icons], ["Phosphor"]);
+        assert_eq!(fonts.families[&icons], ["Lucide"]);
         for family in [
             FontFamily::Proportional,
             FontFamily::Monospace,
             FontFamily::Name(SEMIBOLD.into()),
         ] {
             let list = &fonts.families[&family];
-            assert!(
-                !list.iter().any(|f| f == "Phosphor"),
-                "{family:?}: {list:?}"
-            );
+            assert!(!list.iter().any(|f| f == "Lucide"), "{family:?}: {list:?}");
         }
         // Every icon we define exists in the icon font.
         for (name, icon) in crate::app::icons::ALL {
