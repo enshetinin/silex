@@ -263,3 +263,11 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 ## 28. Cierre brusco (H9.1)
 - Con la semilla, escribe en una página y, sin esperar, mata la app (`kill -9 <pid>` en macOS o Linux; «Finalizar tarea» en Windows). Ábrela: arranca sin errores y conserva lo escrito hasta el último «Guardado».
 - Mátala mientras crea una copia de seguridad («Crear copia ahora») y mientras «Exportar todo» trabaja: al abrirla, las copias listadas se restauran bien, y en la carpeta de exportaciones solo hay exportaciones completas (y, como mucho, una carpeta oculta `.silex-export-…`, que se borra pasada una hora).
+
+## 29. Arrastrar bloques (H9.2)
+- Pasa el ratón por un bloque y arrastra su asa (⠿): el bloque queda marcado, su texto sigue al puntero y una línea azul marca dónde caerá. Suéltalo: se mueve. Cmd/Ctrl+Z lo devuelve.
+- Un clic en el asa (sin arrastrar) sigue abriendo su menú.
+- Selecciona varios bloques (Esc, Mayús+↑/↓) y arrastra el asa de uno de ellos: se mueven todos, en su orden.
+- Arrastra y pulsa Esc antes de soltar: no se mueve nada. Soltar sobre el propio bloque tampoco mueve nada.
+- En una página larga (la semilla), arrastra hasta el borde de arriba o de abajo: la página se desplaza sola.
+- Arrastra una tarea marcada, una lista sangrada, un archivo y un enlace: llegan con su tipo, su sangría y su contenido. Cierra y abre la app: el orden se mantiene.

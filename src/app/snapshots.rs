@@ -1445,6 +1445,140 @@ fn backups_menu() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- H9.2: dragging blocks ----
+
+/// A page with four paragraphs: «uno», «dos», «tres» and «cuatro».
+fn drag_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let page = db.create_page("Arrastrar", None)?;
+    let blocks: Vec<Block> = ["uno", "dos", "tres", "cuatro"]
+        .iter()
+        .map(|text| Block {
+            id: (*text).into(),
+            page_id: page.clone(),
+            kind: BlockKind::Paragraph,
+            content: (*text).into(),
+            checked: false,
+            position: 0,
+            indent: 0,
+            attachment: None,
+            link: None,
+        })
+        .collect();
+    db.save_document(&page, "Arrastrar", &blocks)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+/// The rect of the text field of the block that says `text`.
+fn block_rect(harness: &Harness<'_, SilexApp>, text: &str) -> egui::Rect {
+    harness
+        .root()
+        .children_recursive()
+        .find(|n| n.accesskit_node().value().as_deref() == Some(text))
+        .map(|n| n.rect())
+        .unwrap_or_else(|| panic!("block {text:?}"))
+}
+
+/// Presses on the handle of the block that says `text` and moves the
+/// pointer to `to` in a few steps, without releasing.
+fn start_drag(harness: &mut Harness<'_, SilexApp>, text: &str, to: egui::Pos2) {
+    let block = block_rect(harness, text);
+    harness.hover_at(block.center());
+    harness.run();
+    let handle = harness.get_by_label("Acciones del bloque").rect().center();
+    harness.hover_at(handle);
+    harness.run();
+    harness.drag_at(handle);
+    harness.run();
+    for step in 1..=6 {
+        let t = step as f32 / 6.0;
+        harness.hover_at(handle + (to - handle) * t);
+        harness.run();
+    }
+}
+
+fn texts(app: &SilexApp) -> Vec<String> {
+    app.blocks.iter().map(|b| b.content.clone()).collect()
+}
+
+#[test]
+fn a_block_dragged_by_its_handle_moves_and_cmd_z_takes_it_back() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(drag_app()?);
+    // Below «cuatro»: to the end.
+    let below = block_rect(&harness, "cuatro").center_bottom() + egui::vec2(0.0, 6.0);
+    start_drag(&mut harness, "uno", below);
+    harness.drop_at(below);
+    harness.run();
+    assert_eq!(texts(harness.state()), ["dos", "tres", "cuatro", "uno"]);
+    // Saved like any edit, and one Cmd+Z puts it back.
+    harness.state_mut().save_now()?;
+    let page = harness.state().selected.clone().unwrap_or_default();
+    let stored: Vec<String> = harness
+        .state()
+        .db
+        .list_blocks(&page)?
+        .into_iter()
+        .map(|b| b.content)
+        .collect();
+    assert_eq!(stored, ["dos", "tres", "cuatro", "uno"]);
+    harness.state_mut().undo();
+    assert_eq!(texts(harness.state()), ["uno", "dos", "tres", "cuatro"]);
+    Ok(())
+}
+
+#[test]
+fn a_selection_moves_together_and_escape_cancels_a_drag() -> anyhow::Result<()> {
+    let mut app = drag_app()?;
+    app.selection = Some(super::BlockSelection {
+        anchor: "uno".into(),
+        head: "dos".into(),
+    });
+    let mut harness = a11y_harness(app);
+    let below = block_rect(&harness, "cuatro").center_bottom() + egui::vec2(0.0, 6.0);
+    start_drag(&mut harness, "uno", below);
+    harness.drop_at(below);
+    harness.run();
+    assert_eq!(texts(harness.state()), ["tres", "cuatro", "uno", "dos"]);
+
+    // Esc while dragging: nothing moves.
+    let above = block_rect(&harness, "tres").center_top() - egui::vec2(0.0, 2.0);
+    start_drag(&mut harness, "dos", above);
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    harness.drop_at(above);
+    harness.run();
+    assert_eq!(texts(harness.state()), ["tres", "cuatro", "uno", "dos"]);
+    // Dropped where it already is: nothing either.
+    let here = block_rect(&harness, "uno").center();
+    start_drag(&mut harness, "uno", here);
+    harness.drop_at(here);
+    harness.run();
+    assert_eq!(texts(harness.state()), ["tres", "cuatro", "uno", "dos"]);
+    Ok(())
+}
+
+#[test]
+fn block_drag() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), drag_app()?);
+    harness.run();
+    // «uno» held between «tres» and «cuatro».
+    let between = block_rect(&harness, "cuatro").center_top();
+    start_drag(&mut harness, "uno", between);
+    harness.snapshot("block_drag_light");
+    Ok(())
+}
+
 // ---- H7.12: local data kept private ----
 
 #[test]
