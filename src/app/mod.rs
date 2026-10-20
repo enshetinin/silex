@@ -32,6 +32,7 @@ mod snapshots;
 mod space;
 mod startup;
 mod table_undo;
+mod templates;
 #[cfg(test)]
 mod tests;
 pub mod theme;
@@ -41,8 +42,8 @@ mod view_tabs;
 pub use self::startup::StartupError;
 use self::{
     blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, links::*,
-    page_history::*, row_page::*, search::*, sidebar::*, space::*, table_undo::*, view_menus::*,
-    view_tabs::*,
+    page_history::*, row_page::*, search::*, sidebar::*, space::*, table_undo::*, templates::*,
+    view_menus::*, view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
@@ -132,6 +133,8 @@ pub struct SilexApp {
     links: Links,
     /// «Historial de versiones» of the open page, while open (H7.8).
     page_history: Option<PageHistory>,
+    /// Live templates (ADR 0010), the «Plantillas» section and its picker.
+    templates: Templates,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -218,6 +221,7 @@ impl SilexApp {
             space: Space::default(),
             links: Links::default(),
             page_history: None,
+            templates: Templates::default(),
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -230,6 +234,7 @@ impl SilexApp {
         app.backup_label = app.describe_last_backup();
         app.trash_count = app.db.trash_count()?;
         app.favorites = app.db.list_favorites()?;
+        app.templates.list = app.db.list_templates()?;
         app.rebuild_tree();
         if let Some(row) = app.tree.first() {
             app.open_page(row.page.id.clone())?;
@@ -270,6 +275,7 @@ impl SilexApp {
 
     fn reload_pages(&mut self) -> Result<()> {
         self.pages = self.db.list_pages()?;
+        self.templates.list = self.db.list_templates()?;
         // A linked page may have gone to the trash, or come back.
         self.load_links()?;
         self.trash_count = self.db.trash_count()?;
@@ -303,9 +309,7 @@ impl SilexApp {
     fn trash_page(&mut self, id: &str) -> Result<()> {
         self.save_now()?;
         let title = self
-            .pages
-            .iter()
-            .find(|p| p.id == id)
+            .find_page(id)
             .map(|p| display_title(&p.title).to_owned())
             .unwrap_or_default();
         let trashed = self.db.trash_page(id)?;
@@ -314,7 +318,7 @@ impl SilexApp {
         let open_still_live = self
             .selected
             .as_ref()
-            .is_some_and(|sel| self.pages.iter().any(|p| &p.id == sel));
+            .is_some_and(|sel| self.find_page(sel).is_some());
         if !open_still_live {
             self.open_first_page()?;
         }
@@ -330,6 +334,21 @@ impl SilexApp {
         self.db.restore_page(id)?;
         self.reload_pages()?;
         self.open_page(id.to_owned())
+    }
+
+    /// A live page or template (ADR 0010) by id.
+    fn find_page(&self, id: &str) -> Option<&Page> {
+        self.pages
+            .iter()
+            .chain(&self.templates.list)
+            .find(|p| p.id == id)
+    }
+
+    /// Whether the open page is a template.
+    fn template_open(&self) -> bool {
+        self.selected
+            .as_ref()
+            .is_some_and(|id| self.templates.list.iter().any(|t| &t.id == id))
     }
 
     /// Sidebar rows: every page except the rows of databases.
@@ -551,7 +570,11 @@ impl SilexApp {
         self.handle_shortcuts(&ctx);
         self.handle_dropped_files(&ctx);
         // The search window has the keyboard while it is open.
-        if self.search.is_none() && self.links.picker.is_none() && self.page_history.is_none() {
+        if self.search.is_none()
+            && self.links.picker.is_none()
+            && self.page_history.is_none()
+            && self.templates.picker.is_none()
+        {
             self.take_pasted_image(&ctx);
             self.take_editor_key(&ctx);
             self.apply_pending_focus(&ctx);
@@ -586,6 +609,7 @@ impl SilexApp {
         self.free_space_dialog(&ctx);
         self.link_picker(&ctx);
         self.link_restore_dialog(&ctx);
+        self.template_picker(&ctx);
         self.page_history_window(&ctx);
         // The UI may be idle between edits; wake up for the next autosave or retry.
         if let Some(at) = self.save.next_attempt() {

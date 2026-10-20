@@ -20,6 +20,10 @@ pub enum Command {
     LinkPage,
     /// The versions of the open page (H7.8).
     PageHistory,
+    /// A copy of the open page as a template (ADR 0010).
+    SaveAsTemplate,
+    /// The template picker, for a new page (ADR 0010).
+    NewFromTemplate,
     SaveNow,
     TrashPage,
     OpenTrash,
@@ -44,6 +48,10 @@ pub struct PaletteContext {
     pub database_open: bool,
     /// The open page is a favorite.
     pub favorite: bool,
+    /// The open page is a row of a database.
+    pub row_open: bool,
+    /// The open page is a template (ADR 0010).
+    pub template_open: bool,
     /// The database is a file (backups and workspace export need one).
     pub file_database: bool,
     pub backup_running: bool,
@@ -56,11 +64,12 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 24] = [
+    pub const ALL: [Command; 26] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
         Command::NewRow,
+        Command::NewFromTemplate,
         Command::RenamePage,
         Command::AddFavorite,
         Command::RemoveFavorite,
@@ -68,6 +77,7 @@ impl Command {
         Command::AttachFiles,
         Command::LinkPage,
         Command::PageHistory,
+        Command::SaveAsTemplate,
         Command::SaveNow,
         Command::TrashPage,
         Command::OpenTrash,
@@ -96,6 +106,8 @@ impl Command {
             Command::AttachFiles => "Adjuntar archivos…",
             Command::LinkPage => "Enlazar a una página…",
             Command::PageHistory => "Historial de versiones…",
+            Command::SaveAsTemplate => "Guardar como plantilla",
+            Command::NewFromTemplate => "Nueva página desde plantilla…",
             Command::SaveNow => "Guardar ahora",
             Command::TrashPage => "Enviar la página a la papelera",
             Command::OpenTrash => "Abrir la papelera",
@@ -134,6 +146,8 @@ impl Command {
             ],
             Command::LinkPage => &["enlace", "vincular", "mencionar", "referencia", "link"],
             Command::PageHistory => &["versiones", "anterior", "cambios", "recuperar", "history"],
+            Command::SaveAsTemplate => &["modelo", "copiar", "reutilizar", "template"],
+            Command::NewFromTemplate => &["crear", "modelo", "usar", "template"],
             Command::SaveNow => &["save"],
             Command::TrashPage => &["borrar", "eliminar", "quitar", "delete"],
             Command::OpenTrash => &["restaurar", "borradas", "eliminadas", "recuperar", "trash"],
@@ -157,19 +171,24 @@ impl Command {
         match self {
             Command::NewPage
             | Command::NewDatabase
+            | Command::NewFromTemplate
             | Command::SaveNow
             | Command::OpenTrash
             | Command::ShowShortcuts => true,
             // Inside a database a child is a row: «Nueva fila» instead.
-            Command::NewSubpage => cx.page_open && !cx.database_open,
+            Command::NewSubpage => cx.page_open && !cx.database_open && !cx.template_open,
             Command::NewRow => cx.database_open,
             // A database shows its table, not blocks.
             Command::AttachFiles | Command::LinkPage | Command::PageHistory => {
                 cx.page_open && !cx.database_open
             }
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
-            Command::AddFavorite => cx.page_open && !cx.favorite,
+            Command::AddFavorite => cx.page_open && !cx.favorite && !cx.template_open,
             Command::RemoveFavorite => cx.page_open && cx.favorite,
+            // A page: not a database, a row of one, or a template.
+            Command::SaveAsTemplate => {
+                cx.page_open && !cx.database_open && !cx.row_open && !cx.template_open
+            }
             Command::BackupNow | Command::RestoreBackup => cx.file_database && !cx.backup_running,
             Command::ExportWorkspace => cx.file_database && !cx.export_running,
             Command::ThemeSystem => theme != ThemeMode::System,
@@ -253,6 +272,8 @@ mod tests {
             page_open: true,
             database_open: false,
             favorite: false,
+            row_open: false,
+            template_open: false,
             file_database: true,
             backup_running: false,
             export_running: false,
@@ -325,6 +346,27 @@ mod tests {
             matching_commands("nueva fila", &database),
             [Command::NewRow]
         );
+        // Templates (ADR 0010): a page can be saved as one; a database, a
+        // row or a template cannot. A page from a template, always.
+        assert!(Command::SaveAsTemplate.available(&cx()));
+        assert!(!Command::SaveAsTemplate.available(&database));
+        let row = PaletteContext {
+            row_open: true,
+            ..cx()
+        };
+        assert!(!Command::SaveAsTemplate.available(&row));
+        let template = PaletteContext {
+            template_open: true,
+            ..cx()
+        };
+        assert!(!Command::SaveAsTemplate.available(&template));
+        assert!(!Command::AddFavorite.available(&template));
+        assert!(!Command::NewSubpage.available(&template));
+        assert!(Command::NewFromTemplate.available(&no_page));
+        assert_eq!(
+            matching_commands("plantilla", &cx()),
+            [Command::NewFromTemplate, Command::SaveAsTemplate]
+        );
 
         let favorite = PaletteContext {
             favorite: true,
@@ -359,7 +401,12 @@ mod tests {
     fn words_match_labels_and_keywords_without_accents() {
         assert_eq!(
             matching_commands("nueva", &cx()),
-            [Command::NewPage, Command::NewDatabase, Command::NewSubpage]
+            [
+                Command::NewPage,
+                Command::NewDatabase,
+                Command::NewSubpage,
+                Command::NewFromTemplate
+            ]
         );
         assert_eq!(matching_commands("tabla", &cx()), [Command::NewDatabase]);
         assert_eq!(matching_commands("SUBPAGINA", &cx()), [Command::NewSubpage]);

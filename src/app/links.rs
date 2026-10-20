@@ -413,11 +413,10 @@ impl SilexApp {
 
     /// Whether the open page shows blocks (not a database's table).
     fn can_hold_blocks(&self) -> bool {
-        self.selected.as_ref().is_some_and(|id| {
-            self.pages
-                .iter()
-                .any(|p| p.id == *id && p.kind == PageKind::Page)
-        })
+        self.selected
+            .as_ref()
+            .and_then(|id| self.find_page(id))
+            .is_some_and(|p| p.kind == PageKind::Page)
     }
 
     /// «[[» just typed in the block being edited: the two brackets go and

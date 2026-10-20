@@ -1391,6 +1391,7 @@ impl SilexApp {
             })
             .collect();
         let is_favorite = self.favorites.iter().any(|p| p.id == page_id);
+        let template = self.template_open();
         let ghost = |text: egui::RichText| egui::Button::new(text).frame_when_inactive(false);
         ui.horizontal(|ui| {
             ui.set_min_height(32.0);
@@ -1408,6 +1409,26 @@ impl SilexApp {
                 );
             }
             ui.label(egui::RichText::new(display_title(&self.title)).color(p.text));
+            // A template says so, and offers to make a page from it (ADR 0010).
+            if template {
+                egui::Frame::new()
+                    .fill(p.accent_soft)
+                    .corner_radius(theme::radius::SM)
+                    .inner_margin(egui::Margin::symmetric(6, 2))
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Plantilla").small().color(p.accent));
+                    })
+                    .response
+                    .on_hover_text(
+                        "Al usarla, {{fecha}} en el título o el texto se cambia por la fecha de hoy.",
+                    );
+                if ui
+                    .button((icons::icon(icons::PLUS), " Usar esta plantilla"))
+                    .clicked()
+                {
+                    action = Some(RowAction::UseTemplate(page_id.to_owned(), None));
+                }
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let more = ui
@@ -1454,11 +1475,13 @@ impl SilexApp {
                 } else {
                     "Añadir a favoritos"
                 };
-                if ui
-                    .add(ghost(icons::icon(icons::STAR).color(star_color)))
-                    .on_hover_text(star_tip)
-                    .accessible_name(star_tip)
-                    .clicked()
+                // A template cannot be a favorite (ADR 0010).
+                if !template
+                    && ui
+                        .add(ghost(icons::icon(icons::STAR).color(star_color)))
+                        .on_hover_text(star_tip)
+                        .accessible_name(star_tip)
+                        .clicked()
                 {
                     action = Some(RowAction::Favorite(page_id.to_owned(), !is_favorite));
                 }

@@ -219,3 +219,12 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - Restaura una versión con un archivo adjunto que luego borraste de la página: el archivo vuelve. Haz «Liberar espacio» antes de restaurar: no lo borra.
 - Cierra y vuelve a abrir la app: las versiones siguen ahí.
 - Con VoiceOver: cada versión se anuncia con su fecha y hora, y el botón como «Restaurar esta versión».
+
+## 24. Plantillas (H7.10–H7.11)
+- Despliega «Plantillas» en la barra lateral: aparecen Reunión, Diario y Lista de tareas. Mándalas a la papelera, cierra y abre la app, despliega otra vez: no vuelven.
+- En el menú «…» de una página: «Guardar como plantilla». Aparece en «Plantillas»; la página sigue igual y abierta. Una base de datos y una fila no lo ofrecen.
+- Abre una plantilla: dice «Plantilla» (al pasar el ratón explica `{{fecha}}`) y no tiene estrella. Edítala, también su título; Cmd+Z y el historial funcionan.
+- «Usar esta plantilla» (o el «+» de su fila): se crea y abre una página con `{{fecha}}` cambiado por la fecha de hoy, con el título listo para escribir. Los adjuntos y los enlaces de la plantilla funcionan en la página nueva.
+- «+» de «Páginas» → «Nueva página desde plantilla…», y Cmd+K → «plantilla»: el buscador filtra al escribir, ↑ ↓ e Intro crean la página, Esc cierra sin crear nada. Desde el menú «…» de una página, la nueva va dentro de ella y lo dice.
+- Las plantillas no salen en el árbol, en Cmd+K, al enlazar (`[[`) ni en «Enlazada desde». «Exportar todo» las escribe en `Plantillas/`.
+- Con VoiceOver: «Plantillas» se anuncia como botón (desplegado o no), y cada plantilla del buscador por su título.

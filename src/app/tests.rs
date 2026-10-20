@@ -3551,3 +3551,133 @@ fn a_page_with_files_is_exported_in_the_background() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---- H7.11: templates in the window ----
+
+/// «Notas» (with a paragraph) and «Proyectos», «Notas» open.
+fn templates_app() -> anyhow::Result<(SilexApp, egui::Context, String, String)> {
+    let mut db = Database::open_in_memory()?;
+    let notas = db.create_page("Notas", None)?;
+    let proyectos = db.create_page("Proyectos", None)?;
+    db.save_document(
+        &notas,
+        "Notas",
+        &[Block {
+            page_id: notas.clone(),
+            content: "Escrito el {{fecha}}".into(),
+            ..block("n")
+        }],
+    )?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(notas.clone())?;
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, notas, proyectos))
+}
+
+#[test]
+fn a_page_saved_as_a_template_is_listed_and_stays_as_it_was() -> anyhow::Result<()> {
+    let (mut app, ctx, notas, _) = templates_app()?;
+    assert!(app.templates.list.is_empty());
+    app.run_command(&ctx, silex_desktop::palette::Command::SaveAsTemplate)?;
+    assert_eq!(app.templates.list.len(), 1);
+    assert!(app.templates.open, "the section unfolds to show it");
+    assert_eq!(
+        app.selected.as_deref(),
+        Some(notas.as_str()),
+        "the page stays open"
+    );
+    assert!(app.pages.iter().all(|p| p.id != app.templates.list[0].id));
+    let notice = app.notice.clone().unwrap_or_default();
+    assert_eq!(notice, "«Notas» se guardó como plantilla, en «Plantillas».");
+    // Not from a database.
+    app.create_database(None)?;
+    assert!(
+        app.run_command(&ctx, silex_desktop::palette::Command::SaveAsTemplate)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn the_picker_makes_a_page_from_a_template_with_todays_date() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, notas, proyectos) = templates_app()?;
+    // The «…» menu of «Proyectos»: the page goes inside it.
+    app.apply(RowAction::FromTemplate(Some(proyectos.clone())))?;
+    assert_eq!(app.templates.list.len(), 3, "the examples, the first time");
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("diar"));
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t == "Se creará dentro de «Proyectos»."),
+        "{painted:?}"
+    );
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.templates.picker.is_none());
+    let today = app.db.local_today()?;
+    let expected = silex_desktop::templates::fill_date("Diario {{fecha}}", &today);
+    assert_eq!(app.title, expected);
+    assert!(app.focus_title, "the title is ready to edit");
+    let page = app.selected.clone().expect("the new page is open");
+    assert_ne!(page, notas);
+    let parent = app
+        .pages
+        .iter()
+        .find(|p| p.id == page)
+        .and_then(|p| p.parent_id.clone());
+    assert_eq!(parent.as_deref(), Some(proyectos.as_str()));
+    assert!(app.expanded.contains(&proyectos), "visible in the tree");
+    assert!(!app.blocks.is_empty());
+    // Esc closes the picker without creating anything.
+    let pages = app.pages.len();
+    app.run_command(&ctx, silex_desktop::palette::Command::NewFromTemplate)?;
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.templates.picker.is_none());
+    assert_eq!(app.pages.len(), pages);
+    Ok(())
+}
+
+#[test]
+fn an_open_template_says_so_is_editable_and_survives_other_trashing() -> anyhow::Result<()> {
+    let (mut app, ctx, notas, proyectos) = templates_app()?;
+    app.save_as_template(&notas)?;
+    let template = app.templates.list[0].id.clone();
+    app.open_page(template.clone())?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Plantilla"), "{painted:?}");
+    assert!(
+        painted.iter().any(|t| t.ends_with("Usar esta plantilla")),
+        "{painted:?}"
+    );
+    // Edited like a page, with history and links.
+    assert!(app.page_shows_blocks(&template));
+    app.title = "Notas de reunión".into();
+    app.mark_dirty();
+    app.save_now()?;
+    assert_eq!(app.templates.list[0].title, "Notas de reunión");
+    assert!(
+        app.pages.iter().all(|p| p.id != template),
+        "still not a page"
+    );
+    // Trashing another page does not leave it.
+    app.trash_page(&proyectos)?;
+    assert_eq!(app.selected.as_deref(), Some(template.as_str()));
+    // «Usar esta plantilla»: a page at the root, with the date filled.
+    app.apply(RowAction::UseTemplate(template.clone(), None))?;
+    assert_eq!(app.title, "Notas de reunión");
+    let text = app.blocks[0].content.clone();
+    assert!(
+        text.starts_with("Escrito el ") && !text.contains("{{"),
+        "{text}"
+    );
+    // Trashing the open template opens a page.
+    app.open_page(template.clone())?;
+    app.trash_page(&template)?;
+    assert!(app.templates.list.is_empty());
+    assert_ne!(app.selected.as_deref(), Some(template.as_str()));
+    Ok(())
+}

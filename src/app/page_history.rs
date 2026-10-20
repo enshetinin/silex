@@ -233,10 +233,8 @@ impl SilexApp {
     }
 
     /// Whether `id` is a page that shows blocks (not a database's table).
-    fn page_shows_blocks(&self, id: &str) -> bool {
-        self.pages
-            .iter()
-            .any(|p| p.id == id && p.kind == PageKind::Page)
+    pub(super) fn page_shows_blocks(&self, id: &str) -> bool {
+        self.find_page(id).is_some_and(|p| p.kind == PageKind::Page)
     }
 
     /// The history window: versions on the left (newest first), the chosen

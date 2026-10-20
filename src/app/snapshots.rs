@@ -1445,6 +1445,95 @@ fn backups_menu() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- H7.11: templates ----
+
+/// The demo workspace with the «Plantillas» section unfolded (so the
+/// examples exist) and «Reunión {{fecha}}» open.
+fn templates_demo() -> anyhow::Result<SilexApp> {
+    let mut app = demo_app()?;
+    app.templates.open = true;
+    app.db.create_example_templates()?;
+    app.reload_pages()?;
+    let meeting = app.templates.list[0].id.clone();
+    app.open_page(meeting)?;
+    Ok(app)
+}
+
+#[test]
+fn the_templates_section_unfolds_and_everything_has_a_name() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    let count = |h: &Harness<'_, SilexApp>, label: &str| h.query_all_by_label(label).count();
+    assert_eq!(count(&harness, "Diario {{fecha}}"), 0, "folded at first");
+    click_button(&mut harness, "Plantillas");
+    harness.run();
+    assert!(harness.state().templates.open);
+    for title in ["Reunión {{fecha}}", "Diario {{fecha}}", "Lista de tareas"] {
+        assert!(count(&harness, title) > 0, "{title}");
+    }
+    assert_accessible(&harness, "templates section");
+    // A page's menu offers both template actions.
+    click_button(&mut harness, "Más acciones de la página");
+    harness.run();
+    assert!(menu_item(&harness, "Guardar como plantilla").is_some());
+    assert!(menu_item(&harness, "Nueva página desde plantilla…").is_some());
+    Ok(())
+}
+
+#[test]
+fn an_open_template_and_the_picker_have_names() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(templates_demo()?);
+    let count = |h: &Harness<'_, SilexApp>, label: &str| h.query_all_by_label(label).count();
+    assert!(count(&harness, "Plantilla") > 0);
+    assert!(
+        harness
+            .query_all_by_label_contains("Usar esta plantilla")
+            .count()
+            > 0
+    );
+    assert!(
+        harness.query_by_label("Añadir a favoritos").is_none(),
+        "no star"
+    );
+    assert_accessible(&harness, "open template");
+    harness.state_mut().open_template_picker(None);
+    harness.run();
+    assert_accessible(&harness, "template picker");
+    assert!(count(&harness, "Plantilla") >= 2, "the picker's field too");
+    Ok(())
+}
+
+#[test]
+fn templates() -> anyhow::Result<()> {
+    templates_snapshot("templates_light", false)
+}
+
+#[test]
+fn template_picker() -> anyhow::Result<()> {
+    templates_snapshot("template_picker_light", true)
+}
+
+fn templates_snapshot(name: &str, picker: bool) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            templates_demo()?,
+        );
+    harness.run();
+    if picker {
+        harness.state_mut().open_template_picker(None);
+        harness.run();
+    }
+    harness.snapshot(name);
+    Ok(())
+}
+
 // ---- H7.8: page history ----
 
 #[test]
