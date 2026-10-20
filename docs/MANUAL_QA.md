@@ -259,3 +259,7 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - Crea una carpeta `Dropbox` (o `OneDrive`) y arranca con `SILEX_DB_PATH` dentro de ella: aparece el aviso. «Entendido» lo cierra hasta el próximo arranque; «No volver a avisar», para siempre.
 - Ajustes → «Privacidad»: dice dónde están los datos; «Mostrar la carpeta» la abre; explica el cifrado de disco del sistema. Con la base en una carpeta sincronizada, lo dice también ahí.
 - Windows: arranca con normalidad (los permisos no se tocan) y el aviso de OneDrive funciona igual.
+
+## 28. Cierre brusco (H9.1)
+- Con la semilla, escribe en una página y, sin esperar, mata la app (`kill -9 <pid>` en macOS o Linux; «Finalizar tarea» en Windows). Ábrela: arranca sin errores y conserva lo escrito hasta el último «Guardado».
+- Mátala mientras crea una copia de seguridad («Crear copia ahora») y mientras «Exportar todo» trabaja: al abrirla, las copias listadas se restauran bien, y en la carpeta de exportaciones solo hay exportaciones completas (y, como mucho, una carpeta oculta `.silex-export-…`, que se borra pasada una hora).

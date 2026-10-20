@@ -274,3 +274,19 @@ fn backups_are_readable_only_by_their_owner() -> anyhow::Result<()> {
     std::fs::remove_dir_all(&dir)?;
     Ok(())
 }
+
+#[test]
+fn two_backups_in_the_same_second_both_work() -> anyhow::Result<()> {
+    // Also what a start right after a crash during an upgrade does (H9.1).
+    let dir = std::env::temp_dir().join(format!("silex-backup-twice-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("silex.sqlite3");
+    silex_desktop::db::Database::open(&path)?.create_page("Notas", None)?;
+    let backups = dir.join("backups");
+    let first = silex_desktop::db::backup::create_backup(&path, &backups)?;
+    let second = silex_desktop::db::backup::create_backup(&path, &backups)?;
+    assert_ne!(first, second);
+    assert_eq!(silex_desktop::db::backup::list_backups(&backups)?.len(), 2);
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
