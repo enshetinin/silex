@@ -251,6 +251,10 @@ impl SilexApp {
                                         .frame(egui::Frame::NONE)
                                         .margin(egui::Margin::ZERO)
                                         .font(egui::FontId::proportional(16.0))
+                                        // As tall as the row, its text centred:
+                                        // on the line of the icon and «Esc».
+                                        .min_size(egui::vec2(0.0, ui.spacing().interact_size.y))
+                                        .align(egui::Align2::LEFT_CENTER)
                                         .hint_text(
                                             egui::RichText::new("Buscar páginas o acciones")
                                                 .color(p.text_faint),
