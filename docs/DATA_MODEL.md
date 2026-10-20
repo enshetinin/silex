@@ -74,8 +74,17 @@
 - **Adjuntos:** un adjunto que nombra alguna versión (`json_each`) cuenta como en uso en `space_usage` y `delete_unused_attachments`, así que «Liberar espacio» no lo borra.
 - Probado: v7→v8 y v1→v8 conservando los `rowid`, adjuntos y enlaces; un fallo a mitad que deja la v7 intacta; una copia v7 restaurada y actualizada; y la base pasa la verificación de copias con versiones.
 
+## Versión 9 — plantillas (`0009_templates.sql`, ADR 0010)
+- `pages.template_at TEXT NULL`: la fecha en que una página pasó a ser plantilla; `NULL` en las demás. Índice parcial `pages_template_idx`. Solo añade la columna: no reconstruye nada.
+- Una plantilla es siempre una página de nivel superior y de tipo `page`. Rust lo garantiza: no se puede mover, ni crear nada dentro de ella (subpágina, base o página importada), ni guardar como plantilla una base, una fila u otra plantilla, ni usarla dentro de una base.
+- `list_pages`, `list_favorites`, `search_pages`, `search` y `backlinks` dejan fuera las plantillas; `set_favorite` las rechaza; `reorder_page` ordena las plantillas entre plantillas y las páginas entre páginas. La papelera las lista como cualquier página y vuelven siendo plantillas.
+- `save_as_template` copia el título y los bloques de una página en una plantilla nueva; `create_from_template` copia una plantilla viva en una página nueva (al final de su destino) y cambia `{{fecha}}` en el título y el texto por la fecha local en largo («20 oct 2026»; `src/templates.rs`). Los bloques reciben ids nuevos y comparten adjuntos y destinos de enlace; el texto de un enlace no se toca. Todo en una transacción.
+- `create_example_templates` crea las tres de ejemplo una sola vez: la clave `example_templates` de `settings` lo recuerda, aunque se manden a la papelera (`Settings::from_pairs` ignora la clave).
+- «Exportar todo» escribe las plantillas en `Plantillas/` (con número si una página ya se llama así), con sus adjuntos.
+- Probado: v8→v9 y v1→v9 conservando los `rowid`, las versiones y los favoritos; un fallo a mitad que deja la v8 intacta; una copia v8 restaurada y actualizada.
+
 ## Evolución
-- Las migraciones publicadas (`0001`…`0008`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
+- Las migraciones publicadas (`0001`…`0009`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).
 - Antes de actualizar una base existente en disco se crea una copia verificada con el esquema antiguo. Si esa copia falla, no se migra.
 - Las copias de esquemas anteriores son válidas: la verificación acepta `1..=LATEST` y la restauración actualiza la base después de restaurar.

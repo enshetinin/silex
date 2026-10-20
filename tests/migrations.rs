@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 8;
+const LATEST: i64 = 9;
 
 struct TempDir(PathBuf);
 
@@ -866,7 +866,7 @@ mod v8 {
     const SCHEMA_V7: &str = include_str!("../src/db/migrations/0007_page_links.sql");
 
     /// A database exactly as Silex v7 left it (v6 content plus a link).
-    fn write_v7_database(path: &Path) -> anyhow::Result<()> {
+    pub(super) fn write_v7_database(path: &Path) -> anyhow::Result<()> {
         write_v6_database(path)?;
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA_V7)?;
@@ -991,6 +991,114 @@ mod v8 {
         );
         edit_p1(&mut db)?;
         assert_eq!(db.page_versions("p1")?.len(), 1);
+        Ok(())
+    }
+}
+
+mod v9 {
+    use super::v5::table_exists;
+    use super::v8::write_v7_database;
+    use super::*;
+
+    const SCHEMA_V8: &str = include_str!("../src/db/migrations/0008_page_versions.sql");
+
+    /// A database exactly as Silex v8 left it (v7 content plus a version).
+    fn write_v8_database(path: &Path) -> anyhow::Result<()> {
+        write_v7_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V8)?;
+        conn.execute_batch(
+            "INSERT INTO page_versions (page_id, title, blocks, size)
+                 VALUES ('p1', 'Recetas', '[]', 2);
+             PRAGMA user_version = 8;",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn v8_database_gets_templates_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v8_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(has_column(&tmp.db(), "pages", "template_at")?);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        // Nothing became a template; everything is where it was.
+        assert!(db.list_templates()?.is_empty());
+        assert!(db.list_pages()?.iter().any(|p| p.id == "p1"));
+        assert_eq!(db.page_versions("p1")?.len(), 1);
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert_eq!(db.list_favorites()?.len(), 1);
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v8 copy first"
+        );
+        // Templates work.
+        let template = db.save_as_template("p2")?;
+        assert_eq!(db.list_templates()?.len(), 1);
+        db.create_from_template(&template, None, "2026-10-20")?;
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        let broken: Vec<String> = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert!(broken.is_empty(), "{broken:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v9() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        let template = db.save_as_template("p2")?;
+        assert!(db.is_template(&template)?);
+        assert!(!db.is_template("p2")?);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v8_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v8_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        // The index name is taken, so 0009 fails after adding its column.
+        Connection::open(tmp.db())?
+            .execute_batch("CREATE INDEX pages_template_idx ON blocks(content);")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 9"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 8);
+        drop(conn);
+        assert!(!has_column(&tmp.db(), "pages", "template_at")?);
+        assert!(table_exists(&tmp.db(), "page_versions")?);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        Ok(())
+    }
+
+    #[test]
+    fn v8_backup_restores_into_v9() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v8_database(&old_db)?;
+        let v8_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        let page = db.create_page("Se pierde al restaurar", None)?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v8_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.get_page(&page)?.is_none());
+        assert_eq!(db.page_versions("p1")?.len(), 1);
+        assert!(db.list_templates()?.is_empty());
+        db.save_as_template("p1")?;
         Ok(())
     }
 }

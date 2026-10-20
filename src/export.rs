@@ -217,9 +217,16 @@ pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
     let everything: HashSet<String> = pages.iter().map(|p| p.id.clone()).collect();
     // Depth-first rows with depth; never loops, orphans come at the root.
     let rows = build_tree(&pages, &everything);
+    // Templates go to a folder of their own, after the pages (ADR 0010).
+    let templates = db.list_templates()?;
+    let entries: Vec<(&crate::model::Page, bool)> = rows
+        .iter()
+        .map(|r| (&r.page, r.has_children))
+        .chain(templates.iter().map(|t| (t, false)))
+        .collect();
 
     // First every name, so links can point at pages written later.
-    let plan = plan_workspace(db, &rows)?;
+    let plan = plan_workspace(db, &rows, &templates)?;
     let targets: HashMap<String, PathBuf> = plan
         .iter()
         .map(|p| (p.id.clone(), p.folder.join(format!("{}.md", p.stem))))
@@ -228,15 +235,18 @@ pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
     let tmp = root.join(format!(".silex-export-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&tmp).with_context(|| format!("No se puede escribir en {}", root.display()))?;
     let written = (|| -> Result<usize> {
-        for (row, planned) in rows.iter().zip(&plan) {
+        for ((page, has_children), planned) in entries.iter().zip(&plan) {
             let folder = join_relative(&tmp, &planned.folder)?;
+            // The templates' folder is the only one not made by a parent.
+            fs::create_dir_all(&folder)
+                .with_context(|| format!("No se puede crear {}", folder.display()))?;
             let file = safe_path::join_inside(&folder, &[&format!("{}.md", planned.stem)])?;
-            let markdown = match (&row.page.kind, &planned.blocks) {
+            let markdown = match (&page.kind, &planned.blocks) {
                 // Its rows follow as subpages, in the folder below.
                 (PageKind::Database, _) => {
-                    let id = &row.page.id;
+                    let id = &page.id;
                     database_to_markdown(
-                        &row.page.title,
+                        &page.title,
                         &db.database_properties(id)?,
                         &db.database_rows(id)?,
                         &db.database_values(id)?,
@@ -256,17 +266,17 @@ pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
                             Some((id.clone(), relative_link(&planned.folder, to)))
                         })
                         .collect();
-                    page_to_markdown_with(&row.page.title, blocks, &files, &links)
+                    page_to_markdown_with(&page.title, blocks, &files, &links)
                 }
             };
             write_atomic(&file, markdown.as_bytes())?;
-            if row.has_children {
+            if *has_children {
                 let sub = safe_path::join_inside(&folder, &[&planned.stem])?;
                 fs::create_dir(&sub)
                     .with_context(|| format!("No se puede crear {}", sub.display()))?;
             }
         }
-        Ok(rows.len())
+        Ok(entries.len())
     })();
     let pages = match written {
         Ok(pages) => pages,
@@ -304,7 +314,11 @@ struct Planned {
 /// Names every page of `rows` (depth-first) as the export writes them:
 /// unique per folder, `Title.md` next to its `Title/` and `Title
 /// (adjuntos)/` folders.
-fn plan_workspace(db: &Database, rows: &[crate::model::TreeRow]) -> Result<Vec<Planned>> {
+fn plan_workspace(
+    db: &Database,
+    rows: &[crate::model::TreeRow],
+    templates: &[crate::model::Page],
+) -> Result<Vec<Planned>> {
     // One (folder, names taken) per depth.
     let mut stack: Vec<(PathBuf, HashSet<String>)> = vec![(PathBuf::new(), HashSet::new())];
     let mut plan = Vec::with_capacity(rows.len());
@@ -330,6 +344,27 @@ fn plan_workspace(db: &Database, rows: &[crate::model::TreeRow]) -> Result<Vec<P
             files,
             blocks,
         });
+    }
+    // Templates: in «Plantillas/» (or «Plantillas (2)/» if a page took the
+    // name), each with its attachments next to it.
+    if !templates.is_empty() {
+        let Some((_, root_taken)) = stack.first_mut() else {
+            anyhow::bail!("Árbol de páginas incoherente");
+        };
+        let folder = PathBuf::from(safe_path::unique_stem("Plantillas", "md", root_taken));
+        let mut taken = HashSet::new();
+        for template in templates {
+            let stem = safe_path::unique_stem(&template.title, "md", &mut taken);
+            let blocks = db.list_blocks(&template.id)?;
+            let files = files_folder(&stem, &blocks, &mut taken);
+            plan.push(Planned {
+                id: template.id.clone(),
+                folder: folder.clone(),
+                stem,
+                files,
+                blocks,
+            });
+        }
     }
     Ok(plan)
 }
