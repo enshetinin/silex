@@ -16,8 +16,8 @@ pub(super) fn filter_value_id(index: usize) -> egui::Id {
     egui::Id::unique(("silex-filter-value", index))
 }
 
-/// «Filtrar», «Ordenar» and «Columnas» (on a board, «Propiedades» and
-/// «Agrupar»), added right to left after «Propiedad». Each shows how many
+/// «Filtrar», «Ordenar» and «Columnas» (on a board, «Agrupar» first, and
+/// «Propiedades»), left to right before «Propiedad». Each shows how many
 /// rules it has and is accented then; `compact` shows icons only. Returns
 /// whether the view's settings changed.
 pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState, compact: bool) -> bool {
@@ -35,6 +35,48 @@ pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState, compact: 
     };
     let board = kind == ViewKind::Board;
     let mut changed = false;
+
+    if board {
+        let group = board_property(properties, config);
+        let label = match group {
+            Some(p) => format!("Agrupar: {}", p.name),
+            None => "Agrupar".to_owned(),
+        };
+        let button = toolbar_button(ui, icons::KANBAN, &label, false, compact);
+        menu_from(&button, "silex-group-menu", 240.0).show(|ui| {
+            changed |= group_menu(ui, config, properties);
+        });
+    }
+
+    let label = counted("Filtrar", config.filters.len());
+    let button = toolbar_button(
+        ui,
+        icons::FUNNEL,
+        &label,
+        !config.filters.is_empty(),
+        compact,
+    );
+    if button.clicked() {
+        *view_picker = None;
+    }
+    menu_from(&button, "silex-filter-menu", 340.0).show(|ui| {
+        changed |= filter_menu(ui, config, properties, view_picker, typing_filter);
+    });
+
+    let label = counted("Ordenar", config.sorts.len());
+    let button = toolbar_button(
+        ui,
+        icons::ARROWS_DOWN_UP,
+        &label,
+        !config.sorts.is_empty(),
+        compact,
+    );
+    if button.clicked() {
+        *view_picker = None;
+    }
+    menu_from(&button, "silex-sort-menu", 320.0).show(|ui| {
+        changed |= sort_menu(ui, config, properties, view_picker);
+    });
 
     let hidden = properties
         .iter()
@@ -61,47 +103,6 @@ pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState, compact: 
         changed |= columns_menu(ui, config, properties, caption);
     });
 
-    let label = counted("Ordenar", config.sorts.len());
-    let button = toolbar_button(
-        ui,
-        icons::ARROWS_DOWN_UP,
-        &label,
-        !config.sorts.is_empty(),
-        compact,
-    );
-    if button.clicked() {
-        *view_picker = None;
-    }
-    menu_from(&button, "silex-sort-menu", 320.0).show(|ui| {
-        changed |= sort_menu(ui, config, properties, view_picker);
-    });
-
-    let label = counted("Filtrar", config.filters.len());
-    let button = toolbar_button(
-        ui,
-        icons::FUNNEL,
-        &label,
-        !config.filters.is_empty(),
-        compact,
-    );
-    if button.clicked() {
-        *view_picker = None;
-    }
-    menu_from(&button, "silex-filter-menu", 340.0).show(|ui| {
-        changed |= filter_menu(ui, config, properties, view_picker, typing_filter);
-    });
-
-    if board {
-        let group = board_property(properties, config);
-        let label = match group {
-            Some(p) => format!("Agrupar: {}", p.name),
-            None => "Agrupar".to_owned(),
-        };
-        let button = toolbar_button(ui, icons::KANBAN, &label, false, compact);
-        menu_from(&button, "silex-group-menu", 240.0).show(|ui| {
-            changed |= group_menu(ui, config, properties);
-        });
-    }
     changed
 }
 

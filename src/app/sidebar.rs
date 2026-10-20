@@ -685,47 +685,70 @@ impl SilexApp {
         self.search_button(ui, p);
         ui.add_space(theme::space::MD);
 
-        egui::Panel::bottom("silex_sidebar_footer")
-            .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 6)))
-            .show(ui, |ui| self.sidebar_footer(ui, p));
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("silex_sidebar_tree")
-                    .auto_shrink(false)
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
-                        self.favorite_rows(ui);
-                        self.template_rows(ui);
-                        let add = section_header_with_add(ui, "Páginas", "Añadir");
-                        egui::Popup::menu(&add).show(|ui| {
-                            let page = ui.button((icons::icon(icons::PAGE), " Nueva página"));
-                            let base =
-                                ui.button((icons::icon(icons::TABLE), " Nueva base de datos"));
-                            let template = ui.button((
-                                icons::icon(icons::COPY),
-                                " Nueva página desde plantilla…",
-                            ));
-                            let result = if page.clicked() {
-                                ui.close();
-                                self.create_root_page("Sin título")
-                            } else if base.clicked() {
-                                ui.close();
-                                self.create_database(None)
-                            } else if template.clicked() {
-                                ui.close();
-                                self.open_template_picker(None);
-                                Ok(())
-                            } else {
-                                Ok(())
-                            };
-                            self.report(result);
-                        });
-                        let rows = self.tree.clone();
-                        self.page_rows(ui, &rows, true, "tree", icons::PAGE);
+        // The tree is drawn before the footer, so Tab goes through them in
+        // the order they are seen. The footer's height comes from the last
+        // frame (it only changes with the interface size).
+        let footer_id = egui::Id::unique("silex-sidebar-footer-height");
+        let footer_height: f32 = ui
+            .ctx()
+            .data(|d| d.get_temp(footer_id))
+            .unwrap_or(3.0 * ROW_HEIGHT + 15.0);
+        let spacing = ui.spacing().item_spacing.y;
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let tree = egui::vec2(
+            ui.available_width(),
+            (ui.available_height() - footer_height).max(0.0),
+        );
+        ui.allocate_ui_with_layout(tree, egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_min_size(tree);
+            egui::ScrollArea::vertical()
+                .id_salt("silex_sidebar_tree")
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    self.favorite_rows(ui);
+                    self.template_rows(ui);
+                    let add = section_header_with_add(ui, "Páginas", "Añadir");
+                    egui::Popup::menu(&add).show(|ui| {
+                        let page = ui.button((icons::icon(icons::PAGE), " Nueva página"));
+                        let base = ui.button((icons::icon(icons::TABLE), " Nueva base de datos"));
+                        let template =
+                            ui.button((icons::icon(icons::COPY), " Nueva página desde plantilla…"));
+                        let result = if page.clicked() {
+                            ui.close();
+                            self.create_root_page("Sin título")
+                        } else if base.clicked() {
+                            ui.close();
+                            self.create_database(None)
+                        } else if template.clicked() {
+                            ui.close();
+                            self.open_template_picker(None);
+                            Ok(())
+                        } else {
+                            Ok(())
+                        };
+                        self.report(result);
                     });
-            });
+                    let rows = self.tree.clone();
+                    self.page_rows(ui, &rows, true, "tree", icons::PAGE);
+                });
+        });
+        let top = ui.cursor().top();
+        ui.painter().hline(
+            ui.max_rect().x_range(),
+            top + 0.5,
+            egui::Stroke::new(1.0, p.border),
+        );
+        ui.add_space(1.0);
+        egui::Frame::NONE
+            .inner_margin(egui::Margin::symmetric(0, 6))
+            .show(ui, |ui| self.sidebar_footer(ui, p));
+        let height = ui.cursor().top() - top;
+        if (height - footer_height).abs() > 0.5 {
+            ui.ctx().data_mut(|d| d.insert_temp(footer_id, height));
+            ui.ctx().request_repaint();
+        }
+        ui.spacing_mut().item_spacing.y = spacing;
     }
 
     /// Looks like a search box; opens the search window (also Cmd+K).
@@ -914,7 +937,11 @@ impl SilexApp {
                         format!("{cmd}+ / {cmd}− / {cmd}+0"),
                         "Tamaño de la interfaz",
                     ),
-                    ("Tab / Mayús+Tab".to_owned(), "Moverse entre controles"),
+                    (
+                        "Tab / Mayús+Tab".to_owned(),
+                        "Moverse entre controles (en un bloque, sangrar)",
+                    ),
+                    ("Esc y luego Tab".to_owned(), "Salir del texto de la página"),
                     ("Intro / Espacio".to_owned(), "Activar el control enfocado"),
                 ] {
                     ui.monospace(keys);

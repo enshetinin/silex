@@ -163,8 +163,8 @@ fn a11y_harness(app: SilexApp) -> Harness<'static, SilexApp> {
     harness
 }
 
-/// Every control has a name, and no name is only an icon glyph (Private Use
-/// Area characters mean nothing to a screen reader).
+/// Every control and text field has a name, and no name or text is only an
+/// icon glyph (Private Use Area characters mean nothing to a screen reader).
 #[track_caller]
 fn assert_accessible(harness: &Harness<'_, SilexApp>, state: &str) {
     let unnamed = harness.unnamed_widgets();
@@ -172,22 +172,53 @@ fn assert_accessible(harness: &Harness<'_, SilexApp>, state: &str) {
         unnamed.is_empty(),
         "{state}: unnamed widgets:\n{unnamed:#?}"
     );
-    let is_icon = |c: char| ('\u{E000}'..='\u{F8FF}').contains(&c);
-    let icon_only: Vec<String> = harness
+    let nodes: Vec<_> = harness
         .root()
         .children_recursive()
         .map(|node| node.accesskit_node())
         .filter(|node| !node.is_hidden())
+        .collect();
+    // A text field's value is what was typed: it needs a name of its own
+    // («Título de la página», «Nombre, Rayuela»…).
+    let unnamed_fields: Vec<String> = nodes
+        .iter()
+        .filter(|node| node.is_text_input() && !node.label().is_some_and(|l| !l.trim().is_empty()))
+        .map(|node| {
+            format!(
+                "{:?} {:?} at {:?}",
+                node.role(),
+                node.value(),
+                node.raw_bounds()
+            )
+        })
+        .collect();
+    assert!(
+        unnamed_fields.is_empty(),
+        "{state}: text fields without a name:\n{unnamed_fields:#?}"
+    );
+    let is_icon = |c: char| ('\u{E000}'..='\u{F8FF}').contains(&c);
+    let only_icons = |text: &str| {
+        !text.trim().is_empty() && !text.chars().any(|c| !c.is_whitespace() && !is_icon(c))
+    };
+    let icon_only: Vec<String> = nodes
+        .iter()
         .filter_map(|node| {
-            let label = node.label()?;
-            let meaningful = label.chars().any(|c| !c.is_whitespace() && !is_icon(c));
-            (!label.trim().is_empty() && !meaningful)
-                .then(|| format!("{:?} {label:?} at {:?}", node.role(), node.raw_bounds()))
+            let text = node.label().filter(|l| only_icons(l)).or_else(|| {
+                (!node.is_text_input())
+                    .then(|| node.value())
+                    .flatten()
+                    .filter(|v| only_icons(v))
+            })?;
+            Some(format!(
+                "{:?} {text:?} at {:?}",
+                node.role(),
+                node.raw_bounds()
+            ))
         })
         .collect();
     assert!(
         icon_only.is_empty(),
-        "{state}: icon-only names:\n{icon_only:#?}"
+        "{state}: icon-only names or text:\n{icon_only:#?}"
     );
 }
 
@@ -285,6 +316,84 @@ fn every_control_has_a_name() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The names Tab visits, `steps` times from what has the focus.
+fn tab_names(harness: &mut Harness<'_, SilexApp>, steps: usize) -> Vec<String> {
+    (0..steps)
+        .map(|_| {
+            harness.key_press(egui::Key::Tab);
+            harness.run();
+            harness
+                .root()
+                .children_recursive()
+                .map(|node| node.accesskit_node())
+                .find(|node| node.is_focused())
+                .and_then(|node| node.label())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Positions of `names` in `visited`, which must exist and go up.
+#[track_caller]
+fn assert_visited_in_order(visited: &[String], names: &[&str]) {
+    let at: Vec<Option<usize>> = names
+        .iter()
+        .map(|name| visited.iter().position(|v| v == name))
+        .collect();
+    assert!(
+        at.iter().all(Option::is_some) && at.windows(2).all(|w| w[0] < w[1]),
+        "expected {names:?} in this order, Tab visited {visited:#?}"
+    );
+}
+
+/// Tab goes through the window in the order it is seen (H9.3a): the
+/// sidebar top to bottom, footer last; the page's buttons and the
+/// table's toolbar left to right.
+#[test]
+fn tab_follows_the_order_on_screen() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    search_button(&harness).focus();
+    harness.run();
+    let visited = tab_names(&mut harness, 24);
+    assert_visited_in_order(
+        &visited,
+        &[
+            "Diseño de la interfaz",
+            "Plantillas",
+            "Añadir",
+            "Proyecto Silex",
+            "Recetas",
+            "Papelera",
+            "Copias y exportación",
+            "Atajos de teclado",
+            "Añadir a favoritos",
+            "Más acciones de la página",
+            "Título de la página",
+        ],
+    );
+    // The path in the top bar is a link to the page above.
+    let link = harness.get_by_label("Abrir «Proyecto Silex»");
+    assert_eq!(link.accesskit_node().role(), egui::accesskit::Role::Link);
+
+    let (app, _, _) = database_app()?;
+    let mut harness = a11y_harness(app);
+    harness.get_by_label("Título de la página").focus();
+    harness.run();
+    let visited = tab_names(&mut harness, 8);
+    assert_visited_in_order(
+        &visited,
+        &[
+            "Vista «Tabla»",
+            "Nueva vista",
+            "Filtrar",
+            "Ordenar",
+            "Columnas",
+            "Añadir una propiedad",
+        ],
+    );
+    Ok(())
+}
+
 #[test]
 fn settings_menu_changes_and_stores_the_theme_and_size() -> anyhow::Result<()> {
     let mut harness = a11y_harness(demo_app()?);
@@ -340,8 +449,8 @@ fn keyboard_focus_is_visible() -> anyhow::Result<()> {
         "keyboard_focus_light",
         eframe::egui::Theme::Light,
         |harness| {
-            // Tab from the search button: the footer comes before the tree
-            // (its panel is laid out first).
+            // Tab from the search button: favorites, «Plantillas», then
+            // «Páginas +», as they are seen (H9.3a).
             search_button(harness).focus();
             harness.run();
             for _ in 0..3 {

@@ -920,15 +920,17 @@ impl SilexApp {
                 );
                 let ui = &mut inside(ui, inner, egui::Layout::left_to_right(egui::Align::Center));
                 let open_width = 72.0;
-                let name = ui.add(
-                    TextEdit::singleline(&mut row.title)
-                        .id(name_id)
-                        .frame(egui::Frame::NONE)
-                        .align(egui::Align2::LEFT_CENTER)
-                        .min_size(egui::vec2(0.0, ROW_HEIGHT - 4.0))
-                        .hint_text(egui::RichText::new("Sin título").color(p.text_faint))
-                        .desired_width(ui.available_width() - open_width),
-                );
+                let name = ui
+                    .add(
+                        TextEdit::singleline(&mut row.title)
+                            .id(name_id)
+                            .frame(egui::Frame::NONE)
+                            .align(egui::Align2::LEFT_CENTER)
+                            .min_size(egui::vec2(0.0, ROW_HEIGHT - 4.0))
+                            .hint_text(egui::RichText::new("Sin título").color(p.text_faint))
+                            .desired_width(ui.available_width() - open_width),
+                    )
+                    .accessible_name(format!("Nombre, fila {}", index + 1));
                 if wanted(0) {
                     name.request_focus();
                 }
@@ -1413,9 +1415,9 @@ fn new_row_button(ui: &mut egui::Ui, width: f32) -> egui::Response {
     response
 }
 
-/// The row count and the view's menus, right to left from the row's end:
-/// «+ Propiedad», then «Filtrar», «Ordenar»… (H6.3a). Returns the width
-/// they took.
+/// The row count and the view's menus, at the row's end: «Filtrar»,
+/// «Ordenar»… (H6.3a), then «+ Propiedad». Laid out left to right so Tab
+/// visits them in order (H9.3a). Returns the width they took.
 fn toolbar_menus(
     ui: &mut egui::Ui,
     state: &mut DatabaseState,
@@ -1423,10 +1425,25 @@ fn toolbar_menus(
     compact: bool,
 ) -> f32 {
     let p = theme::current(ui.ctx());
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    let id = egui::Id::unique(("silex-db-toolbar-menus", &state.id));
+    right_aligned(ui, id, |ui| {
+        let board = state.is_board();
+        // Each column of a board counts its own cards.
+        if !board && !compact {
+            let total = state.rows.len();
+            let count = match (state.order.len(), total) {
+                (_, 1) if state.order.len() == 1 => "1 fila".to_owned(),
+                (shown, total) if shown == total => format!("{total} filas"),
+                (shown, 1) => format!("{shown} de 1 fila"),
+                (shown, total) => format!("{shown} de {total} filas"),
+            };
+            ui.label(egui::RichText::new(count).small().color(p.text_muted));
+        }
+        if view_menus(ui, state, compact) {
+            state.view_changed();
+        }
         // Also at the end of the header, which may be out of sight in a
         // wide table. A board has one more menu: just «+».
-        let board = state.is_board();
         let label = if board || compact { "" } else { " Propiedad" };
         let add = ui
             .add(
@@ -1445,21 +1462,8 @@ fn toolbar_menus(
             &mut state.new_property,
             actions,
         );
-        if view_menus(ui, state, compact) {
-            state.view_changed();
-        }
-        // Each column of a board counts its own cards.
-        if !board && !compact {
-            let total = state.rows.len();
-            let count = match (state.order.len(), total) {
-                (_, 1) if state.order.len() == 1 => "1 fila".to_owned(),
-                (shown, total) if shown == total => format!("{total} filas"),
-                (shown, 1) => format!("{shown} de 1 fila"),
-                (shown, total) => format!("{shown} de {total} filas"),
-            };
-            ui.label(egui::RichText::new(count).small().color(p.text_muted));
-        }
-        ui.min_rect().width()
     })
-    .inner
+    .response
+    .rect
+    .width()
 }

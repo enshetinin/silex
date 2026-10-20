@@ -523,6 +523,28 @@ pub(super) fn inside(ui: &mut egui::Ui, rect: egui::Rect, layout: egui::Layout) 
     ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout))
 }
 
+/// Lays `add` out left to right, flush with the right end of `ui`'s row
+/// (the last thing in it). Tab follows the order widgets are added, so a
+/// right-to-left layout would visit them backwards (H9.3a). The width is
+/// the one from the last frame; when it changes, the next frame puts it
+/// right (a discarded pass would also run the frame's jobs twice).
+pub(super) fn right_aligned<R>(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let width: Option<f32> = ui.ctx().data(|d| d.get_temp(id));
+    let room = ui.available_width() - width.unwrap_or(0.0);
+    ui.add_space(room.max(0.0));
+    let inner = ui.horizontal(add);
+    let used = inner.response.rect.width();
+    if width.is_none_or(|w| (w - used).abs() > 0.5) {
+        ui.ctx().data_mut(|d| d.insert_temp(id, used));
+        ui.ctx().request_repaint();
+    }
+    inner
+}
+
 /// Inner padding of the table's menus: the text of their field, their
 /// captions, the icons of their items and the option tags start here.
 pub(super) const MENU_PAD: f32 = 6.0;

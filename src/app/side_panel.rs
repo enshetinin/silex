@@ -164,7 +164,7 @@ impl SilexApp {
             } else {
                 icons::PAGE
             };
-            ui.label(icons::icon(icon).color(p.text_muted));
+            icons::decoration(ui, icon, theme::icon::MD, p.text_muted);
             ui.label(
                 egui::RichText::new("Solo lectura")
                     .small()
