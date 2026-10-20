@@ -84,7 +84,7 @@ impl SilexApp {
             (Command::RenamePage, Some(_)) => self.focus_title = true,
             (Command::AddFavorite, Some(id)) => self.set_favorite(&id, true)?,
             (Command::RemoveFavorite, Some(id)) => self.set_favorite(&id, false)?,
-            (Command::ExportPage, Some(_)) => self.export_current_page()?,
+            (Command::ExportPage, Some(_)) => self.export_current_page(ctx)?,
             (Command::AttachFiles, Some(_)) => self.files.pick = Some(None),
             (Command::LinkPage, Some(_)) => self.open_link_picker(None, None),
             (Command::PageHistory, Some(_)) => self.open_page_history()?,

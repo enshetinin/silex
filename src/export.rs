@@ -360,22 +360,32 @@ pub fn relative_link(from: &Path, to: &Path) -> String {
     parts.join("/")
 }
 
-/// Workspace export on a worker thread with its own database connection.
-pub struct WorkspaceExportJob {
-    rx: std::sync::mpsc::Receiver<Result<WorkspaceExport>>,
+/// An export on a worker thread (`silex-export`) with its own database
+/// connection, so writing files never freezes the window.
+pub struct ExportJob<T> {
+    rx: std::sync::mpsc::Receiver<Result<T>>,
 }
 
-impl WorkspaceExportJob {
-    pub fn spawn(
+/// The whole workspace, exported on a worker thread (H4.3).
+pub type WorkspaceExportJob = ExportJob<WorkspaceExport>;
+
+/// One page and its attachments, exported on a worker thread (H7.9):
+/// attachments can be up to 20 MB each.
+pub type PageExportJob = ExportJob<PathBuf>;
+
+impl<T: Send + 'static> ExportJob<T> {
+    /// Opens `db_path` on a new thread and runs `work` with it; `on_done`
+    /// runs when the result is ready (to wake the UI).
+    fn start(
         db_path: PathBuf,
-        root: PathBuf,
+        work: impl FnOnce(&Database) -> Result<T> + Send + 'static,
         on_done: impl FnOnce() + Send + 'static,
     ) -> Result<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("silex-export".into())
             .spawn(move || {
-                let result = Database::open(&db_path).and_then(|db| export_workspace(&db, &root));
+                let result = Database::open(&db_path).and_then(|db| work(&db));
                 let _ = tx.send(result);
                 on_done();
             })
@@ -384,7 +394,7 @@ impl WorkspaceExportJob {
     }
 
     /// `None` while running; the result once, when finished.
-    pub fn poll(&self) -> Option<Result<WorkspaceExport>> {
+    pub fn poll(&self) -> Option<Result<T>> {
         match self.rx.try_recv() {
             Ok(result) => Some(result),
             Err(std::sync::mpsc::TryRecvError::Empty) => None,
@@ -392,5 +402,33 @@ impl WorkspaceExportJob {
                 "El hilo de exportación terminó inesperadamente"
             ))),
         }
+    }
+}
+
+impl WorkspaceExportJob {
+    pub fn spawn(
+        db_path: PathBuf,
+        root: PathBuf,
+        on_done: impl FnOnce() + Send + 'static,
+    ) -> Result<Self> {
+        Self::start(db_path, move |db| export_workspace(db, &root), on_done)
+    }
+}
+
+impl PageExportJob {
+    /// [`export_page_with_files`] of `title` and `blocks` (as the window
+    /// shows them; their attachments are read from `db_path`) into `dir`.
+    pub fn spawn(
+        db_path: PathBuf,
+        dir: PathBuf,
+        title: String,
+        blocks: Vec<Block>,
+        on_done: impl FnOnce() + Send + 'static,
+    ) -> Result<Self> {
+        Self::start(
+            db_path,
+            move |db| export_page_with_files(db, &dir, &title, &blocks),
+            on_done,
+        )
     }
 }

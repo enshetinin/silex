@@ -1277,7 +1277,7 @@ fn exporting_writes_what_is_on_screen_and_offers_the_folder() -> anyhow::Result<
     // Removed on drop; the in-memory app keeps no files open inside it.
     let tmp = TempFolder::new("silex-app-export")?;
     let dir = tmp.0.clone();
-    app.export_current_page_to(&dir)?;
+    app.export_current_page_to(&ctx, &dir)?;
     let path = app.last_export.clone().expect("export offered");
     let text = std::fs::read_to_string(&path)?;
     assert!(text.contains("- uno\\!\n  - dos\n"), "{text}"); // "!" is escaped
@@ -1711,7 +1711,7 @@ fn exporting_a_database_writes_its_table() -> anyhow::Result<()> {
     app.reload_pages()?;
     app_frame(&mut app, &ctx, vec![]);
     let tmp = TempFolder::new("silex-app-db-export")?;
-    app.export_current_page_to(&tmp.0)?;
+    app.export_current_page_to(&ctx, &tmp.0)?;
     let path = app.last_export.clone().expect("exported");
     assert_eq!(
         std::fs::read_to_string(path)?,
@@ -3469,5 +3469,85 @@ fn a_database_has_no_history_and_a_new_page_says_it_has_none() -> anyhow::Result
         "{painted:?}"
     );
     assert!(app.page_history.is_some());
+    Ok(())
+}
+
+// ---- H7.9: page export with attachments, on a worker ----
+
+#[test]
+fn a_page_with_files_is_exported_in_the_background() -> anyhow::Result<()> {
+    use silex_desktop::attachment::NewAttachment;
+    // Declared before the app: dropped after it (see above).
+    let tmp = TempFolder::new("silex-app-page-export")?;
+    let dir = tmp.0.clone();
+    let db = Database::open(dir.join("silex.sqlite3"))?;
+    let page = db.create_page("Viaje", None)?;
+    let mut app = SilexApp::new(db)?;
+    app.startup_backup_pending = false;
+    app.open_page(page.clone())?;
+    let mut pdf = b"%PDF-1.7".to_vec();
+    pdf.resize(3_000_000, b' ');
+    let file = app
+        .db
+        .add_attachment(&NewAttachment::from_bytes("billetes.pdf", pdf)?)?;
+    app.blocks = vec![Block {
+        page_id: page.clone(),
+        kind: BlockKind::File,
+        content: file.name.clone(),
+        attachment: Some(file.id.clone()),
+        ..block("f")
+    }];
+    app.mark_dirty();
+    let ctx = egui::Context::default();
+
+    let out = dir.join("exportaciones");
+    app.export_current_page_to(&ctx, &out)?;
+    assert!(app.save.can_close(), "saved before exporting");
+    assert!(app.page_export.is_some(), "on a worker");
+    // A second one meanwhile is refused, not queued.
+    app.export_current_page_to(&ctx, &out)?;
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Ya se está exportando una página.")
+    );
+    // The first frame is drawn before the result is collected: it always
+    // says the export is running.
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t == "Exportando «Viaje» y sus adjuntos…"),
+        "{painted:?}"
+    );
+    let start = std::time::Instant::now();
+    while app.page_export.is_some() && start.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app_frame(&mut app, &ctx, vec![]);
+    }
+    let path = app.last_export.clone().expect("export finished");
+    assert_eq!(path, out.join("Viaje.md"));
+    let copy = out.join("Viaje (adjuntos)").join("billetes.pdf");
+    assert_eq!(std::fs::metadata(copy)?.len(), 3_000_000);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t.starts_with("Exportado a")),
+        "{painted:?}"
+    );
+
+    // A folder that cannot be created: the error is shown.
+    let blocked = dir.join("no-es-carpeta");
+    std::fs::write(&blocked, b"x")?;
+    app.notice = None;
+    app.export_current_page_to(&ctx, &blocked)?;
+    let start = std::time::Instant::now();
+    while app.page_export.is_some() && start.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app_frame(&mut app, &ctx, vec![]);
+    }
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(
+        notice.starts_with("No se pudo exportar la página"),
+        "{notice}"
+    );
     Ok(())
 }

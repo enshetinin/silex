@@ -164,6 +164,7 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - Busca (Cmd+K) una palabra del nombre del archivo: aparece la página.
 - Envía la página a la papelera y restáurala: los archivos siguen ahí. Haz una copia de seguridad, restáurala y abre un archivo.
 - «…» → «Exportar a Markdown»: junto al `.md` aparece `Título (adjuntos)/` con los archivos, y el `.md` los enlaza (ábrelo en un visor de Markdown: la imagen se ve y el PDF se abre).
+- (H7.9) Con varios archivos grandes (cerca de 20 MB cada uno), exporta la página: mientras dura, el aviso dice «Exportando «Título» y sus adjuntos…» y se puede seguir escribiendo sin tirones. Al terminar, «Exportado a…» con «Abrir carpeta».
 - Suelta un `.md` y un PDF a la vez: se importa la página y el PDF se adjunta a la que estaba abierta; el aviso cuenta las dos cosas.
 
 ## 18. Imágenes (H7.2)

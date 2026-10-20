@@ -456,3 +456,52 @@ fn freeing_space_in_its_thread_shrinks_the_file() -> anyhow::Result<()> {
     assert_eq!(db.space_usage()?.unused_attachments, 1);
     Ok(())
 }
+
+// ---- H7.9: page export on a worker ----
+
+#[test]
+fn a_page_with_files_exports_on_its_own_thread() -> anyhow::Result<()> {
+    use silex_desktop::export::PageExportJob;
+    let tmp = TempDir::new()?;
+    let mut db = Database::open(tmp.db())?;
+    let (page, _, _) = page_with_file(&mut db)?;
+    let blocks = db.list_blocks(&page)?;
+    let out = tmp.0.join("Exportaciones");
+    let wait = |job: PageExportJob| -> anyhow::Result<anyhow::Result<PathBuf>> {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(result) = job.poll() {
+                return Ok(result);
+            }
+            anyhow::ensure!(start.elapsed().as_secs() < 30, "the export never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    let (done, called) = std::sync::mpsc::channel();
+    let job = PageExportJob::spawn(
+        tmp.db(),
+        out.clone(),
+        "Facturas".into(),
+        blocks.clone(),
+        move || {
+            let _ = done.send(());
+        },
+    )?;
+    let md = wait(job)??;
+    called.recv_timeout(std::time::Duration::from_secs(5))?;
+    assert_eq!(md, out.join("Facturas.md"));
+    assert_eq!(
+        fs::read(out.join("Facturas (adjuntos)").join("factura marzo.pdf"))?,
+        b"%PDF-1.7\ncontenido"
+    );
+    // An error comes back as a result, not a panic.
+    let missing = PageExportJob::spawn(
+        tmp.0.join("no-existe").join("silex.sqlite3"),
+        out,
+        "Facturas".into(),
+        blocks,
+        || {},
+    )?;
+    assert!(wait(missing)?.is_err());
+    Ok(())
+}

@@ -1512,7 +1512,7 @@ impl SilexApp {
         }
         match extra {
             Some("export") => {
-                let result = self.export_current_page();
+                let result = self.export_current_page(&ui.ctx().clone());
                 self.report(result);
             }
             Some("save") => {
