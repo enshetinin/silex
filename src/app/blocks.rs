@@ -1066,8 +1066,8 @@ impl SilexApp {
                 return;
             }
             BlockAction::OpenLink => {
-                // Cmd/Ctrl+click opens it in a new tab (ADR 0011).
-                let result = self.open_link(id, self.command_click);
+                // Cmd/Ctrl+click: a new tab; Alt+click: beside (ADR 0011).
+                let result = self.open_link(id);
                 self.report(result);
                 return;
             }
@@ -1188,7 +1188,7 @@ impl SilexApp {
         let mut block_action: Option<(BlockAction, String)> = None;
         let mut hovered = None;
         let mut open_backlink = None;
-        self.command_click = ui.input(|i| i.modifiers.command);
+        self.click_modifiers = ui.input(|i| i.modifiers);
         let pointer = ui.ctx().pointer_hover_pos();
         let mut scroll_area = egui::ScrollArea::vertical()
             .id_salt("silex_editor_blocks")
@@ -1357,7 +1357,7 @@ impl SilexApp {
             self.block_action(action, &id);
         }
         if let Some(id) = open_backlink {
-            let result = self.open_page_in(id, self.command_click);
+            let result = self.open_clicked(id);
             self.report(result);
         }
     }

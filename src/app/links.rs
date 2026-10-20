@@ -334,16 +334,16 @@ impl SilexApp {
         open
     }
 
-    /// Opens the page a link points at (in a new tab when `new_tab`); one
-    /// in the trash is offered for restoring first.
-    pub(super) fn open_link(&mut self, block: &str, new_tab: bool) -> Result<()> {
+    /// Opens the page a link points at (as the click asks: here, in a new
+    /// tab or beside); one in the trash is offered for restoring first.
+    pub(super) fn open_link(&mut self, block: &str) -> Result<()> {
         let Some(link) = self.blocks.iter().find(|b| b.id == block) else {
             return Ok(());
         };
         match link_state(&self.pages, &self.links.targets, link) {
             LinkState::Live { .. } => {
                 if let Some(target) = link.link.clone() {
-                    self.open_page_in(target, new_tab)?;
+                    self.open_clicked(target)?;
                 }
             }
             LinkState::Trashed { title } => {

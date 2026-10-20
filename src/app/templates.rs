@@ -121,6 +121,9 @@ impl SilexApp {
         if ui.button("Abrir en una pestaña nueva").clicked() {
             action = Some(RowAction::OpenInNewTab(owned()));
         }
+        if ui.button("Abrir al lado").clicked() {
+            action = Some(RowAction::OpenBeside(owned()));
+        }
         if ui.button("Usar esta plantilla").clicked() {
             action = Some(RowAction::UseTemplate(owned(), None));
         }

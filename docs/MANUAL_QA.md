@@ -240,3 +240,14 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - Manda a la papelera una página con pestaña: la pestaña se cierra. Si era la activa, se ve la de al lado.
 - Cierra la app con varias pestañas y vuelve a abrirla: vuelven, con la misma activa.
 - Con VoiceOver: cada pestaña se anuncia como pestaña, con su título y si está seleccionada; su «×» como «Cerrar «Título»».
+
+## 26. Vista dividida de consulta (H8.2)
+- Alt+clic en una página de la barra lateral (o «Abrir al lado» en su menú): aparece a la derecha, con «Solo lectura»; la página abierta sigue editable.
+- Alt+clic en una tarjeta de enlace o en «Enlazada desde»: también al lado.
+- En el panel, un clic en un enlace abre esa página en el panel; un clic en un archivo lo abre con la app del sistema (un script solo se muestra en su carpeta).
+- Una base de datos al lado muestra su tabla (nombre y propiedades); un clic en el nombre de una fila la abre en el panel. Con 1000 filas («Base de prueba» de la semilla) se desplaza con fluidez.
+- Edita en la página principal la misma página que se ve al lado: tras el autoguardado, el panel la muestra al día.
+- Manda a la papelera la página del panel: dice que está en la papelera.
+- «Editar aquí» la pasa a la pestaña activa y cierra el panel; «×» lo cierra. Arrastra el borde del panel: cambia de ancho, sin dejar la página principal por debajo de 480 puntos.
+- Estrecha la ventana: el panel desaparece y vuelve al ensancharla. Con la ventana estrecha, «Abrir al lado» explica por qué no se abre.
+- Con VoiceOver: «Editar aquí» y «Cerrar el panel lateral» se anuncian como botones.

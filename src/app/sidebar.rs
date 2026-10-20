@@ -23,6 +23,8 @@ pub(super) enum RowAction {
     Open(String),
     /// In a new tab (ADR 0011): Cmd/Ctrl+click, middle click or the menu.
     OpenInNewTab(String),
+    /// Read-only beside the open page (ADR 0011): Alt+click or the menu.
+    OpenBeside(String),
     Toggle(String),
     StartRename(String),
     CommitRename,
@@ -435,10 +437,12 @@ impl SilexApp {
             }
             return actions;
         }
-        let command = ui.input(|i| i.modifiers.command);
+        let modifiers = ui.input(|i| i.modifiers);
         if out.row.double_clicked() {
             actions.push(RowAction::StartRename(id.clone()));
-        } else if out.row.middle_clicked() || (out.row.clicked() && command) {
+        } else if out.row.clicked() && modifiers.alt {
+            actions.push(RowAction::OpenBeside(id.clone()));
+        } else if out.row.middle_clicked() || (out.row.clicked() && modifiers.command) {
             actions.push(RowAction::OpenInNewTab(id.clone()));
         } else if out.row.clicked() {
             actions.push(RowAction::Open(id.clone()));
@@ -502,6 +506,9 @@ impl SilexApp {
         }
         if ui.button("Abrir en una pestaña nueva").clicked() {
             action = Some(RowAction::OpenInNewTab(owned()));
+        }
+        if ui.button("Abrir al lado").clicked() {
+            action = Some(RowAction::OpenBeside(owned()));
         }
         if ui.button("Renombrar").clicked() {
             action = Some(RowAction::StartRename(owned()));
@@ -577,6 +584,7 @@ impl SilexApp {
         match action {
             RowAction::Open(id) => self.open_page(id),
             RowAction::OpenInNewTab(id) => self.open_in_new_tab(&id),
+            RowAction::OpenBeside(id) => self.open_beside(&id),
             RowAction::Toggle(id) => {
                 self.toggle_expanded(&id);
                 Ok(())
@@ -859,6 +867,7 @@ impl SilexApp {
                     (format!("{cmd}+K"), "Buscar páginas y acciones"),
                     ("Alt+↑ / Alt+↓".to_owned(), "Página anterior / siguiente"),
                     (format!("{cmd}+clic"), "Abrir en una pestaña nueva"),
+                    ("Alt+clic".to_owned(), "Abrir al lado, solo para leer"),
                     (
                         format!("{cmd}+T / {cmd}+W"),
                         "Nueva pestaña / cerrar pestaña",

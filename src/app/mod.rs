@@ -24,8 +24,10 @@ mod jobs;
 mod links;
 mod page_history;
 mod palette;
+mod read_only;
 mod row_page;
 mod search;
+mod side_panel;
 mod sidebar;
 #[cfg(test)]
 mod snapshots;
@@ -43,8 +45,8 @@ mod view_tabs;
 pub use self::startup::StartupError;
 use self::{
     blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, links::*,
-    page_history::*, row_page::*, search::*, sidebar::*, space::*, tab_bar::*, table_undo::*,
-    templates::*, view_menus::*, view_tabs::*,
+    page_history::*, read_only::*, row_page::*, search::*, side_panel::*, sidebar::*, space::*,
+    tab_bar::*, table_undo::*, templates::*, view_menus::*, view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
@@ -146,9 +148,13 @@ pub struct SilexApp {
     editor_scroll: f32,
     /// Scroll to restore on the next frame (a tab shown again).
     pending_scroll: Option<f32>,
-    /// Cmd/Ctrl was held during this frame's clicks in the page: a link
-    /// opens in a new tab.
-    command_click: bool,
+    /// Modifiers held during this frame's clicks in the page: Cmd/Ctrl
+    /// opens a link in a new tab, Alt beside (ADR 0011).
+    click_modifiers: egui::Modifiers,
+    /// The page shown read-only beside the open one (H8.2).
+    side: Option<SidePanel>,
+    /// Width left of the window after the sidebar, as of the last frame.
+    main_width: f32,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -241,7 +247,9 @@ impl SilexApp {
             saved_tabs: String::new(),
             editor_scroll: 0.0,
             pending_scroll: None,
-            command_click: false,
+            click_modifiers: egui::Modifiers::NONE,
+            side: None,
+            main_width: 0.0,
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -358,6 +366,7 @@ impl SilexApp {
             self.links.picker = None;
             self.load_links()?;
             self.rebuild_tree();
+            self.refresh_side();
         }
         Ok(found)
     }
@@ -395,6 +404,7 @@ impl SilexApp {
         self.templates.list = self.db.list_templates()?;
         self.close_tabs_not_live();
         self.save_tabs();
+        self.refresh_side();
         // A linked page may have gone to the trash, or come back.
         self.load_links()?;
         self.trash_count = self.db.trash_count()?;
@@ -714,6 +724,8 @@ impl SilexApp {
                     .inner_margin(egui::Margin::symmetric(10, 14)),
             )
             .show(ui, |ui| self.sidebar(ui));
+        self.main_width = ui.available_width();
+        self.side_panel(ui);
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()

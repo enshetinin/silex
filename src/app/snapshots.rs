@@ -1445,6 +1445,71 @@ fn backups_menu() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- H8.2: the page beside ----
+
+/// «Notas de lectura» open, «Guía de estilo» beside it.
+fn beside_demo() -> anyhow::Result<SilexApp> {
+    let mut app = demo_app()?;
+    let find = |app: &SilexApp, title: &str| {
+        app.pages
+            .iter()
+            .find(|p| p.title == title)
+            .map(|p| p.id.clone())
+            .unwrap_or_default()
+    };
+    let notes = find(&app, "Notas de lectura");
+    let guide = find(&app, "Guía de estilo");
+    app.open_page(notes)?;
+    // Wide enough for both (the first frame measures it).
+    app.main_width = 1000.0;
+    app.open_beside(&guide)?;
+    Ok(app)
+}
+
+#[test]
+fn the_page_beside_has_names_keeps_its_width_and_edits_here() -> anyhow::Result<()> {
+    let mut harness = Harness::builder()
+        .with_size([1400.0, 800.0])
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), beside_demo()?);
+    harness.run();
+    assert_accessible(&harness, "page beside");
+    assert!(harness.query_by_label("Cerrar el panel lateral").is_some());
+    let edit = |h: &Harness<'_, SilexApp>| h.get_by_label("Editar aquí").rect();
+    let before = edit(&harness);
+    for _ in 0..30 {
+        harness.step();
+    }
+    assert_eq!(edit(&harness), before, "the panel keeps its width");
+    click_button(&mut harness, "Editar aquí");
+    harness.run();
+    let state = harness.state();
+    assert!(state.side.is_none());
+    let open = state.selected.clone().unwrap_or_default();
+    assert_eq!(
+        state.find_page(&open).map(|p| p.title.as_str()),
+        Some("Guía de estilo")
+    );
+    Ok(())
+}
+
+#[test]
+fn side_panel() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1400.0, 800.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), beside_demo()?);
+    harness.run();
+    harness.snapshot("side_panel_light");
+    Ok(())
+}
+
 // ---- H8.1: tabs ----
 
 /// The demo workspace with three tabs: «Guía de estilo» (active),

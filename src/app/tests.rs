@@ -3863,3 +3863,106 @@ fn tabs_come_back_after_closing_the_app() -> anyhow::Result<()> {
     assert_eq!(app.selected.as_deref(), Some(dos.as_str()));
     Ok(())
 }
+
+// ---- H8.2: the page beside ----
+
+#[test]
+fn a_page_beside_is_read_only_kept_up_to_date_and_can_be_edited_here() -> anyhow::Result<()> {
+    let (mut app, ctx, [uno, dos, _]) = tabs_app()?;
+    assert!(app.main_width >= side_panel::MIN_PAGE_WIDTH + side_panel::MIN_SIDE_WIDTH);
+    app.apply(RowAction::OpenBeside(dos.clone()))?;
+    let side = app.side.as_ref().expect("the panel opens");
+    assert_eq!(side.page, dos);
+    assert_eq!(
+        app.selected.as_deref(),
+        Some(uno.as_str()),
+        "the page stays open"
+    );
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Texto de Dos"), "{painted:?}");
+    assert!(painted.iter().any(|t| t == "Solo lectura"), "{painted:?}");
+    // Saving another copy of «Dos» shows at once (the panel reads it again).
+    let mut blocks = app.db.list_blocks(&dos)?;
+    blocks[0].content = "Dos, cambiado".into();
+    app.db.save_document(&dos, "Dos", &blocks)?;
+    app.blocks[0].content = "Uno, cambiado".into();
+    app.mark_dirty();
+    app.save_now()?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Dos, cambiado"), "{painted:?}");
+    // «Editar aquí»: in the active tab, and the panel closes.
+    let side = app.side.take().map(|s| s.page).unwrap_or_default();
+    app.open_page(side)?;
+    assert_eq!(app.selected.as_deref(), Some(dos.as_str()));
+    assert!(app.side.is_none());
+    Ok(())
+}
+
+#[test]
+fn a_narrow_window_says_so_instead_of_a_page_beside() -> anyhow::Result<()> {
+    let (mut app, _ctx, [_, dos, _]) = tabs_app()?;
+    app.main_width = 700.0;
+    app.open_beside(&dos)?;
+    assert!(app.side.is_none());
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(
+        notice.starts_with("La ventana es demasiado estrecha"),
+        "{notice}"
+    );
+    Ok(())
+}
+
+#[test]
+fn alt_click_on_a_link_opens_beside_and_the_trash_shows_there() -> anyhow::Result<()> {
+    let (mut app, ctx, [uno, dos, _]) = tabs_app()?;
+    let link = Block {
+        page_id: uno.clone(),
+        kind: BlockKind::PageLink,
+        link: Some(dos.clone()),
+        ..block("enlace")
+    };
+    app.blocks.push(link);
+    app.mark_dirty();
+    app.save_now()?;
+    app_frame(&mut app, &ctx, vec![]);
+    app.click_modifiers = egui::Modifiers::ALT;
+    app.open_link("enlace")?;
+    assert_eq!(app.side.as_ref().map(|s| s.page.clone()), Some(dos.clone()));
+    assert_eq!(app.tabs.len(), 1, "not a tab");
+    // Sent to the trash: the panel says so.
+    app.trash_page(&dos)?;
+    assert!(matches!(
+        app.side.as_ref().map(|s| &s.content),
+        Some(SideContent::Gone)
+    ));
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t == "Esta página está en la papelera o ya no existe."),
+        "{painted:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_database_beside_shows_its_table() -> anyhow::Result<()> {
+    let (mut app, ctx, _) = tabs_app()?;
+    let base = app.db.create_database("Lecturas", None)?;
+    let row = app.db.create_row(&base, "Rayuela")?;
+    let autor = app
+        .db
+        .add_property(&base, "Autor", silex_desktop::property::PropertyKind::Text)?;
+    app.db.set_value(
+        &row,
+        &autor,
+        Some(&silex_desktop::property::CellValue::Text("Cortázar".into())),
+    )?;
+    app.reload_pages()?;
+    app.open_beside(&base)?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    for text in ["Lecturas", "Nombre", "Autor", "Rayuela", "Cortázar"] {
+        assert!(painted.iter().any(|t| t == text), "{text}: {painted:?}");
+    }
+    Ok(())
+}

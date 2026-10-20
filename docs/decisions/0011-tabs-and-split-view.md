@@ -45,6 +45,7 @@ Lo que ya existe y condiciona la decisión:
 - **«Editar aquí»** pasa esa página a la pestaña activa (el panel se cierra). **«×»** cierra el panel. El divisor entre los dos se puede arrastrar.
 - **Se mantiene al día:** el panel relee su página al cambiar de página o de pestaña, y tras cada guardado. Si la página va a la papelera, el panel lo dice.
 - **Ancho:** el panel solo aparece si la ventana es lo bastante ancha (al menos 900 puntos para la página principal más 320 para el panel); si no, lo dice y propone abrirla en una pestaña.
+  - *Actualización (H8.2):* 480 + 300 puntos a la derecha de la barra lateral. Con 900 + 320 hacía falta una ventana de casi 1500 píxeles, más que la de muchos portátiles, y la columna de texto (720 como mucho) se lee bien desde 480. Si la ventana se estrecha con el panel abierto, el panel se oculta y vuelve al ensancharla.
 
 ### Encaje con lo que ya existe
 - **Sin cambios en el esquema** ni en `src/db.rs`, salvo guardar las pestañas abiertas si se decide así (pregunta 2), como un ajuste más en `settings`.
