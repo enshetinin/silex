@@ -219,3 +219,35 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - Restaura una versión con un archivo adjunto que luego borraste de la página: el archivo vuelve. Haz «Liberar espacio» antes de restaurar: no lo borra.
 - Cierra y vuelve a abrir la app: las versiones siguen ahí.
 - Con VoiceOver: cada versión se anuncia con su fecha y hora, y el botón como «Restaurar esta versión».
+
+## 24. Plantillas (H7.10–H7.11)
+- Despliega «Plantillas» en la barra lateral: aparecen Reunión, Diario y Lista de tareas. Mándalas a la papelera, cierra y abre la app, despliega otra vez: no vuelven.
+- En el menú «…» de una página: «Guardar como plantilla». Aparece en «Plantillas»; la página sigue igual y abierta. Una base de datos y una fila no lo ofrecen.
+- Abre una plantilla: dice «Plantilla» (al pasar el ratón explica `{{fecha}}`) y no tiene estrella. Edítala, también su título; Cmd+Z y el historial funcionan.
+- «Usar esta plantilla» (o el «+» de su fila): se crea y abre una página con `{{fecha}}` cambiado por la fecha de hoy, con el título listo para escribir. Los adjuntos y los enlaces de la plantilla funcionan en la página nueva.
+- «+» de «Páginas» → «Nueva página desde plantilla…», y Cmd+K → «plantilla»: el buscador filtra al escribir, ↑ ↓ e Intro crean la página, Esc cierra sin crear nada. Desde el menú «…» de una página, la nueva va dentro de ella y lo dice.
+- Las plantillas no salen en el árbol, en Cmd+K, al enlazar (`[[`) ni en «Enlazada desde». «Exportar todo» las escribe en `Plantillas/`.
+- Con VoiceOver: «Plantillas» se anuncia como botón (desplegado o no), y cada plantilla del buscador por su título.
+
+## 25. Pestañas (H8.1)
+- Cmd/Ctrl+clic en una página de la barra lateral (o clic central, o «Abrir en una pestaña nueva» en su menú): aparece la barra de pestañas con las dos. Un clic normal cambia la página de la pestaña actual.
+- Cmd/Ctrl+clic en una tarjeta de enlace y en «Enlazada desde»: en una pestaña nueva.
+- Escribe en una pestaña, cambia a otra y vuelve: Cmd+Z deshace lo escrito, y la página está desplazada donde la dejaste.
+- Ctrl+Tab y Ctrl+Mayús+Tab recorren las pestañas; Cmd/Ctrl+1…8 van a cada una y Cmd/Ctrl+9 a la última. En macOS, Ctrl+Tab es la tecla Control.
+- Cmd/Ctrl+W y la «×» cierran la pestaña; la última no se cierra. Clic central en una pestaña también la cierra.
+- Cmd/Ctrl+T abre la búsqueda; lo que elijas se abre en una pestaña nueva.
+- Abre 13 pestañas: se cierra la que usaste hace más tiempo, nunca la que ves.
+- Manda a la papelera una página con pestaña: la pestaña se cierra. Si era la activa, se ve la de al lado.
+- Cierra la app con varias pestañas y vuelve a abrirla: vuelven, con la misma activa.
+- Con VoiceOver: cada pestaña se anuncia como pestaña, con su título y si está seleccionada; su «×» como «Cerrar «Título»».
+
+## 26. Vista dividida de consulta (H8.2)
+- Alt+clic en una página de la barra lateral (o «Abrir al lado» en su menú): aparece a la derecha, con «Solo lectura»; la página abierta sigue editable.
+- Alt+clic en una tarjeta de enlace o en «Enlazada desde»: también al lado.
+- En el panel, un clic en un enlace abre esa página en el panel; un clic en un archivo lo abre con la app del sistema (un script solo se muestra en su carpeta).
+- Una base de datos al lado muestra su tabla (nombre y propiedades); un clic en el nombre de una fila la abre en el panel. Con 1000 filas («Base de prueba» de la semilla) se desplaza con fluidez.
+- Edita en la página principal la misma página que se ve al lado: tras el autoguardado, el panel la muestra al día.
+- Manda a la papelera la página del panel: dice que está en la papelera.
+- «Editar aquí» la pasa a la pestaña activa y cierra el panel; «×» lo cierra. Arrastra el borde del panel: cambia de ancho, sin dejar la página principal por debajo de 480 puntos.
+- Estrecha la ventana: el panel desaparece y vuelve al ensancharla. Con la ventana estrecha, «Abrir al lado» explica por qué no se abre.
+- Con VoiceOver: «Editar aquí» y «Cerrar el panel lateral» se anuncian como botones.

@@ -3551,3 +3551,418 @@ fn a_page_with_files_is_exported_in_the_background() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---- H7.11: templates in the window ----
+
+/// «Notas» (with a paragraph) and «Proyectos», «Notas» open.
+fn templates_app() -> anyhow::Result<(SilexApp, egui::Context, String, String)> {
+    let mut db = Database::open_in_memory()?;
+    let notas = db.create_page("Notas", None)?;
+    let proyectos = db.create_page("Proyectos", None)?;
+    db.save_document(
+        &notas,
+        "Notas",
+        &[Block {
+            page_id: notas.clone(),
+            content: "Escrito el {{fecha}}".into(),
+            ..block("n")
+        }],
+    )?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(notas.clone())?;
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, notas, proyectos))
+}
+
+#[test]
+fn a_page_saved_as_a_template_is_listed_and_stays_as_it_was() -> anyhow::Result<()> {
+    let (mut app, ctx, notas, _) = templates_app()?;
+    assert!(app.templates.list.is_empty());
+    app.run_command(&ctx, silex_desktop::palette::Command::SaveAsTemplate)?;
+    assert_eq!(app.templates.list.len(), 1);
+    assert!(app.templates.open, "the section unfolds to show it");
+    assert_eq!(
+        app.selected.as_deref(),
+        Some(notas.as_str()),
+        "the page stays open"
+    );
+    assert!(app.pages.iter().all(|p| p.id != app.templates.list[0].id));
+    let notice = app.notice.clone().unwrap_or_default();
+    assert_eq!(notice, "«Notas» se guardó como plantilla, en «Plantillas».");
+    // Not from a database.
+    app.create_database(None)?;
+    assert!(
+        app.run_command(&ctx, silex_desktop::palette::Command::SaveAsTemplate)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn the_picker_makes_a_page_from_a_template_with_todays_date() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, notas, proyectos) = templates_app()?;
+    // The «…» menu of «Proyectos»: the page goes inside it.
+    app.apply(RowAction::FromTemplate(Some(proyectos.clone())))?;
+    assert_eq!(app.templates.list.len(), 3, "the examples, the first time");
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("diar"));
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t == "Se creará dentro de «Proyectos»."),
+        "{painted:?}"
+    );
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.templates.picker.is_none());
+    let today = app.db.local_today()?;
+    let expected = silex_desktop::templates::fill_date("Diario {{fecha}}", &today);
+    assert_eq!(app.title, expected);
+    assert!(app.focus_title, "the title is ready to edit");
+    let page = app.selected.clone().expect("the new page is open");
+    assert_ne!(page, notas);
+    let parent = app
+        .pages
+        .iter()
+        .find(|p| p.id == page)
+        .and_then(|p| p.parent_id.clone());
+    assert_eq!(parent.as_deref(), Some(proyectos.as_str()));
+    assert!(app.expanded.contains(&proyectos), "visible in the tree");
+    assert!(!app.blocks.is_empty());
+    // Esc closes the picker without creating anything.
+    let pages = app.pages.len();
+    app.run_command(&ctx, silex_desktop::palette::Command::NewFromTemplate)?;
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.templates.picker.is_none());
+    assert_eq!(app.pages.len(), pages);
+    Ok(())
+}
+
+#[test]
+fn an_open_template_says_so_is_editable_and_survives_other_trashing() -> anyhow::Result<()> {
+    let (mut app, ctx, notas, proyectos) = templates_app()?;
+    app.save_as_template(&notas)?;
+    let template = app.templates.list[0].id.clone();
+    app.open_page(template.clone())?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Plantilla"), "{painted:?}");
+    assert!(
+        painted.iter().any(|t| t.ends_with("Usar esta plantilla")),
+        "{painted:?}"
+    );
+    // Edited like a page, with history and links.
+    assert!(app.page_shows_blocks(&template));
+    app.title = "Notas de reunión".into();
+    app.mark_dirty();
+    app.save_now()?;
+    assert_eq!(app.templates.list[0].title, "Notas de reunión");
+    assert!(
+        app.pages.iter().all(|p| p.id != template),
+        "still not a page"
+    );
+    // Trashing another page does not leave it.
+    app.trash_page(&proyectos)?;
+    assert_eq!(app.selected.as_deref(), Some(template.as_str()));
+    // «Usar esta plantilla»: a page at the root, with the date filled.
+    app.apply(RowAction::UseTemplate(template.clone(), None))?;
+    assert_eq!(app.title, "Notas de reunión");
+    let text = app.blocks[0].content.clone();
+    assert!(
+        text.starts_with("Escrito el ") && !text.contains("{{"),
+        "{text}"
+    );
+    // Trashing the open template opens a page.
+    app.open_page(template.clone())?;
+    app.trash_page(&template)?;
+    assert!(app.templates.list.is_empty());
+    assert_ne!(app.selected.as_deref(), Some(template.as_str()));
+    Ok(())
+}
+
+// ---- H8.1: tabs ----
+
+/// «Uno», «Dos» and «Tres», each with a paragraph; «Uno» open.
+fn tabs_app() -> anyhow::Result<(SilexApp, egui::Context, [String; 3])> {
+    let mut db = Database::open_in_memory()?;
+    let mut ids = Vec::new();
+    for title in ["Uno", "Dos", "Tres"] {
+        let id = db.create_page(title, None)?;
+        db.save_document(
+            &id,
+            title,
+            &[Block {
+                page_id: id.clone(),
+                content: format!("Texto de {title}"),
+                ..block(&format!("b-{title}"))
+            }],
+        )?;
+        ids.push(id);
+    }
+    let mut app = SilexApp::new(db)?;
+    app.open_page(ids[0].clone())?;
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![]);
+    let ids: [String; 3] = ids.try_into().map_err(|_| anyhow::anyhow!("three pages"))?;
+    Ok((app, ctx, ids))
+}
+
+fn tab_ids(app: &SilexApp) -> Vec<String> {
+    app.tabs.ids().to_vec()
+}
+
+#[test]
+fn a_click_replaces_the_tab_and_cmd_click_opens_another() -> anyhow::Result<()> {
+    let (mut app, _ctx, [uno, dos, tres]) = tabs_app()?;
+    assert_eq!(tab_ids(&app), std::slice::from_ref(&uno));
+    app.open_page(dos.clone())?;
+    assert_eq!(
+        tab_ids(&app),
+        std::slice::from_ref(&dos),
+        "a click: the same tab"
+    );
+    app.open_in_new_tab(&tres)?;
+    assert_eq!(tab_ids(&app), [dos.clone(), tres.clone()]);
+    assert_eq!(app.selected.as_deref(), Some(tres.as_str()));
+    // A page that has a tab: its tab is shown, not a copy.
+    app.open_page(dos.clone())?;
+    assert_eq!(tab_ids(&app), [dos.clone(), tres.clone()]);
+    assert_eq!(app.tabs.active(), 0);
+    // The «…» menu and Cmd/Ctrl+click in the sidebar.
+    app.apply(RowAction::OpenInNewTab(uno.clone()))?;
+    assert_eq!(tab_ids(&app), [dos, uno.clone(), tres]);
+    assert_eq!(app.selected.as_deref(), Some(uno.as_str()));
+    Ok(())
+}
+
+#[test]
+fn each_tab_keeps_its_undo_and_scroll() -> anyhow::Result<()> {
+    let (mut app, ctx, [uno, dos, _]) = tabs_app()?;
+    app.blocks[0].content = "Uno cambiado".into();
+    app.mark_dirty();
+    app.editor_scroll = 120.0;
+    app.open_in_new_tab(&dos)?;
+    assert_eq!(
+        app.db.list_blocks(&uno)?[0].content,
+        "Uno cambiado",
+        "saved on leaving"
+    );
+    assert!(!app.history.can_undo(), "«Dos» has its own history");
+    // Back to «Uno»: Cmd+Z still undoes the change, and the scroll is back.
+    app.select_tab(0)?;
+    assert_eq!(app.pending_scroll, Some(120.0));
+    assert!(app.history.can_undo());
+    app.undo();
+    assert_eq!(app.blocks[0].content, "Texto de Uno");
+    app_frame(&mut app, &ctx, vec![]);
+    // Closing a tab forgets its undo.
+    app.close_tab(0)?;
+    app.open_in_new_tab(&uno)?;
+    assert!(!app.history.can_undo());
+    Ok(())
+}
+
+#[test]
+fn tabs_close_and_switch_with_the_keyboard() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, [uno, dos, tres]) = tabs_app()?;
+    app.open_in_new_tab(&dos)?;
+    app.open_in_new_tab(&tres)?;
+    assert_eq!(tab_ids(&app), [uno.clone(), dos.clone(), tres.clone()]);
+    app_frame(&mut app, &ctx, vec![key(Key::Num1, M::COMMAND)]);
+    assert_eq!(app.selected.as_deref(), Some(uno.as_str()));
+    app_frame(&mut app, &ctx, vec![key(Key::Num9, M::COMMAND)]);
+    assert_eq!(app.selected.as_deref(), Some(tres.as_str()), "9: the last");
+    app_frame(&mut app, &ctx, vec![key(Key::Tab, M::CTRL)]);
+    assert_eq!(app.selected.as_deref(), Some(uno.as_str()), "goes round");
+    app_frame(&mut app, &ctx, vec![key(Key::Tab, M::CTRL | M::SHIFT)]);
+    assert_eq!(app.selected.as_deref(), Some(tres.as_str()));
+    app_frame(&mut app, &ctx, vec![key(Key::W, M::COMMAND)]);
+    assert_eq!(tab_ids(&app), [uno.clone(), dos.clone()]);
+    assert_eq!(app.selected.as_deref(), Some(dos.as_str()));
+    app_frame(&mut app, &ctx, vec![key(Key::W, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![key(Key::W, M::COMMAND)]);
+    assert_eq!(
+        tab_ids(&app),
+        std::slice::from_ref(&uno),
+        "the last tab stays"
+    );
+    // Cmd+T: the search, and what is chosen opens in a new tab.
+    app_frame(&mut app, &ctx, vec![key(Key::T, M::COMMAND)]);
+    assert!(app.search.as_ref().is_some_and(|s| s.new_tab));
+    app_frame(&mut app, &ctx, type_text("Dos"));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(tab_ids(&app), [uno, dos.clone()]);
+    assert_eq!(app.selected.as_deref(), Some(dos.as_str()));
+    Ok(())
+}
+
+#[test]
+fn a_page_sent_to_the_trash_closes_its_tab() -> anyhow::Result<()> {
+    let (mut app, _ctx, [uno, dos, tres]) = tabs_app()?;
+    app.open_in_new_tab(&dos)?;
+    app.open_in_new_tab(&tres)?;
+    // Another tab's page: the open one stays.
+    app.trash_page(&uno)?;
+    assert_eq!(tab_ids(&app), [dos.clone(), tres.clone()]);
+    assert_eq!(app.selected.as_deref(), Some(tres.as_str()));
+    // The open one: its neighbour is shown.
+    app.trash_page(&tres)?;
+    assert_eq!(tab_ids(&app), std::slice::from_ref(&dos));
+    assert_eq!(app.selected.as_deref(), Some(dos.as_str()));
+    // Restoring does not reopen a tab.
+    app.restore_from_trash(&uno)?;
+    assert_eq!(tab_ids(&app), [uno]);
+    Ok(())
+}
+
+#[test]
+fn the_thirteenth_tab_closes_the_oldest() -> anyhow::Result<()> {
+    let (mut app, _ctx, [uno, _, _]) = tabs_app()?;
+    let mut ids = Vec::new();
+    for n in 0..12 {
+        ids.push(app.db.create_page(&format!("Página {n}"), None)?);
+    }
+    app.reload_pages()?;
+    for id in &ids {
+        app.open_in_new_tab(id)?;
+    }
+    assert_eq!(app.tabs.len(), silex_desktop::tabs::MAX_TABS);
+    assert!(
+        app.tabs.position(&uno).is_none(),
+        "«Uno», the oldest, closed"
+    );
+    Ok(())
+}
+
+#[test]
+fn tabs_come_back_after_closing_the_app() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-app-tabs")?;
+    let path = tmp.0.join("silex.sqlite3");
+    let (uno, dos, tres) = {
+        let db = Database::open(&path)?;
+        let uno = db.create_page("Uno", None)?;
+        let dos = db.create_page("Dos", None)?;
+        let tres = db.create_page("Tres", None)?;
+        let mut app = SilexApp::new(db)?;
+        app.startup_backup_pending = false;
+        app.open_page(uno.clone())?;
+        app.open_in_new_tab(&dos)?;
+        app.open_in_new_tab(&tres)?;
+        app.select_tab(1)?;
+        (uno, dos, tres)
+    };
+    // «Tres» went to the trash meanwhile (another copy of the app).
+    Database::open(&path)?.trash_page(&tres)?;
+    let mut app = SilexApp::new(Database::open(&path)?)?;
+    app.startup_backup_pending = false;
+    assert_eq!(tab_ids(&app), [uno, dos.clone()]);
+    assert_eq!(app.selected.as_deref(), Some(dos.as_str()));
+    Ok(())
+}
+
+// ---- H8.2: the page beside ----
+
+#[test]
+fn a_page_beside_is_read_only_kept_up_to_date_and_can_be_edited_here() -> anyhow::Result<()> {
+    let (mut app, ctx, [uno, dos, _]) = tabs_app()?;
+    assert!(app.main_width >= side_panel::MIN_PAGE_WIDTH + side_panel::MIN_SIDE_WIDTH);
+    app.apply(RowAction::OpenBeside(dos.clone()))?;
+    let side = app.side.as_ref().expect("the panel opens");
+    assert_eq!(side.page, dos);
+    assert_eq!(
+        app.selected.as_deref(),
+        Some(uno.as_str()),
+        "the page stays open"
+    );
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Texto de Dos"), "{painted:?}");
+    assert!(painted.iter().any(|t| t == "Solo lectura"), "{painted:?}");
+    // Saving another copy of «Dos» shows at once (the panel reads it again).
+    let mut blocks = app.db.list_blocks(&dos)?;
+    blocks[0].content = "Dos, cambiado".into();
+    app.db.save_document(&dos, "Dos", &blocks)?;
+    app.blocks[0].content = "Uno, cambiado".into();
+    app.mark_dirty();
+    app.save_now()?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Dos, cambiado"), "{painted:?}");
+    // «Editar aquí»: in the active tab, and the panel closes.
+    let side = app.side.take().map(|s| s.page).unwrap_or_default();
+    app.open_page(side)?;
+    assert_eq!(app.selected.as_deref(), Some(dos.as_str()));
+    assert!(app.side.is_none());
+    Ok(())
+}
+
+#[test]
+fn a_narrow_window_says_so_instead_of_a_page_beside() -> anyhow::Result<()> {
+    let (mut app, _ctx, [_, dos, _]) = tabs_app()?;
+    app.main_width = 700.0;
+    app.open_beside(&dos)?;
+    assert!(app.side.is_none());
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(
+        notice.starts_with("La ventana es demasiado estrecha"),
+        "{notice}"
+    );
+    Ok(())
+}
+
+#[test]
+fn alt_click_on_a_link_opens_beside_and_the_trash_shows_there() -> anyhow::Result<()> {
+    let (mut app, ctx, [uno, dos, _]) = tabs_app()?;
+    let link = Block {
+        page_id: uno.clone(),
+        kind: BlockKind::PageLink,
+        link: Some(dos.clone()),
+        ..block("enlace")
+    };
+    app.blocks.push(link);
+    app.mark_dirty();
+    app.save_now()?;
+    app_frame(&mut app, &ctx, vec![]);
+    app.click_modifiers = egui::Modifiers::ALT;
+    app.open_link("enlace")?;
+    assert_eq!(app.side.as_ref().map(|s| s.page.clone()), Some(dos.clone()));
+    assert_eq!(app.tabs.len(), 1, "not a tab");
+    // Sent to the trash: the panel says so.
+    app.trash_page(&dos)?;
+    assert!(matches!(
+        app.side.as_ref().map(|s| &s.content),
+        Some(SideContent::Gone)
+    ));
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t == "Esta página está en la papelera o ya no existe."),
+        "{painted:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_database_beside_shows_its_table() -> anyhow::Result<()> {
+    let (mut app, ctx, _) = tabs_app()?;
+    let base = app.db.create_database("Lecturas", None)?;
+    let row = app.db.create_row(&base, "Rayuela")?;
+    let autor = app
+        .db
+        .add_property(&base, "Autor", silex_desktop::property::PropertyKind::Text)?;
+    app.db.set_value(
+        &row,
+        &autor,
+        Some(&silex_desktop::property::CellValue::Text("Cortázar".into())),
+    )?;
+    app.reload_pages()?;
+    app.open_beside(&base)?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    for text in ["Lecturas", "Nombre", "Autor", "Rayuela", "Cortázar"] {
+        assert!(painted.iter().any(|t| t == text), "{text}: {painted:?}");
+    }
+    Ok(())
+}

@@ -21,6 +21,10 @@ pub(super) struct Rename {
 /// Something the user asked for on a page row (click, menu, keyboard).
 pub(super) enum RowAction {
     Open(String),
+    /// In a new tab (ADR 0011): Cmd/Ctrl+click, middle click or the menu.
+    OpenInNewTab(String),
+    /// Read-only beside the open page (ADR 0011): Alt+click or the menu.
+    OpenBeside(String),
     Toggle(String),
     StartRename(String),
     CommitRename,
@@ -30,6 +34,11 @@ pub(super) enum RowAction {
     Reorder(String, Shift),
     Move(String, Option<String>),
     Trash(String),
+    /// A new page from a template, inside a page or at the root (ADR 0010).
+    UseTemplate(String, Option<String>),
+    /// «Nueva página desde plantilla…», inside a page or at the root.
+    FromTemplate(Option<String>),
+    SaveAsTemplate(String),
 }
 
 /// Height of every sidebar row.
@@ -397,7 +406,10 @@ impl SilexApp {
         {
             actions.push(RowAction::Toggle(id.clone()));
         }
-        let plus_tip = if is_database {
+        let template = section == "tpl";
+        let plus_tip = if template {
+            "Nueva página desde esta plantilla"
+        } else if is_database {
             "Nueva fila"
         } else {
             "Nueva subpágina"
@@ -405,7 +417,11 @@ impl SilexApp {
         if let Some(plus) = out.plus.take()
             && plus.on_hover_text(plus_tip).clicked()
         {
-            actions.push(RowAction::Subpage(id.clone()));
+            actions.push(if template {
+                RowAction::UseTemplate(id.clone(), None)
+            } else {
+                RowAction::Subpage(id.clone())
+            });
         }
         if let Some(more) = &out.more {
             egui::Popup::menu(more).show(|ui| {
@@ -421,8 +437,13 @@ impl SilexApp {
             }
             return actions;
         }
+        let modifiers = ui.input(|i| i.modifiers);
         if out.row.double_clicked() {
             actions.push(RowAction::StartRename(id.clone()));
+        } else if out.row.clicked() && modifiers.alt {
+            actions.push(RowAction::OpenBeside(id.clone()));
+        } else if out.row.middle_clicked() || (out.row.clicked() && modifiers.command) {
+            actions.push(RowAction::OpenInNewTab(id.clone()));
         } else if out.row.clicked() {
             actions.push(RowAction::Open(id.clone()));
         }
@@ -466,6 +487,9 @@ impl SilexApp {
 
     /// Context menu for a page.
     pub(super) fn page_menu(&self, ui: &mut egui::Ui, id: &str) -> Option<RowAction> {
+        if self.templates.list.iter().any(|t| t.id == id) {
+            return self.template_menu(ui, id);
+        }
         let page = self.pages.iter().find(|p| p.id == id)?;
         let siblings: Vec<&str> = self
             .pages
@@ -480,6 +504,12 @@ impl SilexApp {
         if ui.button("Abrir").clicked() {
             action = Some(RowAction::Open(owned()));
         }
+        if ui.button("Abrir en una pestaña nueva").clicked() {
+            action = Some(RowAction::OpenInNewTab(owned()));
+        }
+        if ui.button("Abrir al lado").clicked() {
+            action = Some(RowAction::OpenBeside(owned()));
+        }
         if ui.button("Renombrar").clicked() {
             action = Some(RowAction::StartRename(owned()));
         }
@@ -490,6 +520,13 @@ impl SilexApp {
         };
         if ui.button(child).clicked() {
             action = Some(RowAction::Subpage(owned()));
+        }
+        // Templates (ADR 0010): not inside a database, nor of one.
+        if page.kind == PageKind::Page && ui.button("Nueva página desde plantilla…").clicked() {
+            action = Some(RowAction::FromTemplate(Some(owned())));
+        }
+        if self.can_save_as_template(id) && ui.button("Guardar como plantilla").clicked() {
+            action = Some(RowAction::SaveAsTemplate(owned()));
         }
         let favorite_label = if is_favorite {
             "Quitar de favoritos"
@@ -546,6 +583,8 @@ impl SilexApp {
     pub(super) fn apply(&mut self, action: RowAction) -> Result<()> {
         match action {
             RowAction::Open(id) => self.open_page(id),
+            RowAction::OpenInNewTab(id) => self.open_in_new_tab(&id),
+            RowAction::OpenBeside(id) => self.open_beside(&id),
             RowAction::Toggle(id) => {
                 self.toggle_expanded(&id);
                 Ok(())
@@ -564,6 +603,12 @@ impl SilexApp {
             RowAction::Reorder(id, shift) => self.reorder_page(&id, shift),
             RowAction::Move(id, parent) => self.move_page(&id, parent.as_deref()),
             RowAction::Trash(id) => self.trash_page(&id),
+            RowAction::UseTemplate(id, parent) => self.use_template(&id, parent.as_deref()),
+            RowAction::FromTemplate(parent) => {
+                self.open_template_picker(parent);
+                Ok(())
+            }
+            RowAction::SaveAsTemplate(id) => self.save_as_template(&id),
         }
     }
 
@@ -572,10 +617,7 @@ impl SilexApp {
             // The open page may have an unsaved title in the editor.
             Some(self.title.clone())
         } else {
-            self.pages
-                .iter()
-                .find(|p| p.id == id)
-                .map(|p| p.title.clone())
+            self.find_page(id).map(|p| p.title.clone())
         };
         if let Some(text) = current {
             self.rename = Some(Rename {
@@ -668,17 +710,26 @@ impl SilexApp {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 1.0;
                         self.favorite_rows(ui);
+                        self.template_rows(ui);
                         let add = section_header_with_add(ui, "Páginas", "Añadir");
                         egui::Popup::menu(&add).show(|ui| {
                             let page = ui.button((icons::icon(icons::PAGE), " Nueva página"));
                             let base =
                                 ui.button((icons::icon(icons::TABLE), " Nueva base de datos"));
+                            let template = ui.button((
+                                icons::icon(icons::COPY),
+                                " Nueva página desde plantilla…",
+                            ));
                             let result = if page.clicked() {
                                 ui.close();
                                 self.create_root_page("Sin título")
                             } else if base.clicked() {
                                 ui.close();
                                 self.create_database(None)
+                            } else if template.clicked() {
+                                ui.close();
+                                self.open_template_picker(None);
+                                Ok(())
                             } else {
                                 Ok(())
                             };
@@ -815,6 +866,20 @@ impl SilexApp {
                     (format!("{cmd}+Mayús+N"), "Nueva subpágina"),
                     (format!("{cmd}+K"), "Buscar páginas y acciones"),
                     ("Alt+↑ / Alt+↓".to_owned(), "Página anterior / siguiente"),
+                    (format!("{cmd}+clic"), "Abrir en una pestaña nueva"),
+                    ("Alt+clic".to_owned(), "Abrir al lado, solo para leer"),
+                    (
+                        format!("{cmd}+T / {cmd}+W"),
+                        "Nueva pestaña / cerrar pestaña",
+                    ),
+                    (
+                        "Ctrl+Tab / Ctrl+Mayús+Tab".to_owned(),
+                        "Pestaña siguiente / anterior",
+                    ),
+                    (
+                        format!("{cmd}+1 … {cmd}+9"),
+                        "Ir a una pestaña (9: la última)",
+                    ),
                     ("F2".to_owned(), "Renombrar la página abierta"),
                     (format!("{cmd}+S"), "Guardar ahora"),
                     (format!("{cmd}+Z / {cmd}+Mayús+Z"), "Deshacer / rehacer"),

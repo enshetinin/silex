@@ -32,6 +32,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (6, include_str!("db/migrations/0006_attachments.sql")),
     (7, include_str!("db/migrations/0007_page_links.sql")),
     (8, include_str!("db/migrations/0008_page_versions.sql")),
+    (9, include_str!("db/migrations/0009_templates.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -219,6 +220,29 @@ impl Database {
         ))
     }
 
+    /// The open tabs as last stored ([`crate::tabs::Tabs::to_json`]), if
+    /// any (ADR 0011). Kept in `settings`, which ignores the key.
+    pub fn open_tabs(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [OPEN_TABS],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Remembers the open tabs, to reopen them at the next start.
+    pub fn save_open_tabs(&self, json: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![OPEN_TABS, json],
+        )?;
+        Ok(())
+    }
+
     /// Stores every preference in one transaction.
     pub fn save_settings(&mut self, settings: &Settings) -> Result<()> {
         let tx = self.conn.transaction()?;
@@ -240,7 +264,7 @@ impl Database {
             "UPDATE pages SET favorite_at = CASE WHEN ?2
                  THEN COALESCE(favorite_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                  ELSE NULL END
-             WHERE id = ?1 AND deleted_at IS NULL",
+             WHERE id = ?1 AND deleted_at IS NULL AND template_at IS NULL",
             params![id, favorite],
         )?;
         ensure!(affected == 1, "La página no existe o está en la papelera");
@@ -252,22 +276,29 @@ impl Database {
     pub fn list_favorites(&self) -> Result<Vec<Page>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, parent_id, title, kind FROM pages
-             WHERE favorite_at IS NOT NULL AND deleted_at IS NULL
+             WHERE favorite_at IS NOT NULL AND deleted_at IS NULL AND template_at IS NULL
              ORDER BY favorite_at, id",
         )?;
         let rows = stmt.query_map([], |r| read_page(r, 0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Live pages, without templates (ADR 0010): what the tree, the page
+    /// picker, «Mover a…» and the export of the workspace show.
     pub fn list_pages(&self) -> Result<Vec<Page>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_id, title, kind FROM pages WHERE deleted_at IS NULL ORDER BY sort_order, created_at, id",
+            "SELECT id, parent_id, title, kind FROM pages
+             WHERE deleted_at IS NULL AND template_at IS NULL
+             ORDER BY sort_order, created_at, id",
         )?;
         let rows = stmt.query_map([], |r| read_page(r, 0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn create_page(&self, title: &str, parent_id: Option<&str>) -> Result<String> {
+        if let Some(parent) = parent_id {
+            ensure!(!is_template(&self.conn, parent)?, NO_SUBPAGES);
+        }
         let id = Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO pages (id, title, parent_id, sort_order)
@@ -289,8 +320,13 @@ impl Database {
             )
         };
         ensure!(live(id)?, "La página no existe o está en la papelera");
+        ensure!(
+            !is_template(&tx, id)?,
+            "Una plantilla no se puede mover: siempre está en «Plantillas»"
+        );
         if let Some(parent) = new_parent {
             ensure!(live(parent)?, "El destino no existe o está en la papelera");
+            ensure!(!is_template(&tx, parent)?, NO_SUBPAGES);
             ensure!(
                 page_kind(&tx, parent)? != Some(PageKind::Database),
                 "Una página no se puede mover dentro de una base de datos"
@@ -337,13 +373,16 @@ impl Database {
             )
             .optional()?
             .context("La página no existe o está en la papelera")?;
-        // Same order as list_pages, restricted to live siblings.
+        // Same order as list_pages, restricted to live siblings. Templates
+        // are ordered among templates, pages among pages (ADR 0010).
+        let template = is_template(&tx, id)?;
         let mut siblings: Vec<String> = tx
             .prepare(
                 "SELECT id FROM pages WHERE parent_id IS ?1 AND deleted_at IS NULL
+                     AND (template_at IS NOT NULL) = ?2
                  ORDER BY sort_order, created_at, id",
             )?
-            .query_map([&parent], |r| r.get(0))?
+            .query_map(params![parent, template], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let index = siblings
             .iter()
@@ -383,12 +422,158 @@ impl Database {
         Ok(())
     }
 
+    /// Live templates (ADR 0010), in their order.
+    pub fn list_templates(&self) -> Result<Vec<Page>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_id, title, kind FROM pages
+             WHERE deleted_at IS NULL AND template_at IS NOT NULL
+             ORDER BY sort_order, created_at, id",
+        )?;
+        let rows = stmt.query_map([], |r| read_page(r, 0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Whether `id` is a template, live or in the trash.
+    pub fn is_template(&self, id: &str) -> Result<bool> {
+        is_template(&self.conn, id)
+    }
+
+    /// «Guardar como plantilla» (ADR 0010): a new template with the title
+    /// and blocks of a live page, which stays as it was. Not for databases,
+    /// their rows, or templates. Returns the template's id.
+    pub fn save_as_template(&mut self, page_id: &str) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        ensure!(
+            page_kind(&tx, page_id)? == Some(PageKind::Page),
+            "Solo una página (no una base de datos) se puede guardar como plantilla"
+        );
+        ensure!(
+            !is_template(&tx, page_id)?,
+            "Esta página ya es una plantilla"
+        );
+        let (title, parent): (String, Option<String>) = tx.query_row(
+            "SELECT title, parent_id FROM pages WHERE id = ?1",
+            [page_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if let Some(parent) = &parent {
+            ensure!(
+                page_kind(&tx, parent)? != Some(PageKind::Database),
+                "Una fila de una base de datos no se puede guardar como plantilla"
+            );
+        }
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            &format!(
+                "INSERT INTO pages (id, title, template_at, sort_order)
+                 VALUES (?1, ?2, {NOW}, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages
+                                         WHERE parent_id IS NULL AND template_at IS NOT NULL))"
+            ),
+            params![id, title],
+        )?;
+        copy_blocks(&tx, page_id, &id, None)?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// «Nueva página desde plantilla» (ADR 0010): a page with the title and
+    /// blocks of a live template, last inside `parent` (or at the root).
+    /// `{{fecha}}` becomes `today` (`YYYY-MM-DD`, local) as a long date.
+    /// The blocks get new ids; files and links are the same. Not inside a
+    /// database or a template. Returns the new page's id.
+    pub fn create_from_template(
+        &mut self,
+        template_id: &str,
+        parent: Option<&str>,
+        today: &str,
+    ) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        let title: Option<String> = tx
+            .query_row(
+                "SELECT title FROM pages
+                 WHERE id = ?1 AND deleted_at IS NULL AND template_at IS NOT NULL",
+                [template_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(title) = title else {
+            bail!("La plantilla no existe o está en la papelera");
+        };
+        if let Some(parent) = parent {
+            ensure!(!is_template(&tx, parent)?, NO_SUBPAGES);
+            match page_kind(&tx, parent)? {
+                None => bail!("El destino no existe o está en la papelera"),
+                Some(PageKind::Database) => {
+                    bail!("Una plantilla no se puede usar dentro de una base de datos")
+                }
+                Some(PageKind::Page) => {}
+            }
+        }
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO pages (id, title, parent_id, sort_order)
+             VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages
+                                  WHERE parent_id IS ?3 AND template_at IS NULL))",
+            params![id, crate::templates::fill_date(&title, today), parent],
+        )?;
+        copy_blocks(&tx, template_id, &id, Some(today))?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Creates the example templates (ADR 0010) the first time; never
+    /// again, even if they are trashed. Returns whether it created them.
+    pub fn create_example_templates(&mut self) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let done: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM settings WHERE key = ?1)",
+            [EXAMPLE_TEMPLATES],
+            |r| r.get(0),
+        )?;
+        if done {
+            return Ok(false);
+        }
+        for (title, blocks) in crate::templates::examples() {
+            let id = Uuid::new_v4().to_string();
+            tx.execute(
+                &format!(
+                    "INSERT INTO pages (id, title, template_at, sort_order)
+                     VALUES (?1, ?2, {NOW}, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages
+                                             WHERE parent_id IS NULL AND template_at IS NOT NULL))"
+                ),
+                params![id, title],
+            )?;
+            for (position, block) in blocks.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        id,
+                        block.kind.as_str(),
+                        block.content,
+                        block.checked,
+                        position as i64,
+                        block.indent
+                    ],
+                )?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, '1')",
+            [EXAMPLE_TEMPLATES],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Creates a database (ADR 0006): a page of kind `database` with its first
     /// view, «Tabla», in one transaction. It goes last among its siblings.
     /// A database cannot be created inside another one (it would be a row).
     pub fn create_database(&mut self, title: &str, parent_id: Option<&str>) -> Result<String> {
         let tx = self.conn.transaction()?;
         if let Some(parent) = parent_id {
+            ensure!(!is_template(&tx, parent)?, NO_SUBPAGES);
             match page_kind(&tx, parent)? {
                 None => bail!("El destino no existe o está en la papelera"),
                 Some(PageKind::Database) => {
@@ -955,6 +1140,9 @@ impl Database {
             "Una página nueva no puede crearse con archivos adjuntos"
         );
         let tx = self.conn.transaction()?;
+        if let Some(parent) = parent_id {
+            ensure!(!is_template(&tx, parent)?, NO_SUBPAGES);
+        }
         let page_id = Uuid::new_v4().to_string();
         tx.execute(
             "INSERT INTO pages (id, title, parent_id, sort_order)
@@ -1478,6 +1666,7 @@ impl Database {
             "SELECT DISTINCT p.id
              FROM blocks b JOIN pages p ON p.id = b.page_id
              WHERE b.link_page_id = ?1 AND p.id <> ?1 AND p.deleted_at IS NULL
+                   AND p.template_at IS NULL
              ORDER BY p.title, p.id",
         )?;
         let ids = stmt
@@ -1650,7 +1839,7 @@ impl Database {
         };
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT p.id, p.parent_id, p.title, p.kind FROM pages p
-             WHERE p.deleted_at IS NULL AND (
+             WHERE p.deleted_at IS NULL AND p.template_at IS NULL AND (
                  p.rowid IN (SELECT rowid FROM page_search WHERE page_search MATCH ?1)
                  OR p.id IN (
                      SELECT b.page_id FROM blocks b
@@ -1681,7 +1870,7 @@ impl Database {
         let mut titles = tx.prepare(
             "SELECT p.id, p.parent_id, p.title, p.kind, bm25(page_search), highlight(page_search, 0, ?2, ?3)
              FROM page_search JOIN pages p ON p.rowid = page_search.rowid
-             WHERE page_search MATCH ?1 AND p.deleted_at IS NULL",
+             WHERE page_search MATCH ?1 AND p.deleted_at IS NULL AND p.template_at IS NULL",
         )?;
         let rows = titles.query_map(params![query, start, end], |r| {
             Ok(Candidate {
@@ -1700,7 +1889,7 @@ impl Database {
             "SELECT p.id, p.parent_id, p.title, p.kind, b.id, b.rowid, bm25(block_search) AS score
              FROM block_search JOIN blocks b ON b.rowid = block_search.rowid
              JOIN pages p ON p.id = b.page_id
-             WHERE block_search MATCH ?1 AND p.deleted_at IS NULL
+             WHERE block_search MATCH ?1 AND p.deleted_at IS NULL AND p.template_at IS NULL
              ORDER BY score, b.position, b.rowid",
         )?;
         let rows = blocks.query_map([&query], |r| {
@@ -1890,6 +2079,10 @@ fn read_page(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Page> {
 /// Mark of a compaction in progress, in `settings` (ignored by
 /// `Settings::from_pairs` like any unknown key).
 const COMPACTING: &str = "compacting";
+/// `settings` key of the open tabs (ADR 0011).
+const OPEN_TABS: &str = "open_tabs";
+/// `settings` key set once the example templates were created (ADR 0010).
+const EXAMPLE_TEMPLATES: &str = "example_templates";
 
 /// What the database file and its attachments take (H7.4), in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2017,4 +2210,56 @@ fn save_version(
         tx.execute("DELETE FROM page_versions WHERE id = ?1", [id])?;
     }
     Ok(true)
+}
+
+/// Refused when something would go inside a template (ADR 0010).
+const NO_SUBPAGES: &str = "Una plantilla no puede tener subpáginas";
+
+/// Whether `id` is a template (live or in the trash).
+fn is_template(conn: &Connection, id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND template_at IS NOT NULL)",
+        [id],
+        |r| r.get(0),
+    )?)
+}
+
+/// Copies the blocks of `from` to the new page `to` (new ids, same files
+/// and links), in the caller's transaction. With `today`, `{{fecha}}` in
+/// their text becomes that date (ADR 0010).
+fn copy_blocks(tx: &Connection, from: &str, to: &str, today: Option<&str>) -> Result<()> {
+    let blocks: Vec<Block> = tx
+        .prepare(
+            "SELECT id, page_id, kind, content, checked, position, indent, attachment_id,
+                    link_page_id
+             FROM blocks WHERE page_id = ?1 ORDER BY position, id",
+        )?
+        .query_map([from], read_block)?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut insert = tx.prepare(
+        "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent,
+                             attachment_id, link_page_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )?;
+    for (position, block) in blocks.iter().enumerate() {
+        // A link's text is its page's title: never a date to fill.
+        let content = match today {
+            Some(today) if block.link.is_none() => {
+                crate::templates::fill_date(&block.content, today)
+            }
+            _ => block.content.clone(),
+        };
+        insert.execute(params![
+            Uuid::new_v4().to_string(),
+            to,
+            block.kind.as_str(),
+            content,
+            block.checked,
+            position as i64,
+            block.indent,
+            block.attachment,
+            block.link
+        ])?;
+    }
+    Ok(())
 }

@@ -334,8 +334,8 @@ impl SilexApp {
         open
     }
 
-    /// Opens the page a link points at; one in the trash is offered for
-    /// restoring first.
+    /// Opens the page a link points at (as the click asks: here, in a new
+    /// tab or beside); one in the trash is offered for restoring first.
     pub(super) fn open_link(&mut self, block: &str) -> Result<()> {
         let Some(link) = self.blocks.iter().find(|b| b.id == block) else {
             return Ok(());
@@ -343,7 +343,7 @@ impl SilexApp {
         match link_state(&self.pages, &self.links.targets, link) {
             LinkState::Live { .. } => {
                 if let Some(target) = link.link.clone() {
-                    self.open_page(target)?;
+                    self.open_clicked(target)?;
                 }
             }
             LinkState::Trashed { title } => {
@@ -413,11 +413,10 @@ impl SilexApp {
 
     /// Whether the open page shows blocks (not a database's table).
     fn can_hold_blocks(&self) -> bool {
-        self.selected.as_ref().is_some_and(|id| {
-            self.pages
-                .iter()
-                .any(|p| p.id == *id && p.kind == PageKind::Page)
-        })
+        self.selected
+            .as_ref()
+            .and_then(|id| self.find_page(id))
+            .is_some_and(|p| p.kind == PageKind::Page)
     }
 
     /// «[[» just typed in the block being edited: the two brackets go and

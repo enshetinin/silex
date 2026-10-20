@@ -1445,6 +1445,237 @@ fn backups_menu() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- H8.2: the page beside ----
+
+/// «Notas de lectura» open, «Guía de estilo» beside it.
+fn beside_demo() -> anyhow::Result<SilexApp> {
+    let mut app = demo_app()?;
+    let find = |app: &SilexApp, title: &str| {
+        app.pages
+            .iter()
+            .find(|p| p.title == title)
+            .map(|p| p.id.clone())
+            .unwrap_or_default()
+    };
+    let notes = find(&app, "Notas de lectura");
+    let guide = find(&app, "Guía de estilo");
+    app.open_page(notes)?;
+    // Wide enough for both (the first frame measures it).
+    app.main_width = 1000.0;
+    app.open_beside(&guide)?;
+    Ok(app)
+}
+
+#[test]
+fn the_page_beside_has_names_keeps_its_width_and_edits_here() -> anyhow::Result<()> {
+    let mut harness = Harness::builder()
+        .with_size([1400.0, 800.0])
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), beside_demo()?);
+    harness.run();
+    assert_accessible(&harness, "page beside");
+    assert!(harness.query_by_label("Cerrar el panel lateral").is_some());
+    let edit = |h: &Harness<'_, SilexApp>| h.get_by_label("Editar aquí").rect();
+    let before = edit(&harness);
+    for _ in 0..30 {
+        harness.step();
+    }
+    assert_eq!(edit(&harness), before, "the panel keeps its width");
+    click_button(&mut harness, "Editar aquí");
+    harness.run();
+    let state = harness.state();
+    assert!(state.side.is_none());
+    let open = state.selected.clone().unwrap_or_default();
+    assert_eq!(
+        state.find_page(&open).map(|p| p.title.as_str()),
+        Some("Guía de estilo")
+    );
+    Ok(())
+}
+
+#[test]
+fn side_panel() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1400.0, 800.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), beside_demo()?);
+    harness.run();
+    harness.snapshot("side_panel_light");
+    Ok(())
+}
+
+// ---- H8.1: tabs ----
+
+/// The demo workspace with three tabs: «Guía de estilo» (active),
+/// «Recetas» and «Notas de lectura».
+fn tabs_demo() -> anyhow::Result<SilexApp> {
+    let mut app = demo_app()?;
+    let find = |app: &SilexApp, title: &str| {
+        app.pages
+            .iter()
+            .find(|p| p.title == title)
+            .map(|p| p.id.clone())
+            .unwrap_or_default()
+    };
+    let guide = find(&app, "Guía de estilo");
+    let recipes = find(&app, "Recetas");
+    let notes = find(&app, "Notas de lectura");
+    app.open_page(guide)?;
+    app.open_in_new_tab(&recipes)?;
+    app.open_in_new_tab(&notes)?;
+    app.select_tab(0)?;
+    Ok(app)
+}
+
+#[test]
+fn tabs_are_named_and_a_click_switches() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(tabs_demo()?);
+    assert_accessible(&harness, "tabs");
+    let tabs: Vec<String> = harness
+        .root()
+        .children_recursive()
+        .map(|n| n.accesskit_node())
+        .filter(|n| n.role() == egui::accesskit::Role::Tab)
+        .filter_map(|n| n.label())
+        .collect();
+    assert_eq!(tabs, ["Guía de estilo", "Recetas", "Notas de lectura"]);
+    assert!(harness.query_by_label("Cerrar «Guía de estilo»").is_some());
+    // The bar keeps its size frame after frame.
+    let rect = |h: &Harness<'_, SilexApp>| {
+        h.get_all_by_label("Notas de lectura")
+            .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Tab)
+            .map(|n| n.rect())
+    };
+    let before = rect(&harness);
+    for _ in 0..30 {
+        harness.step();
+    }
+    assert_eq!(rect(&harness), before);
+    harness
+        .get_all_by_label("Recetas")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Tab)
+        .expect("the «Recetas» tab")
+        .click();
+    harness.run();
+    assert_eq!(harness.state().tabs.active(), 1);
+    // Its «×» closes it.
+    harness.get_by_label("Cerrar «Recetas»").click();
+    harness.run();
+    assert_eq!(harness.state().tabs.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn tabs() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), tabs_demo()?);
+    harness.run();
+    harness.snapshot("tabs_light");
+    Ok(())
+}
+
+// ---- H7.11: templates ----
+
+/// The demo workspace with the «Plantillas» section unfolded (so the
+/// examples exist) and «Reunión {{fecha}}» open.
+fn templates_demo() -> anyhow::Result<SilexApp> {
+    let mut app = demo_app()?;
+    app.templates.open = true;
+    app.db.create_example_templates()?;
+    app.reload_pages()?;
+    let meeting = app.templates.list[0].id.clone();
+    app.open_page(meeting)?;
+    Ok(app)
+}
+
+#[test]
+fn the_templates_section_unfolds_and_everything_has_a_name() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    let count = |h: &Harness<'_, SilexApp>, label: &str| h.query_all_by_label(label).count();
+    assert_eq!(count(&harness, "Diario {{fecha}}"), 0, "folded at first");
+    click_button(&mut harness, "Plantillas");
+    harness.run();
+    assert!(harness.state().templates.open);
+    for title in ["Reunión {{fecha}}", "Diario {{fecha}}", "Lista de tareas"] {
+        assert!(count(&harness, title) > 0, "{title}");
+    }
+    assert_accessible(&harness, "templates section");
+    // A page's menu offers both template actions.
+    click_button(&mut harness, "Más acciones de la página");
+    harness.run();
+    assert!(menu_item(&harness, "Guardar como plantilla").is_some());
+    assert!(menu_item(&harness, "Nueva página desde plantilla…").is_some());
+    Ok(())
+}
+
+#[test]
+fn an_open_template_and_the_picker_have_names() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(templates_demo()?);
+    let count = |h: &Harness<'_, SilexApp>, label: &str| h.query_all_by_label(label).count();
+    assert!(count(&harness, "Plantilla") > 0);
+    assert!(
+        harness
+            .query_all_by_label_contains("Usar esta plantilla")
+            .count()
+            > 0
+    );
+    assert!(
+        harness.query_by_label("Añadir a favoritos").is_none(),
+        "no star"
+    );
+    assert_accessible(&harness, "open template");
+    harness.state_mut().open_template_picker(None);
+    harness.run();
+    assert_accessible(&harness, "template picker");
+    assert!(count(&harness, "Plantilla") >= 2, "the picker's field too");
+    Ok(())
+}
+
+#[test]
+fn templates() -> anyhow::Result<()> {
+    templates_snapshot("templates_light", false)
+}
+
+#[test]
+fn template_picker() -> anyhow::Result<()> {
+    templates_snapshot("template_picker_light", true)
+}
+
+fn templates_snapshot(name: &str, picker: bool) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            templates_demo()?,
+        );
+    harness.run();
+    if picker {
+        harness.state_mut().open_template_picker(None);
+        harness.run();
+    }
+    harness.snapshot(name);
+    Ok(())
+}
+
 // ---- H7.8: page history ----
 
 #[test]

@@ -35,7 +35,7 @@ pub struct VersionInfo {
 }
 
 /// Short Spanish month names.
-const MONTHS: [&str; 12] = [
+pub(crate) const MONTHS: [&str; 12] = [
     "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic",
 ];
 

@@ -45,6 +45,8 @@ Cada consulta de páginas filtra `template_at IS NULL` salvo las de plantillas. 
   - un enlace apunta a la misma página.
 - **Editar una plantilla** es abrirla y editarla como cualquier página: tiene historial, Cmd+Z y papelera. En su barra superior dice «Plantilla» y ofrece «Usar esta plantilla».
 - **Papelera:** una plantilla va a la papelera y vuelve como una página.
+  - *Actualización (H7.11):* las de ejemplo se crean al desplegar «Plantillas» o al abrir el buscador por primera vez. El menú de una plantilla tiene «Abrir», «Usar esta plantilla», «Renombrar», «Subir/Bajar» y «Enviar a la papelera»; el «+» de su fila la usa. El buscador las ordena por título, como el de enlazar.
+  - *Actualización (H7.10):* vuelve siendo plantilla. Las plantillas se ordenan entre plantillas («Subir/Bajar») sin mover las páginas. `{{fecha}}` se escribe «20 oct 2026»; el texto de un enlace (el título de su página) nunca se rellena.
 
 ### Encaje con lo que ya existe
 - **Adjuntos y «Liberar espacio»:** sin cambios. Un adjunto compartido sigue en uso mientras lo nombre algún bloque o versión.

@@ -5,11 +5,11 @@ use std::time::Instant;
 use anyhow::{Context as _, Result};
 use eframe::egui;
 use silex_desktop::history::{EditKind, Snapshot};
-use silex_desktop::model::{Block, BlockKind, Page, PageKind, list_numbers};
+use silex_desktop::model::{Block, PageKind};
 use silex_desktop::versions::{VersionBlocks, VersionInfo, describe_when};
 
+use super::theme;
 use super::*;
-use super::{icons, theme};
 
 /// Width of the list of versions.
 const LIST_WIDTH: f32 = 250.0;
@@ -95,115 +95,6 @@ fn version_row(
     response
 }
 
-/// A version's title and blocks, read-only, laid out like the page (block
-/// kinds, checks, numbers, files and links) but with nothing to edit.
-fn version_preview(ui: &mut egui::Ui, title: &str, blocks: &[Block], pages: &[Page]) {
-    let p = theme::current(ui.ctx());
-    ui.label(
-        egui::RichText::new(display_title(title))
-            .text_style(egui::TextStyle::Name(theme::text::TITLE.into()))
-            .color(p.text),
-    );
-    ui.add_space(theme::space::SM);
-    if blocks.is_empty() {
-        ui.label(egui::RichText::new("Esta versión no tiene bloques.").color(p.text_muted));
-    }
-    let numbers = list_numbers(blocks);
-    for (index, (block, number)) in blocks.iter().zip(numbers).enumerate() {
-        if index > 0 {
-            ui.add_space(heading_space(block.kind));
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.add_space(f32::from(block.indent) * 24.0);
-            preview_block(ui, block, number, pages);
-        });
-    }
-}
-
-fn preview_block(ui: &mut egui::Ui, block: &Block, number: Option<usize>, pages: &[Page]) {
-    let p = theme::current(ui.ctx());
-    let text = block.content.as_str();
-    let styled = |style: &str| {
-        egui::RichText::new(text)
-            .text_style(egui::TextStyle::Name(style.into()))
-            .color(p.text)
-    };
-    match block.kind {
-        BlockKind::Paragraph => {
-            ui.label(egui::RichText::new(text).color(p.text));
-        }
-        BlockKind::Heading1 => {
-            ui.label(styled(theme::text::H1));
-        }
-        BlockKind::Heading2 => {
-            ui.label(styled(theme::text::H2));
-        }
-        BlockKind::Heading3 => {
-            ui.label(styled(theme::text::H3));
-        }
-        BlockKind::Todo => {
-            // The editor's box, read-only: named for the screen reader.
-            let checked = block.checked;
-            let (rect, response) =
-                ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
-            response.widget_info(|| {
-                egui::WidgetInfo::selected(egui::Role::CheckBox, false, checked, text)
-            });
-            paint_check_box(ui, rect.center(), checked, &response);
-            let color = if checked { p.text_muted } else { p.text };
-            let mut label = egui::RichText::new(text).color(color);
-            if checked {
-                label = label.strikethrough();
-            }
-            ui.label(label);
-        }
-        BlockKind::Bulleted => {
-            ui.label(egui::RichText::new(format!("•  {text}")).color(p.text));
-        }
-        BlockKind::Numbered => {
-            let n = number.unwrap_or(1);
-            ui.label(egui::RichText::new(format!("{n}.  {text}")).color(p.text));
-        }
-        BlockKind::Quote => {
-            // A bar on the left, as in the editor.
-            ui.add_space(theme::space::MD);
-            let quote = ui.label(egui::RichText::new(text).italics().color(p.text_muted));
-            let x = quote.rect.left() - theme::space::SM;
-            ui.painter()
-                .vline(x, quote.rect.y_range(), egui::Stroke::new(3.0, p.border));
-        }
-        BlockKind::Code => {
-            egui::Frame::new()
-                .fill(p.subtle)
-                .corner_radius(egui::CornerRadius::same(theme::radius::SM))
-                .inner_margin(egui::Margin::same(8))
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new(text).monospace().color(p.text));
-                });
-        }
-        BlockKind::File => {
-            ui.label(icons::icon(icons::PAPERCLIP).color(p.text_muted));
-            ui.label(egui::RichText::new(text).color(p.text));
-        }
-        BlockKind::PageLink => {
-            // The page's current title, as its card shows it.
-            let live = block
-                .link
-                .as_deref()
-                .and_then(|id| pages.iter().find(|page| page.id == id));
-            let (icon, title) = match live {
-                Some(page) if page.kind == PageKind::Database => {
-                    (icons::TABLE, display_title(&page.title).to_owned())
-                }
-                Some(page) => (icons::PAGE, display_title(&page.title).to_owned()),
-                None => (icons::LINK, display_title(text).to_owned()),
-            };
-            ui.label(icons::icon(icon).color(p.text_muted));
-            ui.label(egui::RichText::new(title).underline().color(p.text));
-        }
-    }
-}
-
 impl SilexApp {
     /// Opens «Historial de versiones» for the open page (from its «…»
     /// menu or the palette). Pending edits are saved first, so the list is
@@ -233,10 +124,8 @@ impl SilexApp {
     }
 
     /// Whether `id` is a page that shows blocks (not a database's table).
-    fn page_shows_blocks(&self, id: &str) -> bool {
-        self.pages
-            .iter()
-            .any(|p| p.id == id && p.kind == PageKind::Page)
+    pub(super) fn page_shows_blocks(&self, id: &str) -> bool {
+        self.find_page(id).is_some_and(|p| p.kind == PageKind::Page)
     }
 
     /// The history window: versions on the left (newest first), the chosen
@@ -344,7 +233,15 @@ impl SilexApp {
                             .auto_shrink(false)
                             .show(ui, |ui| match (&history.preview, history.selected()) {
                                 (Some((_, Ok(blocks))), Some(version)) => {
-                                    version_preview(ui, &version.title, blocks, pages);
+                                    // Nothing to open from here: read only.
+                                    let _ = read_only_page(
+                                        ui,
+                                        &version.title,
+                                        blocks,
+                                        pages,
+                                        false,
+                                        "Esta versión no tiene bloques.",
+                                    );
                                 }
                                 (Some((_, Err(why))), _) => {
                                     ui.label(egui::RichText::new(why.as_str()).color(p.text_muted));
@@ -442,6 +339,7 @@ fn lowercase_first(text: &str) -> String {
 #[cfg(test)]
 pub(super) fn history_fixture() -> Result<(SilexApp, String)> {
     use silex_desktop::db::Database;
+    use silex_desktop::model::BlockKind;
     let mut db = Database::open_in_memory()?;
     let page = db.create_page("Recetas de otoño", None)?;
     let mercado = db.create_page("Mercado de San Miguel", None)?;

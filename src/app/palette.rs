@@ -21,6 +21,7 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::AttachFiles => icons::PAPERCLIP,
         Command::LinkPage => icons::LINK,
         Command::PageHistory => icons::HISTORY,
+        Command::SaveAsTemplate | Command::NewFromTemplate => icons::COPY,
         Command::SaveNow => icons::SAVE,
         Command::TrashPage | Command::OpenTrash => icons::TRASH,
         Command::BackupNow | Command::RestoreBackup => icons::BACKUP,
@@ -59,6 +60,8 @@ impl SilexApp {
                 .selected
                 .as_ref()
                 .is_some_and(|id| self.favorites.iter().any(|p| &p.id == id)),
+            row_open: self.row_page.is_some(),
+            template_open: self.template_open(),
             file_database: self.db.path().is_some(),
             backup_running: self.backup_job.is_some(),
             export_running: self.export_job.is_some(),
@@ -88,6 +91,10 @@ impl SilexApp {
             (Command::AttachFiles, Some(_)) => self.files.pick = Some(None),
             (Command::LinkPage, Some(_)) => self.open_link_picker(None, None),
             (Command::PageHistory, Some(_)) => self.open_page_history()?,
+            (Command::SaveAsTemplate, Some(id)) => self.save_as_template(&id)?,
+            // From the palette, a page at the root (the «…» menu of a page
+            // puts it inside that page).
+            (Command::NewFromTemplate, _) => self.open_template_picker(None),
             // A save error is already shown by the status bar.
             (Command::SaveNow, _) => {
                 let _ = self.save_now();
