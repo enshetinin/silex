@@ -207,3 +207,13 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - Envía a la papelera una de las páginas que enlazan y vuelve a «Recetas»: ya no aparece. Restáurala: vuelve.
 - Renombra una de las páginas que enlazan: la sección muestra el título nuevo.
 - Con VoiceOver: cada fila se anuncia como enlace con el título de la página.
+
+## 23. Historial de versiones (H7.7–H7.8)
+- Edita una página con algo de texto, espera más de 10 minutos y vuelve a editarla. «…» → «Historial de versiones…» lista una versión con la hora local («Hoy, 17:40»), no en UTC.
+- ↑ ↓ eligen versión y la de la derecha cambia; no se puede editar. Las casillas, las listas, las citas, los archivos y los enlaces se ven como en la página.
+- «Restaurar esta versión» (o Intro): la página vuelve a esa versión y lo dice. Cmd+Z la devuelve a como estaba. Abre el historial otra vez: lo de antes de restaurar es también una versión.
+- Esc cierra sin cambiar nada. Cmd+K → «historial» abre lo mismo.
+- En una base de datos el menú no ofrece el historial; en una fila, sí.
+- Restaura una versión con un archivo adjunto que luego borraste de la página: el archivo vuelve. Haz «Liberar espacio» antes de restaurar: no lo borra.
+- Cierra y vuelve a abrir la app: las versiones siguen ahí.
+- Con VoiceOver: cada versión se anuncia con su fecha y hora, y el botón como «Restaurar esta versión».

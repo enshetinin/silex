@@ -333,3 +333,83 @@ fn a_year_of_editing_scale_smoke() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn restoring_fixes_files_links_and_ids_that_are_gone() -> anyhow::Result<()> {
+    let (mut db, page, uno) = diario()?;
+    let other = db.create_page("Otra", None)?;
+    let shared = block(&other, "en otra página");
+    db.save_document(&other, "Otra", std::slice::from_ref(&shared))?;
+    let file = db.add_attachment(&NewAttachment::from_bytes(
+        "acta.pdf",
+        b"%PDF-1.7".to_vec(),
+    )?)?;
+    let version = vec![
+        uno.clone(),
+        Block {
+            kind: BlockKind::File,
+            content: "acta.pdf".into(),
+            attachment: Some(file.id.clone()),
+            ..block(&page, "")
+        },
+        Block {
+            kind: BlockKind::File,
+            content: "borrado.pdf".into(),
+            attachment: Some("no-existe".into()),
+            ..block(&page, "")
+        },
+        Block {
+            kind: BlockKind::PageLink,
+            link: Some(other.clone()),
+            ..block(&page, "Otra")
+        },
+        Block {
+            kind: BlockKind::PageLink,
+            link: Some("no-existe".into()),
+            ..block(&page, "Perdida")
+        },
+        // The id of a block of another page.
+        Block {
+            page_id: page.clone(),
+            ..shared.clone()
+        },
+    ];
+    let fixed = db.restorable_blocks(&page, version.clone())?;
+    assert_eq!(fixed[..2], version[..2], "what is there stays as it was");
+    assert_eq!(fixed[2].kind, BlockKind::Paragraph);
+    assert_eq!(fixed[2].content, "[archivo que ya no está] borrado.pdf");
+    assert_eq!(fixed[2].attachment, None);
+    assert_eq!(fixed[3].link.as_deref(), Some(other.as_str()));
+    assert_eq!(
+        (fixed[4].kind, fixed[4].link.clone()),
+        (BlockKind::PageLink, None)
+    );
+    assert_ne!(fixed[5].id, shared.id, "a new id");
+    // And it saves.
+    db.save_document(&page, "Diario", &fixed)?;
+    assert_eq!(
+        db.list_blocks(&other)?,
+        [Block {
+            position: 0,
+            ..shared
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn versions_have_a_local_time_and_today_is_local() -> anyhow::Result<()> {
+    let (mut db, page, _) = diario()?;
+    db.save_version(&page)?;
+    let version = &db.page_versions(&page)?[0];
+    // `YYYY-MM-DD HH:MM`, whatever the system's time zone.
+    assert_eq!(version.local.len(), 16, "{version:?}");
+    assert_eq!(&version.local[10..11], " ");
+    assert_eq!(
+        &version.local[14..],
+        "00",
+        "same minutes as UTC: {version:?}"
+    );
+    assert_eq!(db.local_today()?.len(), 10);
+    Ok(())
+}

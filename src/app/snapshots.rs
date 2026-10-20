@@ -1445,6 +1445,83 @@ fn backups_menu() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- H7.8: page history ----
+
+#[test]
+fn the_page_history_has_names_and_opens_from_the_page_menu() -> anyhow::Result<()> {
+    let (app, _) = super::page_history::history_fixture()?;
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Más acciones de la página");
+    harness.run();
+    menu_item(&harness, "Historial de versiones…")
+        .expect("«Historial de versiones…» in the page menu")
+        .click();
+    harness.run();
+    assert!(harness.state().page_history.is_some());
+    harness.run();
+    assert_accessible(&harness, "page history");
+    assert!(harness.query_by_label("Restaurar esta versión").is_some());
+    // Each version is a button named by when it was saved.
+    let rows = harness
+        .root()
+        .children_recursive()
+        .filter(|n| n.accesskit_node().role() == egui::accesskit::Role::Button)
+        .filter_map(|n| n.accesskit_node().label())
+        .filter(|l| l.contains(':') && l.contains(','))
+        .count();
+    assert_eq!(rows, 3);
+    Ok(())
+}
+
+/// The window keeps its size frame after frame (it once grew without end).
+#[test]
+fn the_page_history_window_keeps_its_size() -> anyhow::Result<()> {
+    let (mut app, _) = super::page_history::history_fixture()?;
+    super::page_history::open_fixed_history(&mut app)?;
+    let mut harness = a11y_harness(app);
+    let bounds = |h: &Harness<'_, SilexApp>| {
+        let close = h.get_by_label("Cerrar").rect();
+        let heading = h.get_by_label("Historial de versiones").rect();
+        (close.min, heading.max.x)
+    };
+    harness.run();
+    let first = bounds(&harness);
+    for _ in 0..60 {
+        harness.step();
+    }
+    let later = bounds(&harness);
+    assert_eq!(first, later, "the window moved or grew");
+    // Choosing another version does not change it either.
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run();
+    for _ in 0..30 {
+        harness.step();
+    }
+    assert_eq!(bounds(&harness), first);
+    Ok(())
+}
+
+#[test]
+fn page_history() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (mut app, _) = super::page_history::history_fixture()?;
+    super::page_history::open_fixed_history(&mut app)?;
+    if let Some(history) = &mut app.page_history {
+        history.selected = 1;
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot("page_history_light");
+    Ok(())
+}
+
 // ---- H7.5: links between pages ----
 
 /// «Diario» with a paragraph, a link to «Diseño de la interfaz» (inside

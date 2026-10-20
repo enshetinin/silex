@@ -22,6 +22,7 @@ mod files;
 pub mod icons;
 mod jobs;
 mod links;
+mod page_history;
 mod palette;
 mod row_page;
 mod search;
@@ -39,8 +40,9 @@ mod view_tabs;
 
 pub use self::startup::StartupError;
 use self::{
-    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, links::*, row_page::*,
-    search::*, sidebar::*, space::*, table_undo::*, view_menus::*, view_tabs::*,
+    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, links::*,
+    page_history::*, row_page::*, search::*, sidebar::*, space::*, table_undo::*, view_menus::*,
+    view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
@@ -125,6 +127,8 @@ pub struct SilexApp {
     space: Space,
     /// Links of the open page and the page picker (H7.5).
     links: Links,
+    /// «Historial de versiones» of the open page, while open (H7.8).
+    page_history: Option<PageHistory>,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -209,6 +213,7 @@ impl SilexApp {
             files: Files::default(),
             space: Space::default(),
             links: Links::default(),
+            page_history: None,
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -542,7 +547,7 @@ impl SilexApp {
         self.handle_shortcuts(&ctx);
         self.handle_dropped_files(&ctx);
         // The search window has the keyboard while it is open.
-        if self.search.is_none() && self.links.picker.is_none() {
+        if self.search.is_none() && self.links.picker.is_none() && self.page_history.is_none() {
             self.take_pasted_image(&ctx);
             self.take_editor_key(&ctx);
             self.apply_pending_focus(&ctx);
@@ -576,6 +581,7 @@ impl SilexApp {
         self.free_space_dialog(&ctx);
         self.link_picker(&ctx);
         self.link_restore_dialog(&ctx);
+        self.page_history_window(&ctx);
         // The UI may be idle between edits; wake up for the next autosave or retry.
         if let Some(at) = self.save.next_attempt() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));

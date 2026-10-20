@@ -42,6 +42,8 @@ pub const DOWNLOAD: &str = "\u{e20c}";
 pub const UPLOAD: &str = "\u{e4c0}";
 pub const SETTINGS: &str = "\u{e270}"; // gear
 pub const BACKUP: &str = "\u{e1a0}"; // clock-counter-clockwise
+/// Page history (H7.8): the same clock turning back as backups.
+pub const HISTORY: &str = BACKUP;
 pub const CLOSE: &str = "\u{e4f6}"; // x
 pub const CHECK: &str = "\u{e182}";
 pub const TEXT: &str = "\u{e48a}"; // text-t

@@ -86,8 +86,10 @@ Así una página editada todos los días acumula unas 30 versiones al mes y 52 a
 - Una ventana con la lista a la izquierda (fecha y hora, «hace 2 horas»; la más reciente arriba) y, a la derecha, la versión elegida **solo para leer**, con el mismo aspecto que la página (tipos de bloque, casillas, tarjetas de archivo y enlace, sin poder editarlos).
 - **«Restaurar esta versión»**: sustituye el título y los bloques de la página abierta, cierra la ventana y lo dice («Se restauró la versión del 18 oct, 17:40. Cmd+Z para deshacer.»).
 - Teclado: ↑ ↓ eligen versión, Intro restaura (con confirmación), Esc cierra. Lista y botones con nombre para el lector de pantalla.
+  - *Actualización (H7.8):* Intro (y el botón, o un doble clic en la lista) restaura **sin confirmación**. Restaurar guarda antes el estado actual como versión y se deshace con Cmd+Z, así que no hay nada que perder, y una confirmación más sería un paso de sobra.
 - Sin versiones, la ventana lo explica: «Todavía no hay versiones. Silex guarda una al editar, como mucho cada 10 minutos.»
 - **Fechas en hora local.** Hoy la app muestra UTC en las copias. Para el historial, la hora local es la que el usuario reconoce; mientras no haya una forma fiable de saber la zona horaria, véase la pregunta 5.
+  - *Actualización (H7.8):* la hora local la calcula SQLite (`strftime(…, 'localtime')` y `date('now', 'localtime')`), que pregunta la zona horaria al sistema en los tres sistemas. No hace falta ningún crate. La lista dice «Hoy, 17:40», «Ayer, 09:05», «18 oct, 17:40» o «7 sept 2025, 10:00».
 
 ## Consecuencias
 - **Una migración aditiva**, sin reconstruir tablas.

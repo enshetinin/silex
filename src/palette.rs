@@ -18,6 +18,8 @@ pub enum Command {
     AttachFiles,
     /// The page picker, to link another page (H7.5).
     LinkPage,
+    /// The versions of the open page (H7.8).
+    PageHistory,
     SaveNow,
     TrashPage,
     OpenTrash,
@@ -54,7 +56,7 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 23] = [
+    pub const ALL: [Command; 24] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
@@ -65,6 +67,7 @@ impl Command {
         Command::ExportPage,
         Command::AttachFiles,
         Command::LinkPage,
+        Command::PageHistory,
         Command::SaveNow,
         Command::TrashPage,
         Command::OpenTrash,
@@ -92,6 +95,7 @@ impl Command {
             Command::ExportPage => "Exportar la página a Markdown",
             Command::AttachFiles => "Adjuntar archivos…",
             Command::LinkPage => "Enlazar a una página…",
+            Command::PageHistory => "Historial de versiones…",
             Command::SaveNow => "Guardar ahora",
             Command::TrashPage => "Enviar la página a la papelera",
             Command::OpenTrash => "Abrir la papelera",
@@ -129,6 +133,7 @@ impl Command {
                 "file",
             ],
             Command::LinkPage => &["enlace", "vincular", "mencionar", "referencia", "link"],
+            Command::PageHistory => &["versiones", "anterior", "cambios", "recuperar", "history"],
             Command::SaveNow => &["save"],
             Command::TrashPage => &["borrar", "eliminar", "quitar", "delete"],
             Command::OpenTrash => &["restaurar", "borradas", "eliminadas", "recuperar", "trash"],
@@ -159,7 +164,9 @@ impl Command {
             Command::NewSubpage => cx.page_open && !cx.database_open,
             Command::NewRow => cx.database_open,
             // A database shows its table, not blocks.
-            Command::AttachFiles | Command::LinkPage => cx.page_open && !cx.database_open,
+            Command::AttachFiles | Command::LinkPage | Command::PageHistory => {
+                cx.page_open && !cx.database_open
+            }
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
             Command::AddFavorite => cx.page_open && !cx.favorite,
             Command::RemoveFavorite => cx.page_open && cx.favorite,

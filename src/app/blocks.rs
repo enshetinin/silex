@@ -1424,6 +1424,15 @@ impl SilexApp {
                         ui.close();
                     }
                     ui.separator();
+                    // A database shows its table: it has no versions (ADR 0009).
+                    if self.database.is_none()
+                        && ui
+                            .button((icons::icon(icons::HISTORY), " Historial de versiones…"))
+                            .clicked()
+                    {
+                        extra = Some("history");
+                        ui.close();
+                    }
                     if ui
                         .button((icons::icon(icons::EXPORT), " Exportar a Markdown"))
                         .clicked()
@@ -1509,6 +1518,10 @@ impl SilexApp {
             Some("save") => {
                 // A save error is already shown by the status indicator.
                 let _ = self.save_now();
+            }
+            Some("history") => {
+                let result = self.open_page_history();
+                self.report(result);
             }
             _ => {}
         }

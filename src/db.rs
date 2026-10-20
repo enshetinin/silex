@@ -1203,7 +1203,9 @@ impl Database {
     /// The versions of a page, newest first, without their blocks.
     pub fn page_versions(&self, page_id: &str) -> Result<Vec<VersionInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, page_id, created_at, title, size FROM page_versions
+            "SELECT id, page_id, created_at, title, size,
+                    strftime('%Y-%m-%d %H:%M', created_at, 'localtime')
+             FROM page_versions
              WHERE page_id = ?1 ORDER BY created_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([page_id], |r| {
@@ -1213,6 +1215,10 @@ impl Database {
                 created_at: r.get(2)?,
                 title: r.get(3)?,
                 size: r.get::<_, i64>(4)?.try_into().unwrap_or_default(),
+                // Without a time zone (or a bad date), UTC.
+                local: r
+                    .get::<_, Option<String>>(5)?
+                    .unwrap_or_else(|| r.get::<_, String>(2).unwrap_or_default()),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1230,6 +1236,57 @@ impl Database {
             )
             .optional()?;
         Ok(row.map(|(page, format, json)| versions::blocks_from_json(format, &json, &page)))
+    }
+
+    /// Today in the system's time zone, `YYYY-MM-DD` (to say «Hoy» and
+    /// «Ayer» in the history). SQLite asks the system for the zone.
+    pub fn local_today(&self) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))?)
+    }
+
+    /// A version's blocks made safe to save into `page_id` (ADR 0009): a
+    /// file that is no longer there becomes a paragraph that says so, a
+    /// link to a page that no longer exists loses its page, and a block id
+    /// now used by another page gets a new id.
+    pub fn restorable_blocks(&self, page_id: &str, blocks: Vec<Block>) -> Result<Vec<Block>> {
+        let mut restored = Vec::with_capacity(blocks.len());
+        for mut block in blocks {
+            block.page_id = page_id.to_owned();
+            if let Some(file) = &block.attachment {
+                let exists: bool = self.conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM attachments WHERE id = ?1)",
+                    [file],
+                    |r| r.get(0),
+                )?;
+                if !exists {
+                    block.kind = BlockKind::Paragraph;
+                    block.content = format!("[archivo que ya no está] {}", block.content);
+                    block.attachment = None;
+                }
+            }
+            if let Some(page) = &block.link {
+                let exists: bool = self.conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1)",
+                    [page],
+                    |r| r.get(0),
+                )?;
+                if !exists {
+                    block.link = None;
+                }
+            }
+            let elsewhere: bool = self.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM blocks WHERE id = ?1 AND page_id <> ?2)",
+                params![block.id, page_id],
+                |r| r.get(0),
+            )?;
+            if elsewhere {
+                block.id = Uuid::new_v4().to_string();
+            }
+            restored.push(block);
+        }
+        Ok(restored)
     }
 
     /// Fixes the time page versions are saved at (`YYYY-MM-DDTHH:MM:SS.sssZ`,

@@ -30,6 +30,62 @@ pub struct VersionInfo {
     pub title: String,
     /// Bytes of its blocks' JSON.
     pub size: u64,
+    /// In the system's time zone, `YYYY-MM-DD HH:MM`.
+    pub local: String,
+}
+
+/// Short Spanish month names.
+const MONTHS: [&str; 12] = [
+    "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic",
+];
+
+/// When a version was saved, as the history lists it: «Hoy, 17:40»,
+/// «Ayer, 09:05», «18 oct, 17:40», or «18 oct 2025, 17:40» in another
+/// year. `local` is `YYYY-MM-DD HH:MM` and `today` `YYYY-MM-DD`, both in
+/// local time; anything else is shown as it is.
+pub fn describe_when(local: &str, today: &str) -> String {
+    let parse = |date: &str| -> Option<(i64, u32, u32)> {
+        let mut parts = date.splitn(3, '-');
+        let year = parts.next()?.parse().ok()?;
+        let month = parts
+            .next()?
+            .parse()
+            .ok()
+            .filter(|m| (1..=12).contains(m))?;
+        let day = parts
+            .next()?
+            .parse()
+            .ok()
+            .filter(|d| (1..=31).contains(d))?;
+        Some((year, month, day))
+    };
+    let (Some(date), Some(time)) = (local.get(..10), local.get(11..16)) else {
+        return local.to_owned();
+    };
+    let (Some(at), Some(now)) = (parse(date), parse(today)) else {
+        return local.to_owned();
+    };
+    let days = days_from_civil(now) - days_from_civil(at);
+    let (year, month, day) = at;
+    let name = MONTHS[(month - 1) as usize];
+    match days {
+        0 => format!("Hoy, {time}"),
+        1 => format!("Ayer, {time}"),
+        _ if year == now.0 => format!("{day} {name}, {time}"),
+        _ => format!("{day} {name} {year}, {time}"),
+    }
+}
+
+/// Days since 1970-01-01 of a calendar date (proleptic Gregorian).
+fn days_from_civil((year, month, day): (i64, u32, u32)) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day_of_year =
+        (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 /// A version's blocks, or why they cannot be shown (a newer Silex, or
@@ -229,6 +285,37 @@ mod tests {
             (None, None)
         );
         assert_eq!(blocks[0].content, "");
+    }
+
+    #[test]
+    fn versions_say_when_in_local_words() {
+        let today = "2026-10-20";
+        assert_eq!(describe_when("2026-10-20 17:40", today), "Hoy, 17:40");
+        assert_eq!(describe_when("2026-10-19 09:05", today), "Ayer, 09:05");
+        assert_eq!(describe_when("2026-10-18 23:59", today), "18 oct, 23:59");
+        assert_eq!(describe_when("2026-01-02 08:00", today), "2 ene, 08:00");
+        assert_eq!(
+            describe_when("2025-12-31 22:00", "2026-01-01"),
+            "Ayer, 22:00"
+        );
+        assert_eq!(
+            describe_when("2025-09-07 10:00", today),
+            "7 sept 2025, 10:00"
+        );
+        // Across a leap day.
+        assert_eq!(
+            describe_when("2028-02-28 10:00", "2028-03-01"),
+            "28 feb, 10:00"
+        );
+        assert_eq!(
+            describe_when("2028-02-29 10:00", "2028-03-01"),
+            "Ayer, 10:00"
+        );
+        // What cannot be read is shown as it is.
+        assert_eq!(describe_when("ayer", today), "ayer");
+        assert_eq!(describe_when("2026-13-01 10:00", today), "2026-13-01 10:00");
+        assert_eq!(days_from_civil((1970, 1, 1)), 0);
+        assert_eq!(days_from_civil((2026, 10, 20)), 20_746);
     }
 
     /// 2026-10-20T12:00Z as a julian day.

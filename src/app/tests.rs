@@ -3371,3 +3371,103 @@ fn slash_enlace_and_the_palette_open_the_picker_and_escape_closes_it() -> anyhow
     assert!(offered.iter().all(|p| Some(&p.id) != page.as_ref()));
     Ok(())
 }
+
+// ---- H7.8: page history ----
+
+#[test]
+fn the_history_lists_versions_and_restores_one_that_cmd_z_takes_back() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, page) = page_history::history_fixture()?;
+    let ctx = egui::Context::default();
+    page_history::open_fixed_history(&mut app)?;
+    let history = app.page_history.as_ref().expect("the window opens");
+    let whens: Vec<String> = history
+        .versions
+        .iter()
+        .map(|v| silex_desktop::versions::describe_when(&v.local, &history.today))
+        .collect();
+    assert_eq!(whens, ["Hoy, 12:00", "Ayer, 09:05", "18 oct, 17:40"]);
+    // The editor does not take keys meanwhile: ↓ chooses a version.
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    assert_eq!(app.page_history.as_ref().map(|h| h.selected), Some(1));
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t.contains("Comprar calabaza")),
+        "the chosen version is shown: {painted:?}"
+    );
+    assert_eq!(app.title, "Recetas", "nothing changes before restoring");
+
+    // Intro restores it: title and blocks, saved at once.
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.page_history.is_none(), "the window closes");
+    let contents = |blocks: &[Block]| blocks.iter().map(|b| b.content.clone()).collect::<Vec<_>>();
+    assert_eq!(app.title, "Recetas de otoño");
+    assert_eq!(contents(&app.blocks).len(), 8);
+    assert!(app.blocks.iter().any(|b| b.checked));
+    assert_eq!(contents(&app.db.list_blocks(&page)?), contents(&app.blocks));
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(notice.starts_with("Se restauró la versión de "), "{notice}");
+    // What there was before is a version too.
+    let versions = app.db.page_versions(&page)?;
+    assert_eq!(versions.len(), 4);
+    assert_eq!(versions[0].title, "Recetas");
+
+    // Cmd+Z brings it back.
+    app.undo();
+    assert_eq!(app.title, "Recetas");
+    assert_eq!(contents(&app.blocks), ["Solo queda la idea de la sopa."]);
+    app.save_now()?;
+    assert_eq!(
+        app.db.get_page(&page)?.map(|p| p.title),
+        Some("Recetas".into())
+    );
+    Ok(())
+}
+
+#[test]
+fn escape_closes_the_history_without_changes() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, _) = page_history::history_fixture()?;
+    let ctx = egui::Context::default();
+    app.run_command(&ctx, silex_desktop::palette::Command::PageHistory)?;
+    assert!(app.page_history.is_some(), "opened by the palette");
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.page_history.is_none());
+    assert_eq!(app.title, "Recetas");
+    assert!(!app.history.can_undo());
+    Ok(())
+}
+
+#[test]
+fn a_database_has_no_history_and_a_new_page_says_it_has_none() -> anyhow::Result<()> {
+    let (mut app, _) = page_history::history_fixture()?;
+    let ctx = egui::Context::default();
+    app.create_database(None)?;
+    app.open_page_history()?;
+    assert!(app.page_history.is_none());
+    assert!(
+        app.notice
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no una base de datos"),
+        "{:?}",
+        app.notice
+    );
+    app.notice = None;
+    app.create_root_page("Nueva")?;
+    app.open_page_history()?;
+    let painted = {
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![])
+    };
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.starts_with("Todavía no hay versiones")),
+        "{painted:?}"
+    );
+    assert!(app.page_history.is_some());
+    Ok(())
+}
