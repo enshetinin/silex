@@ -74,6 +74,34 @@ impl Database {
         Ok(dirs.data_local_dir().join("silex.sqlite3"))
     }
 
+    /// Whether `path` is the database in Silex's own data folder (not one
+    /// chosen with `SILEX_DB_PATH`): only then is the whole folder made
+    /// private (ADR 0012).
+    pub fn is_default_location(path: &Path) -> bool {
+        std::env::var_os("SILEX_DB_PATH").is_none()
+            && Self::default_path().is_ok_and(|default| default == path)
+    }
+
+    /// Whether the user said not to warn again that the database is in a
+    /// synced folder (ADR 0012).
+    pub fn synced_warning_dismissed(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM settings WHERE key = ?1)",
+            [SYNCED_WARNING],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// «No volver a avisar» for the synced folder warning.
+    pub fn dismiss_synced_warning(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, '1')
+             ON CONFLICT (key) DO NOTHING",
+            [SYNCED_WARNING],
+        )?;
+        Ok(())
+    }
+
     /// Opens the user's database (see [`Database::default_path`]).
     pub fn open_default() -> Result<Self> {
         let path = Self::default_path()?;
@@ -2079,6 +2107,8 @@ fn read_page(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Page> {
 /// Mark of a compaction in progress, in `settings` (ignored by
 /// `Settings::from_pairs` like any unknown key).
 const COMPACTING: &str = "compacting";
+/// `settings` key set by «No volver a avisar» about a synced folder.
+const SYNCED_WARNING: &str = "synced_warning_dismissed";
 /// `settings` key of the open tabs (ADR 0011).
 const OPEN_TABS: &str = "open_tabs";
 /// `settings` key set once the example templates were created (ADR 0010).

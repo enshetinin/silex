@@ -39,6 +39,8 @@ pub fn backups_dir(db_path: &Path) -> PathBuf {
 pub fn create_backup(source: &Path, dir: &Path) -> Result<PathBuf> {
     fs::create_dir_all(dir)
         .with_context(|| format!("No se puede crear la carpeta de copias {}", dir.display()))?;
+    // Copies hold everything: only their owner reads them (ADR 0012).
+    crate::privacy::restrict(dir, true)?;
     remove_stale_partials(dir);
 
     let src = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_WRITE)
@@ -55,6 +57,7 @@ pub fn create_backup(source: &Path, dir: &Path) -> Result<PathBuf> {
     let result = (|| -> Result<()> {
         src.backup(MAIN_DB, &partial, None)
             .context("La copia de SQLite falló")?;
+        crate::privacy::restrict(&partial, false)?;
         make_standalone(&partial)?;
         verify_backup(&partial)?;
         fs::rename(&partial, &target).context("No se puede finalizar la copia")?;

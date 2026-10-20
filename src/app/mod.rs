@@ -24,6 +24,7 @@ mod jobs;
 mod links;
 mod page_history;
 mod palette;
+mod privacy;
 mod read_only;
 mod row_page;
 mod search;
@@ -45,8 +46,8 @@ mod view_tabs;
 pub use self::startup::StartupError;
 use self::{
     blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, links::*,
-    page_history::*, read_only::*, row_page::*, search::*, side_panel::*, sidebar::*, space::*,
-    tab_bar::*, table_undo::*, templates::*, view_menus::*, view_tabs::*,
+    page_history::*, privacy::*, read_only::*, row_page::*, search::*, side_panel::*, sidebar::*,
+    space::*, tab_bar::*, table_undo::*, templates::*, view_menus::*, view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
@@ -155,6 +156,8 @@ pub struct SilexApp {
     side: Option<SidePanel>,
     /// Width left of the window after the sidebar, as of the last frame.
     main_width: f32,
+    /// The database is in a synced folder: warned at start (ADR 0012).
+    synced_warning: Option<SyncedWarning>,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -250,6 +253,7 @@ impl SilexApp {
             click_modifiers: egui::Modifiers::NONE,
             side: None,
             main_width: 0.0,
+            synced_warning: None,
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -281,6 +285,7 @@ impl SilexApp {
             Ok(settings) => app.settings = settings,
             Err(err) => app.notice = Some(format!("No se pudieron leer los ajustes: {err:#}")),
         }
+        app.protect_local_data();
         Ok(app)
     }
 
@@ -793,6 +798,7 @@ impl SilexApp {
         self.link_picker(&ctx);
         self.link_restore_dialog(&ctx);
         self.template_picker(&ctx);
+        self.synced_warning_dialog(&ctx);
         self.page_history_window(&ctx);
         // The UI may be idle between edits; wake up for the next autosave or retry.
         if let Some(at) = self.save.next_attempt() {
@@ -811,6 +817,7 @@ impl eframe::App for SilexApp {
         if let Err(err) = self.save_now() {
             eprintln!("Silex: no se guardaron cambios al cerrar: {err:#}");
         }
+        self.clear_opened_copies();
     }
 }
 
@@ -820,5 +827,6 @@ impl Drop for SilexApp {
         if let Err(err) = self.save_now() {
             eprintln!("Silex: no se guardaron cambios al cerrar: {err:#}");
         }
+        self.clear_opened_copies();
     }
 }

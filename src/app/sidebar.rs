@@ -853,6 +853,7 @@ impl SilexApp {
         );
         let ctx = ui.ctx().clone();
         self.set_settings(&ctx, settings);
+        self.privacy_section(ui);
     }
 
     pub(super) fn shortcuts_help(ui: &mut egui::Ui) {

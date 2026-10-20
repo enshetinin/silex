@@ -48,6 +48,7 @@ Conclusión: el cifrado de disco del sistema ya cubre el caso más común (equip
 - **Sincronización: alternativa 1 ahora.** La 2 queda como hito futuro con ADR propio.
 - **Una historia corta, H7.12 «Datos locales más protegidos»:**
   - en Unix, la carpeta de datos y la de copias con permisos `0700` y la base y las copias con `0600`, comprobados al arrancar y corregidos si son más abiertos;
+    - *Actualización (H7.12):* la carpeta que contiene la base solo se restringe si es la propia de Silex: una elegida con `SILEX_DB_PATH` (por ejemplo `/tmp`) no es de Silex. Los permisos solo se quitan, nunca se añaden.
   - vaciar `abiertos/` también al cerrar la app, además de al arrancar;
   - aviso al arrancar si la base o sus copias están en una carpeta sincronizada conocida (con «No volver a avisar»);
   - una sección «Privacidad» en Ajustes: dónde están los datos, que todo es local, y que el cifrado de disco del sistema es lo que protege un equipo perdido;

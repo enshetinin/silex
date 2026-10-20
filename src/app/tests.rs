@@ -3966,3 +3966,89 @@ fn a_database_beside_shows_its_table() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+// ---- H7.12: local data kept private ----
+
+#[test]
+fn copies_of_opened_files_are_deleted_when_the_app_closes() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-app-opened")?;
+    let (mut app, ctx) = file_app(&tmp, &[("informe.pdf", b"%PDF-1.7 informe")])?;
+    let file = file_block(&app);
+    app.block_action(BlockAction::OpenFile, &file.id);
+    app_frame(&mut app, &ctx, vec![]);
+    let copy = opened().last().cloned().expect("a copy was opened");
+    assert!(copy.starts_with(tmp.0.join("abiertos")) && copy.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(tmp.0.join("abiertos"))?
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "only the user lists them");
+    }
+    drop(app);
+    assert!(!tmp.0.join("abiertos").exists(), "emptied on closing");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn starting_makes_the_database_and_its_copies_private() -> anyhow::Result<()> {
+    use silex_desktop::db::backup;
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempFolder::new("silex-app-private")?;
+    let path = tmp.0.join("silex.sqlite3");
+    Database::open(&path)?.create_page("Notas", None)?;
+    backup::create_backup(&path, &backup::backups_dir(&path))?;
+    let mode = |p: &std::path::Path| -> anyhow::Result<u32> {
+        Ok(std::fs::metadata(p)?.permissions().mode() & 0o777)
+    };
+    // As an older Silex (or a lax umask) left them.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::set_permissions(
+        backup::backups_dir(&path),
+        std::fs::Permissions::from_mode(0o755),
+    )?;
+    std::fs::set_permissions(&tmp.0, std::fs::Permissions::from_mode(0o755))?;
+    let mut app = SilexApp::new(Database::open(&path)?)?;
+    app.startup_backup_pending = false;
+    assert_eq!(mode(&path)?, 0o600);
+    assert_eq!(mode(&backup::backups_dir(&path))?, 0o700);
+    for copy in std::fs::read_dir(backup::backups_dir(&path))? {
+        assert_eq!(mode(&copy?.path())?, 0o600);
+    }
+    // A folder the user chose is not Silex's to change.
+    assert_eq!(mode(&tmp.0)?, 0o755);
+    assert!(app.notice.is_none(), "{:?}", app.notice);
+    Ok(())
+}
+
+#[test]
+fn a_database_in_a_synced_folder_is_warned_about_until_told_not_to() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-app-synced")?;
+    let folder = tmp.0.join("Dropbox").join("notas");
+    std::fs::create_dir_all(&folder)?;
+    let path = folder.join("silex.sqlite3");
+    let ctx = egui::Context::default();
+    {
+        let mut app = SilexApp::new(Database::open(&path)?)?;
+        app.startup_backup_pending = false;
+        let warning = app.synced_warning.as_ref().expect("warned");
+        assert_eq!(warning.service, "Dropbox");
+        app_frame(&mut app, &ctx, vec![]);
+        let painted = app_frame(&mut app, &ctx, vec![]);
+        assert!(
+            painted
+                .iter()
+                .any(|t| t == "Tus datos están en una carpeta de Dropbox"),
+            "{painted:?}"
+        );
+        // «No volver a avisar».
+        app.db.dismiss_synced_warning()?;
+    }
+    let mut app = SilexApp::new(Database::open(&path)?)?;
+    app.startup_backup_pending = false;
+    assert!(app.synced_warning.is_none());
+    Ok(())
+}

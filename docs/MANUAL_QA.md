@@ -251,3 +251,11 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - «Editar aquí» la pasa a la pestaña activa y cierra el panel; «×» lo cierra. Arrastra el borde del panel: cambia de ancho, sin dejar la página principal por debajo de 480 puntos.
 - Estrecha la ventana: el panel desaparece y vuelve al ensancharla. Con la ventana estrecha, «Abrir al lado» explica por qué no se abre.
 - Con VoiceOver: «Editar aquí» y «Cerrar el panel lateral» se anuncian como botones.
+
+## 27. Datos locales más protegidos (H7.12)
+- macOS y Linux: arranca la app con su base de siempre y comprueba `ls -l` de la carpeta de datos: la carpeta y `backups/` con `drwx------`, la base y las copias con `-rw-------`.
+- Con `SILEX_DB_PATH=/tmp/silex-qa.sqlite3`: la base y sus copias quedan privadas, pero `/tmp` no cambia.
+- Abre un adjunto con su app, cierra Silex: la carpeta de copias abiertas (en la caché de la app, `abiertos/`) ya no existe.
+- Crea una carpeta `Dropbox` (o `OneDrive`) y arranca con `SILEX_DB_PATH` dentro de ella: aparece el aviso. «Entendido» lo cierra hasta el próximo arranque; «No volver a avisar», para siempre.
+- Ajustes → «Privacidad»: dice dónde están los datos; «Mostrar la carpeta» la abre; explica el cifrado de disco del sistema. Con la base en una carpeta sincronizada, lo dice también ahí.
+- Windows: arranca con normalidad (los permisos no se tocan) y el aviso de OneDrive funciona igual.

@@ -1445,6 +1445,28 @@ fn backups_menu() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- H7.12: local data kept private ----
+
+#[test]
+fn the_synced_folder_warning_has_names_and_is_not_shown_again() -> anyhow::Result<()> {
+    let root = std::env::temp_dir().join(format!("silex-synced-{}", uuid::Uuid::new_v4()));
+    let folder = root.join("OneDrive - Empresa");
+    std::fs::create_dir_all(&folder)?;
+    let path = folder.join("silex.sqlite3");
+    let mut app = SilexApp::new(Database::open(&path)?)?;
+    app.startup_backup_pending = false;
+    let mut harness = a11y_harness(app);
+    harness.run();
+    assert_accessible(&harness, "synced folder warning");
+    click_button(&mut harness, "No volver a avisar");
+    harness.run();
+    assert!(harness.state().synced_warning.is_none());
+    assert!(harness.state().db.synced_warning_dismissed()?);
+    drop(harness);
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
 // ---- H8.2: the page beside ----
 
 /// «Notas de lectura» open, «Guía de estilo» beside it.

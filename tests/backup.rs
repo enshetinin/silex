@@ -255,3 +255,22 @@ fn backup_names_are_parsed_strictly() {
         "2026-10-18 09:30 UTC"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn backups_are_readable_only_by_their_owner() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("silex-backup-mode-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("silex.sqlite3");
+    silex_desktop::db::Database::open(&path)?.create_page("Notas", None)?;
+    let backups = dir.join("backups");
+    let copy = silex_desktop::db::backup::create_backup(&path, &backups)?;
+    let mode = |p: &std::path::Path| -> anyhow::Result<u32> {
+        Ok(std::fs::metadata(p)?.permissions().mode() & 0o777)
+    };
+    assert_eq!(mode(&copy)?, 0o600);
+    assert_eq!(mode(&backups)?, 0o700);
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
