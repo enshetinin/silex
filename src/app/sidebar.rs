@@ -723,6 +723,9 @@ impl SilexApp {
             ui,
             &RowParts::nav(icons::BACKUP, "Copias y exportación", None),
         );
+        if backups.row.clicked() {
+            self.refresh_space();
+        }
         egui::Popup::menu(&backups.row).show(|ui| {
             ui.label(egui::RichText::new(&self.backup_label).small().weak());
             ui.separator();
@@ -758,6 +761,8 @@ impl SilexApp {
                 self.report(result);
                 ui.close();
             }
+            ui.separator();
+            self.space_section(ui);
         });
 
         let shortcuts = sidebar_row(

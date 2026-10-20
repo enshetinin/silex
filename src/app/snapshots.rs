@@ -1262,3 +1262,465 @@ fn database_date_picker() -> anyhow::Result<()> {
         |harness| open_cell(harness, "Terminado, Rayuela: 2026-09-14"),
     )
 }
+
+// ---- H7.1: attachments ----
+
+/// A page with a paragraph, a PDF, an image and a script attached.
+fn attachments_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::attachment::NewAttachment;
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let page = db.create_page("Viaje a Lisboa", None)?;
+    let mut blocks = vec![Block {
+        id: "intro".into(),
+        page_id: page.clone(),
+        kind: BlockKind::Paragraph,
+        content: "Billetes y reservas del viaje.".into(),
+        checked: false,
+        position: 0,
+        indent: 0,
+        attachment: None,
+        link: None,
+    }];
+    // A real image (a soft gradient), so its preview shows (H7.2).
+    let (w, h) = (480u32, 260u32);
+    let rgba: Vec<u8> = (0..w * h)
+        .flat_map(|i| {
+            let (x, y) = (i % w, i / w);
+            [(60 + x * 120 / w) as u8, (140 + y * 80 / h) as u8, 210, 255]
+        })
+        .collect();
+    let png = silex_desktop::attachment::encode_png(w, h, rgba)?;
+    let files = [
+        ("billetes de avión.pdf", {
+            let mut pdf = b"%PDF-1.7".to_vec();
+            pdf.resize(2_516_582, b' ');
+            pdf
+        }),
+        ("mapa del centro.png", png),
+        ("instalar.sh", b"#!/bin/sh\necho hola".to_vec()),
+    ];
+    for (name, data) in files {
+        let attachment = db.add_attachment(&NewAttachment::from_bytes(name, data)?)?;
+        blocks.push(Block {
+            id: format!("file-{name}"),
+            page_id: page.clone(),
+            kind: BlockKind::File,
+            content: attachment.name.clone(),
+            checked: false,
+            position: 0,
+            indent: 0,
+            attachment: Some(attachment.id),
+            link: None,
+        });
+    }
+    db.save_document(&page, "Viaje a Lisboa", &blocks)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+#[test]
+fn file_blocks_have_names() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(attachments_app()?);
+    assert_accessible(&harness, "file blocks");
+    for label in [
+        "Archivo «billetes de avión.pdf», 2,4 MB",
+        "Abrir «billetes de avión.pdf»",
+        "Guardar una copia de «mapa del centro.png»",
+        "Imagen «mapa del centro.png», 480 × 260, 3,4 KB",
+        "Mostrar «instalar.sh» en la carpeta",
+    ] {
+        assert!(harness.query_by_label(label).is_some(), "{label}");
+    }
+    assert!(harness.query_by_label("Abrir «instalar.sh»").is_none());
+    // The block menu of a file: no «Convertir en».
+    harness
+        .get_by_label("Archivo «billetes de avión.pdf», 2,4 MB")
+        .hover();
+    harness.run();
+    click_button(&mut harness, "Acciones del bloque");
+    assert_accessible(&harness, "file block menu");
+    assert!(menu_item(&harness, "Convertir en").is_none());
+    assert!(menu_item(&harness, "Guardar una copia").is_some());
+    Ok(())
+}
+
+#[test]
+fn file_blocks() -> anyhow::Result<()> {
+    file_blocks_snapshot("file_blocks_light", eframe::egui::Theme::Light)
+}
+
+#[test]
+fn file_blocks_dark() -> anyhow::Result<()> {
+    file_blocks_snapshot("file_blocks_dark", eframe::egui::Theme::Dark)
+}
+
+fn file_blocks_snapshot(name: &str, theme: eframe::egui::Theme) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            attachments_app()?,
+        );
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+// ---- H7.4: space ----
+
+/// The PDF's block is deleted and saved, but the version saved before it
+/// still names its file (ADR 0009). A copy of the PDF that nothing names
+/// (as from an attach that was undone) is the unused one.
+fn with_unused_pdf(app: &mut SilexApp) -> anyhow::Result<()> {
+    use silex_desktop::attachment::NewAttachment;
+    app.blocks.retain(|b| !b.content.starts_with("billetes"));
+    app.mark_dirty();
+    app.save_now()?;
+    let mut pdf = b"%PDF-1.7".to_vec();
+    pdf.resize(2_516_582, b' ');
+    app.db
+        .add_attachment(&NewAttachment::from_bytes("billetes (copia).pdf", pdf)?)?;
+    Ok(())
+}
+
+#[test]
+fn freeing_space_shows_what_goes_and_asks_first() -> anyhow::Result<()> {
+    let mut app = attachments_app()?;
+    with_unused_pdf(&mut app)?;
+    app.history.clear();
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Copias y exportación");
+    assert_accessible(&harness, "backups menu");
+    assert!(
+        harness
+            .query_by_label("1 adjunto sin usar, 2,4 MB")
+            .is_some()
+    );
+    menu_item(&harness, "Liberar espacio…")
+        .expect("«Liberar espacio…»")
+        .click();
+    harness.run();
+    assert_accessible(&harness, "free space dialog");
+    assert!(
+        harness
+            .query_by_label_contains("Se borrará 1 adjunto que ya no usa ninguna página (2,4 MB)")
+            .is_some()
+    );
+    click_button(&mut harness, "Liberar espacio");
+    let state = harness.state();
+    let notice = state.notice.clone().unwrap_or_default();
+    assert!(notice.starts_with("Se liberaron"), "{notice}");
+    assert!(notice.contains("(1 adjunto sin usar)"), "{notice}");
+    assert_eq!(state.db.space_usage()?.unused_attachments, 0);
+    // The other files are still there, and so is the PDF a version names.
+    assert_eq!(state.db.space_usage()?.used_attachments, 3);
+    Ok(())
+}
+
+/// The «Copias y exportación» menu with its «Espacio» part.
+#[test]
+fn backups_menu() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut app = attachments_app()?;
+    with_unused_pdf(&mut app)?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    click_button(&mut harness, "Copias y exportación");
+    harness.snapshot("backups_menu_light");
+    Ok(())
+}
+
+// ---- H7.8: page history ----
+
+#[test]
+fn the_page_history_has_names_and_opens_from_the_page_menu() -> anyhow::Result<()> {
+    let (app, _) = super::page_history::history_fixture()?;
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Más acciones de la página");
+    harness.run();
+    menu_item(&harness, "Historial de versiones…")
+        .expect("«Historial de versiones…» in the page menu")
+        .click();
+    harness.run();
+    assert!(harness.state().page_history.is_some());
+    harness.run();
+    assert_accessible(&harness, "page history");
+    assert!(harness.query_by_label("Restaurar esta versión").is_some());
+    // Each version is a button named by when it was saved.
+    let rows = harness
+        .root()
+        .children_recursive()
+        .filter(|n| n.accesskit_node().role() == egui::accesskit::Role::Button)
+        .filter_map(|n| n.accesskit_node().label())
+        .filter(|l| l.contains(':') && l.contains(','))
+        .count();
+    assert_eq!(rows, 3);
+    Ok(())
+}
+
+/// The window keeps its size frame after frame (it once grew without end).
+#[test]
+fn the_page_history_window_keeps_its_size() -> anyhow::Result<()> {
+    let (mut app, _) = super::page_history::history_fixture()?;
+    super::page_history::open_fixed_history(&mut app)?;
+    let mut harness = a11y_harness(app);
+    let bounds = |h: &Harness<'_, SilexApp>| {
+        let close = h.get_by_label("Cerrar").rect();
+        let heading = h.get_by_label("Historial de versiones").rect();
+        (close.min, heading.max.x)
+    };
+    harness.run();
+    let first = bounds(&harness);
+    for _ in 0..60 {
+        harness.step();
+    }
+    let later = bounds(&harness);
+    assert_eq!(first, later, "the window moved or grew");
+    // Choosing another version does not change it either.
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run();
+    for _ in 0..30 {
+        harness.step();
+    }
+    assert_eq!(bounds(&harness), first);
+    Ok(())
+}
+
+#[test]
+fn page_history() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (mut app, _) = super::page_history::history_fixture()?;
+    super::page_history::open_fixed_history(&mut app)?;
+    if let Some(history) = &mut app.page_history {
+        history.selected = 1;
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot("page_history_light");
+    Ok(())
+}
+
+// ---- H7.5: links between pages ----
+
+/// «Diario» with a paragraph, a link to «Diseño de la interfaz» (inside
+/// «Proyecto Silex») and one to «Recetas», which is in the trash.
+fn links_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    let mut app = demo_app()?;
+    let find = |app: &SilexApp, title: &str| {
+        app.pages
+            .iter()
+            .find(|p| p.title == title)
+            .map(|p| p.id.clone())
+            .unwrap_or_default()
+    };
+    let diseno = find(&app, "Diseño de la interfaz");
+    let recetas = find(&app, "Recetas");
+    let diario = app.db.create_page("Diario", None)?;
+    let block = |id: &str, kind: BlockKind, content: &str, link: Option<&str>| Block {
+        id: id.into(),
+        page_id: diario.clone(),
+        kind,
+        content: content.into(),
+        checked: false,
+        position: 0,
+        indent: 0,
+        attachment: None,
+        link: link.map(str::to_owned),
+    };
+    let blocks = [
+        block("p", BlockKind::Paragraph, "Hoy revisé el diseño:", None),
+        block("l1", BlockKind::PageLink, "", Some(&diseno)),
+        block("l2", BlockKind::PageLink, "", Some(&recetas)),
+    ];
+    app.db.save_document(&diario, "Diario", &blocks)?;
+    app.db.trash_page(&recetas)?;
+    app.reload_pages()?;
+    app.open_page(diario)?;
+    Ok(app)
+}
+
+#[test]
+fn link_cards_and_the_picker_have_names() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(links_app()?);
+    assert_accessible(&harness, "links");
+    assert!(
+        harness
+            .query_by_label("Enlace a «Diseño de la interfaz»")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("Enlace a «Recetas», en la papelera")
+            .is_some()
+    );
+    harness.state_mut().open_link_picker(None, None);
+    harness.run();
+    assert_accessible(&harness, "link picker");
+    assert!(harness.query_by_label("Página a enlazar").is_some());
+    // In the sidebar and in the picker.
+    assert!(harness.query_all_by_label("Ideas sueltas").count() >= 2);
+    Ok(())
+}
+
+#[test]
+fn page_links() -> anyhow::Result<()> {
+    links_snapshot("page_links_light", false)
+}
+
+#[test]
+fn link_picker() -> anyhow::Result<()> {
+    links_snapshot("link_picker_light", true)
+}
+
+/// «Recetas» open, linked from «Diario», from «Pan» (inside it) and from
+/// the row «Zumos» of «Lecturas»; «Agenda», in the trash, links too.
+fn backlinks_app() -> anyhow::Result<(SilexApp, String)> {
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let recetas = db.create_page("Recetas", None)?;
+    let pan = db.create_page("Pan", Some(&recetas))?;
+    let diario = db.create_page("Diario", None)?;
+    let agenda = db.create_page("Agenda", None)?;
+    let base = db.create_database("Lecturas", None)?;
+    let zumos = db.create_row(&base, "Zumos")?;
+    let link = |page: &str| Block {
+        id: uuid::Uuid::new_v4().to_string(),
+        page_id: page.into(),
+        kind: BlockKind::PageLink,
+        content: String::new(),
+        checked: false,
+        position: 0,
+        indent: 0,
+        attachment: None,
+        link: Some(recetas.clone()),
+    };
+    for (page, title) in [
+        (&diario, "Diario"),
+        (&pan, "Pan"),
+        (&agenda, "Agenda"),
+        (&zumos, "Zumos"),
+    ] {
+        db.save_document(page, title, &[link(page)])?;
+    }
+    db.trash_page(&agenda)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(recetas)?;
+    Ok((app, diario))
+}
+
+#[test]
+fn backlinks_are_listed_named_and_open_their_page() -> anyhow::Result<()> {
+    let (app, diario) = backlinks_app()?;
+    let mut harness = a11y_harness(app);
+    assert_accessible(&harness, "backlinks");
+    assert!(harness.query_by_label("Enlazada desde").is_some());
+    let links: Vec<String> = harness
+        .root()
+        .children_recursive()
+        .map(|n| n.accesskit_node())
+        .filter(|n| n.role() == egui::accesskit::Role::Link)
+        .filter_map(|n| n.label())
+        .collect();
+    // By title; not «Agenda», which is in the trash.
+    assert_eq!(links, ["Diario", "Pan", "Zumos"]);
+
+    // A click opens the page; «Diario» is linked from nobody.
+    harness
+        .get_all_by_label("Diario")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Link)
+        .expect("the «Diario» backlink")
+        .click();
+    harness.run();
+    assert_eq!(harness.state().selected.as_deref(), Some(diario.as_str()));
+    assert!(harness.query_by_label("Enlazada desde").is_none());
+    Ok(())
+}
+
+#[test]
+fn backlinks_open_with_the_keyboard_and_follow_the_trash() -> anyhow::Result<()> {
+    let (app, diario) = backlinks_app()?;
+    let mut harness = a11y_harness(app);
+    // Trashing a page that links here takes it out of the list at once.
+    harness.state_mut().trash_page(&diario)?;
+    harness.run();
+    let recetas = harness.state().selected.clone();
+    assert!(harness.query_by_label("Diario").is_none());
+    let zumos = harness
+        .get_all_by_label("Zumos")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Link)
+        .expect("the «Zumos» backlink");
+    zumos.focus();
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    let state = harness.state();
+    assert_ne!(state.selected, recetas);
+    // A row opens as a row, with its properties.
+    assert!(state.row_page.is_some());
+    // The row shows its blocks, then nothing linked to it.
+    assert!(harness.query_by_label("Enlazada desde").is_none());
+    Ok(())
+}
+
+#[test]
+fn backlinks() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            backlinks_app()?.0,
+        );
+    harness.run();
+    harness.snapshot("backlinks_light");
+    Ok(())
+}
+
+fn links_snapshot(name: &str, picker: bool) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), links_app()?);
+    harness.run();
+    if picker {
+        harness.state_mut().open_link_picker(None, None);
+        harness.run();
+        harness.get_by_label("Página a enlazar").type_text("dise");
+        harness.run();
+    }
+    harness.snapshot(name);
+    Ok(())
+}

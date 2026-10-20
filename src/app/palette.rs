@@ -18,6 +18,9 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::RenamePage => icons::TEXT,
         Command::AddFavorite | Command::RemoveFavorite => icons::STAR,
         Command::ExportPage | Command::ExportWorkspace => icons::EXPORT,
+        Command::AttachFiles => icons::PAPERCLIP,
+        Command::LinkPage => icons::LINK,
+        Command::PageHistory => icons::HISTORY,
         Command::SaveNow => icons::SAVE,
         Command::TrashPage | Command::OpenTrash => icons::TRASH,
         Command::BackupNow | Command::RestoreBackup => icons::BACKUP,
@@ -81,7 +84,10 @@ impl SilexApp {
             (Command::RenamePage, Some(_)) => self.focus_title = true,
             (Command::AddFavorite, Some(id)) => self.set_favorite(&id, true)?,
             (Command::RemoveFavorite, Some(id)) => self.set_favorite(&id, false)?,
-            (Command::ExportPage, Some(_)) => self.export_current_page()?,
+            (Command::ExportPage, Some(_)) => self.export_current_page(ctx)?,
+            (Command::AttachFiles, Some(_)) => self.files.pick = Some(None),
+            (Command::LinkPage, Some(_)) => self.open_link_picker(None, None),
+            (Command::PageHistory, Some(_)) => self.open_page_history()?,
             // A save error is already shown by the status bar.
             (Command::SaveNow, _) => {
                 let _ = self.save_now();

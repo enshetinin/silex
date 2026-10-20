@@ -152,3 +152,70 @@ Con la semilla («Base de prueba», 1000 filas y 5 propiedades):
 - Con el teclado: flechas hasta la celda, Intro abre el calendario, Tab recorre los días, Intro elige.
 - Lo mismo en la página de una fila (propiedades bajo el título).
 - Pasada la medianoche (hora local), comprueba si «Hoy» marca el día correcto (usa UTC: en España, hasta la 1 o las 2 puede marcar el anterior).
+
+## 17. Adjuntos (H7.1)
+- Arrastra un PDF y una imagen a una página: aparece «Añadiendo…» y después una tarjeta por archivo, tras el bloque en el que estabas, con su icono, nombre y tamaño.
+- Pulsa Cmd+Z: desaparecen; Cmd+Mayús+Z: vuelven.
+- «Abrir»: se abre con la aplicación del sistema (Vista Previa, el visor de PDF…). Cambia la copia abierta y vuelve a abrirla desde Silex: tiene el contenido original (lo dice la ayuda del botón).
+- «Guardar una copia»: aparece en Documentos/Silex/Exportaciones; repítelo y sale «nombre (2)», sin pisar la primera.
+- Arrastra un script (`.sh`, `.command`, `.exe` en Windows): la tarjeta dice «Mostrar en la carpeta» y abre la carpeta, nunca el script.
+- Arrastra un archivo de más de 20 MB y una carpeta: el aviso explica por qué no se adjuntaron.
+- Con el teclado: ↓ desde el texto llega a la tarjeta (con el anillo de foco), Intro la abre, Retroceso la borra y Cmd+Z la devuelve. Retroceso al principio del párrafo de debajo no mezcla nada.
+- Busca (Cmd+K) una palabra del nombre del archivo: aparece la página.
+- Envía la página a la papelera y restáurala: los archivos siguen ahí. Haz una copia de seguridad, restáurala y abre un archivo.
+- «…» → «Exportar a Markdown»: junto al `.md` aparece `Título (adjuntos)/` con los archivos, y el `.md` los enlaza (ábrelo en un visor de Markdown: la imagen se ve y el PDF se abre).
+- (H7.9) Con varios archivos grandes (cerca de 20 MB cada uno), exporta la página: mientras dura, el aviso dice «Exportando «Título» y sus adjuntos…» y se puede seguir escribiendo sin tirones. Al terminar, «Exportado a…» con «Abrir carpeta».
+- Suelta un `.md` y un PDF a la vez: se importa la página y el PDF se adjunta a la que estaba abierta; el aviso cuenta las dos cosas.
+
+## 18. Imágenes (H7.2)
+- Arrastra una foto JPEG y un PNG: se ven dentro de la página, a su tamaño o al ancho de la columna, sin que la página salte cuando aparecen.
+- Una foto muy alta (vertical) no pasa de unos 480 puntos de alto; una panorámica ocupa el ancho de la columna.
+- Copia una captura de pantalla (Cmd+Mayús+Ctrl+4 en macOS) y pégala con Cmd+V en un párrafo: aparece «Imagen pegada.png» debajo. Cmd+Z la quita. Prueba también a copiar una imagen desde el navegador.
+- Cambia el nombre de un `.txt` a `.png` y arrástralo: se queda como archivo, sin vista previa.
+- Una página con muchas fotos grandes: al desplazarte, la app sigue fluida y la memoria no se dispara (Monitor de Actividad).
+- Tema oscuro: la imagen y su pie se ven bien.
+
+## 19. Diálogo de archivos (H7.3)
+- En un párrafo vacío escribe `/archivo` e Intro: se abre el diálogo del sistema. Elige dos archivos (Cmd+clic): aparecen donde estaba el párrafo, sin dejar un párrafo vacío encima.
+- Escribe `/pdf` o `/imagen`: el menú ofrece «Adjuntar archivos…».
+- Abre el diálogo y cancela: no cambia nada (solo desaparece `/archivo`).
+- Cmd+K → «adjuntar» → Intro, con el cursor en medio de la página: los archivos van tras ese bloque.
+- En una base de datos, la paleta no ofrece «Adjuntar archivos…».
+- Linux: prueba en GNOME o KDE (con portal) y, si puedes, en un escritorio sin portal; sin él, el aviso debe explicar el error y la app seguir funcionando.
+
+## 20. Espacio (H7.4)
+- Abre «Copias y exportación»: la sección «Espacio» dice cuánto ocupan la base, las copias y los adjuntos sin usar.
+- Adjunta un archivo grande, bórralo de la página, cambia de página (para vaciar el historial) y vuelve al menú: aparece «1 adjunto sin usar».
+- «Liberar espacio…» → lee la confirmación → «Liberar espacio»: el aviso dice cuánto se liberó, y en Finder el archivo `silex.sqlite3` ha encogido.
+- Borra un archivo de la página y, sin cambiar de página, libera espacio: ese archivo no se borra (Cmd+Z lo devuelve y se abre).
+- Tras liberar espacio, la búsqueda (Cmd+K) sigue encontrando todo, y crear y restaurar una copia funciona.
+- «Cancelar» en la confirmación no borra nada.
+
+## 21. Enlaces entre páginas (H7.5)
+- En un párrafo vacío escribe `[[`: se abre «Enlazar a una página». Escribe parte de un título (sin tildes también vale), elige con ↑ ↓ e Intro: el enlace ocupa el lugar del párrafo. Cmd+Z lo quita.
+- Escribe `[[` en medio de un párrafo con texto: los corchetes desaparecen y el enlace va debajo.
+- `/enlace` e Intro, y Cmd+K → «enlazar»: abren lo mismo. Esc cierra sin cambiar nada.
+- Clic en la tarjeta (o ↓ hasta ella e Intro): se abre la página enlazada.
+- Renombra la página enlazada desde la barra lateral y desde su título: la tarjeta muestra el título nuevo, y Cmd+K con el título nuevo encuentra también la página que enlaza.
+- Envía la página enlazada a la papelera: la tarjeta la muestra tachada «en la papelera». Ábrela: pregunta si restaurarla; «Restaurar y abrir» la devuelve y la abre.
+- «Exportar todo a Markdown»: en la carpeta exportada, abre el `.md` de una página con enlaces en un visor de Markdown: el enlace abre el `.md` de la otra página, también en subcarpetas.
+- «…» → «Exportar a Markdown» de una sola página: los enlaces salen como texto.
+
+## 22. Backlinks (H7.6)
+- Enlaza «Recetas» desde dos páginas y desde una fila de una base. Abre «Recetas»: al final aparece «Enlazada desde» con las tres, en orden alfabético, con su ruta en gris (la fila, con el nombre de su base).
+- Una página con dos enlaces a «Recetas» aparece una sola vez. Una página sin enlaces hacia ella no muestra la sección.
+- Clic en una de ellas: se abre. Con Tab hasta una y con Intro, también.
+- Envía a la papelera una de las páginas que enlazan y vuelve a «Recetas»: ya no aparece. Restáurala: vuelve.
+- Renombra una de las páginas que enlazan: la sección muestra el título nuevo.
+- Con VoiceOver: cada fila se anuncia como enlace con el título de la página.
+
+## 23. Historial de versiones (H7.7–H7.8)
+Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; después `SILEX_DB_PATH=/tmp/silex-qa.sqlite3 cargo run --release`), las páginas de «QA · Hito 7» (en Favoritos) traen lo necesario para las secciones 17–23: adjuntos (imagen, PDF, script, dos de 18 MB y uno sin usar), enlaces (también a una fila y a una página en la papelera), backlinks y versiones de días anteriores en «QA · Historial».
+- Edita una página con algo de texto, espera más de 10 minutos y vuelve a editarla. «…» → «Historial de versiones…» lista una versión con la hora local («Hoy, 17:40»), no en UTC.
+- ↑ ↓ eligen versión y la de la derecha cambia; no se puede editar. Las casillas, las listas, las citas, los archivos y los enlaces se ven como en la página.
+- «Restaurar esta versión» (o Intro): la página vuelve a esa versión y lo dice. Cmd+Z la devuelve a como estaba. Abre el historial otra vez: lo de antes de restaurar es también una versión.
+- Esc cierra sin cambiar nada. Cmd+K → «historial» abre lo mismo.
+- En una base de datos el menú no ofrece el historial; en una fila, sí.
+- Restaura una versión con un archivo adjunto que luego borraste de la página: el archivo vuelve. Haz «Liberar espacio» antes de restaurar: no lo borra.
+- Cierra y vuelve a abrir la app: las versiones siguen ahí.
+- Con VoiceOver: cada versión se anuncia con su fecha y hora, y el botón como «Restaurar esta versión».

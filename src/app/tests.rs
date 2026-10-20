@@ -17,6 +17,8 @@ fn block(id: &str) -> Block {
         checked: false,
         position: 0,
         indent: 0,
+        attachment: None,
+        link: None,
     }
 }
 
@@ -49,6 +51,9 @@ fn frame(
                     selected: false,
                     show_handle: false,
                     focused: false,
+                    attachment: None,
+                    preview: None,
+                    link: None,
                 },
             )
             .text_changed;
@@ -883,7 +888,10 @@ fn slash_command_changes_the_block_type() -> anyhow::Result<()> {
     let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
     type_into(&mut app, &ctx, "/h2");
     let menu = app.slash.clone().expect("menu open");
-    assert_eq!(menu.matches, [BlockKind::Heading2]);
+    assert_eq!(
+        menu.matches,
+        [silex_desktop::editor::SlashItem::Kind(BlockKind::Heading2)]
+    );
     app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
     assert_eq!(contents(&app), [(BlockKind::Heading2, 0, String::new())]);
     assert!(app.slash.is_none());
@@ -1269,7 +1277,7 @@ fn exporting_writes_what_is_on_screen_and_offers_the_folder() -> anyhow::Result<
     // Removed on drop; the in-memory app keeps no files open inside it.
     let tmp = TempFolder::new("silex-app-export")?;
     let dir = tmp.0.clone();
-    app.export_current_page_to(&dir)?;
+    app.export_current_page_to(&ctx, &dir)?;
     let path = app.last_export.clone().expect("export offered");
     let text = std::fs::read_to_string(&path)?;
     assert!(text.contains("- uno\\!\n  - dos\n"), "{text}"); // "!" is escaped
@@ -1360,13 +1368,27 @@ fn dropping_markdown_files_imports_them_as_pages() -> anyhow::Result<()> {
         notice.contains("vieja.md") && notice.contains("UTF-8"),
         "{notice}"
     );
-    assert!(notice.contains("1 ignorado"), "{notice}");
+    assert!(notice.contains("Se adjuntó 1 archivo."), "{notice}");
+    // The other file was attached to the page open when it was dropped.
+    let first = app
+        .pages
+        .iter()
+        .find(|p| p.title == "Mi primera página")
+        .map(|p| p.id.clone())
+        .expect("first page");
+    let attached = app.db.list_blocks(&first)?;
+    assert!(
+        attached
+            .iter()
+            .any(|b| b.kind == BlockKind::File && b.content == "foto.png"),
+        "{attached:?}"
+    );
 
-    // Only non-Markdown files: nothing to import, just the message.
+    // Only non-Markdown files: nothing to import, attached to this page.
     drop_frame(&mut app, &ctx, &[other]);
     assert!(app.import_job.is_none());
-    let notice = app.notice.clone().unwrap_or_default();
-    assert!(notice.contains("1 ignorado"), "{notice}");
+    assert_eq!(app.notice.as_deref(), Some("Se adjuntó 1 archivo."));
+    assert_eq!(app.blocks.last().map(|b| b.kind), Some(BlockKind::File));
     Ok(())
 }
 
@@ -1483,6 +1505,8 @@ fn sidebar_width_is_stable_across_frames() -> anyhow::Result<()> {
                 checked: false,
                 position: 0,
                 indent: 0,
+                attachment: None,
+                link: None,
             });
             egui::Popup::open_id(&ctx, super::blocks::handle_menu_id("b"));
         }
@@ -1687,7 +1711,7 @@ fn exporting_a_database_writes_its_table() -> anyhow::Result<()> {
     app.reload_pages()?;
     app_frame(&mut app, &ctx, vec![]);
     let tmp = TempFolder::new("silex-app-db-export")?;
-    app.export_current_page_to(&tmp.0)?;
+    app.export_current_page_to(&ctx, &tmp.0)?;
     let path = app.last_export.clone().expect("exported");
     assert_eq!(
         std::fs::read_to_string(path)?,
@@ -2709,5 +2733,821 @@ fn a_duplicated_board_is_a_board() -> anyhow::Result<()> {
     assert_eq!(copy.kind, ViewKind::Board);
     assert_eq!(copy.name, "Tablero (copia)");
     assert_eq!(copy.config.group_by.as_deref(), Some(estado.as_str()));
+    Ok(())
+}
+
+// ---- H7.1: attachments (ADR 0007) ----
+
+thread_local! {
+    /// What the app asked to open in this test thread.
+    static OPENED: std::cell::RefCell<Vec<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn record_open(path: &std::path::Path) -> anyhow::Result<()> {
+    OPENED.with(|o| o.borrow_mut().push(path.to_path_buf()));
+    Ok(())
+}
+
+fn opened() -> Vec<std::path::PathBuf> {
+    OPENED.with(|o| o.borrow().clone())
+}
+
+/// An app on a page with one paragraph («Antes»), its file folders in
+/// `tmp`, and `files` (name, content) dropped on it.
+fn file_app(
+    tmp: &TempFolder,
+    files: &[(&str, &[u8])],
+) -> anyhow::Result<(SilexApp, egui::Context)> {
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    app.files.folders = Some(silex_desktop::attach_job::Folders {
+        opened: tmp.0.join("abiertos"),
+        saved: tmp.0.join("Exportaciones"),
+    });
+    app.files.opener = Some(record_open);
+    let page = app.selected.clone().expect("a page");
+    app.blocks = vec![Block {
+        content: "Antes".into(),
+        page_id: page,
+        ..block("antes")
+    }];
+    app.mark_dirty();
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![]);
+    let mut paths = Vec::new();
+    for (name, content) in files {
+        let path = tmp.0.join(name);
+        std::fs::write(&path, content)?;
+        paths.push(path);
+    }
+    drop_frame(&mut app, &ctx, &paths);
+    // The new block takes the focus over two frames.
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx))
+}
+
+fn file_block(app: &SilexApp) -> Block {
+    app.blocks
+        .iter()
+        .find(|b| b.kind == BlockKind::File)
+        .cloned()
+        .expect("a file block")
+}
+
+#[test]
+fn a_dropped_file_is_a_block_that_opens_saves_and_undoes() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[("informe.pdf", b"%PDF-1.7")])?;
+    assert_eq!(app.notice.as_deref(), Some("Se adjuntó 1 archivo."));
+    assert_eq!(app.files.adding, 0, "nothing left in progress");
+    let file = file_block(&app);
+    assert_eq!(app.blocks.len(), 2, "after «Antes»");
+    assert_eq!(file.content, "informe.pdf");
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t == "informe.pdf  8 B"),
+        "{painted:?}"
+    );
+    // Saved like any block.
+    app.save_now()?;
+    let page = app.selected.clone().unwrap_or_default();
+    assert_eq!(
+        app.db.list_blocks(&page)?[1],
+        Block {
+            position: 1,
+            ..file.clone()
+        }
+    );
+
+    // Intro on the card opens a copy.
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&file.id)));
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(app.caret.as_ref().is_some_and(|c| c.block_id == file.id));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let copy = opened().last().cloned().expect("opened");
+    assert_eq!(std::fs::read(&copy)?, b"%PDF-1.7");
+    assert!(copy.starts_with(tmp.0.join("abiertos")));
+    assert_eq!(app.blocks.len(), 2, "Intro did not split anything");
+
+    // «Guardar una copia» writes it to the exports folder.
+    app.block_action(BlockAction::SaveFile, &file.id);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(tmp.0.join("Exportaciones").join("informe.pdf").exists());
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Se guardó una copia: «informe.pdf».")
+    );
+
+    // Backspace on the card deletes the block; Cmd+Z brings it back.
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&file.id)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    assert_eq!(app.blocks.len(), 1);
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, undo());
+    assert_eq!(
+        app.blocks.get(1).map(|b| b.id.clone()),
+        Some(file.id.clone())
+    );
+    // A file block is not converted into text.
+    app.block_action(BlockAction::Convert(BlockKind::Heading1), &file.id);
+    assert_eq!(file_block(&app).kind, BlockKind::File);
+    Ok(())
+}
+
+#[test]
+fn programs_are_shown_in_their_folder_never_opened() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[("instalar.sh", b"#!/bin/sh\necho hola")])?;
+    let file = file_block(&app);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t.trim() == "Mostrar en la carpeta"),
+        "{painted:?}"
+    );
+    assert!(!painted.iter().any(|t| t.trim() == "Abrir"), "{painted:?}");
+    let before = opened().len();
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&file.id)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let shown = opened();
+    assert_eq!(shown.len(), before + 1);
+    let folder = shown.last().cloned().unwrap_or_default();
+    assert!(folder.is_dir(), "a folder was shown, not the script run");
+    assert!(folder.join("instalar.sh").exists());
+    Ok(())
+}
+
+#[test]
+fn arrow_keys_reach_a_file_block_like_text() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[("foto.png", b"\x89PNG\r\n\x1a\n")])?;
+    let file = file_block(&app);
+    let antes = app.blocks[0].id.clone();
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&antes)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(ctx.memory(|m| m.has_focus(app.block_field_id(&file.id))));
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(ctx.memory(|m| m.has_focus(app.block_field_id(&antes))));
+    // ↓ on the card, the last block: the focus stays (egui would move it
+    // to the nearest button).
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&file.id)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(ctx.memory(|m| m.has_focus(app.block_field_id(&file.id))));
+    assert_eq!(file_block(&app).content, "foto.png");
+    Ok(())
+}
+
+#[test]
+fn files_being_added_are_shown_until_they_arrive() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[])?;
+    app.files.adding = 2;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t == "Añadiendo 2 archivos…"),
+        "{painted:?}"
+    );
+    app.files.adding = 0;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(!painted.iter().any(|t| t.starts_with("Añadiendo")));
+    Ok(())
+}
+
+#[test]
+fn files_dropped_on_a_database_are_not_attached() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx, _) = database_app()?;
+    let path = tmp.0.join("nota.txt");
+    std::fs::write(&path, "hola")?;
+    drop_frame(&mut app, &ctx, &[path]);
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(notice.contains("no una base de datos"), "{notice}");
+    Ok(())
+}
+
+// ---- H7.2: image previews and pasted images ----
+
+/// An RGBA image of `w` × `h` (a gradient), as egui pastes it.
+fn pasted_image(w: usize, h: usize) -> egui::Event {
+    let pixels = (0..w * h)
+        .map(|i| egui::Color32::from_rgb((i % 256) as u8, 120, 200))
+        .collect();
+    egui::Event::PasteImage(std::sync::Arc::new(egui::ColorImage::new([w, h], pixels)))
+}
+
+#[test]
+fn a_pasted_image_is_attached_and_previewed() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[])?;
+    let antes = app.blocks[0].id.clone();
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&antes)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![pasted_image(300, 200)]);
+    let file = file_block(&app);
+    assert_eq!(file.content, "Imagen pegada.png");
+    assert_eq!(app.blocks[1].id, file.id, "after the block being edited");
+    let id = file.attachment.clone().expect("its file");
+    let info = app.files.attachments.get(&id).cloned().expect("known");
+    assert_eq!(
+        (info.mime.as_str(), info.width, info.height),
+        ("image/png", Some(300), Some(200))
+    );
+
+    // Its preview is decoded once it is in sight.
+    for _ in 0..3 {
+        app_frame(&mut app, &ctx, vec![]);
+    }
+    assert!(matches!(
+        app.files.previews.get(&id),
+        Some(PreviewState::Ready(_))
+    ));
+    // The card holds the image (300 × 200 points) above its caption.
+    let card = ctx
+        .read_response(app.block_field_id(&file.id))
+        .map(|r| r.rect)
+        .expect("drawn");
+    assert_eq!(card.height(), 200.0 + 8.0 + 44.0);
+
+    // Cmd+Z takes the pasted image away, like any block.
+    ctx.memory_mut(|m| m.surrender_focus(app.block_field_id(&file.id)));
+    app_frame(&mut app, &ctx, undo());
+    assert!(app.blocks.iter().all(|b| b.kind != BlockKind::File));
+
+    // Another page: its previews are dropped.
+    let other = app.db.create_page("Otra", None)?;
+    app.reload_pages()?;
+    app.open_page(other)?;
+    assert!(app.files.previews.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_broken_image_says_why_and_stays_a_file() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-files")?;
+    // A PNG header with a size, and nothing an image decoder can read.
+    let mut broken = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    broken.extend(640u32.to_be_bytes());
+    broken.extend(480u32.to_be_bytes());
+    broken.extend([8, 6, 0, 0, 0, 1, 2, 3]);
+    let (mut app, ctx) = file_app(&tmp, &[("roto.png", &broken)])?;
+    let mut painted = Vec::new();
+    for _ in 0..3 {
+        painted = app_frame(&mut app, &ctx, vec![]);
+    }
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.starts_with("No se puede mostrar la imagen")),
+        "{painted:?}"
+    );
+    // Still a file: it opens and saves like any other.
+    assert!(painted.iter().any(|t| t.trim() == "Abrir"), "{painted:?}");
+    Ok(())
+}
+
+#[test]
+fn pasting_an_image_on_a_database_is_explained() -> anyhow::Result<()> {
+    let (mut app, ctx, _) = database_app()?;
+    app_frame(&mut app, &ctx, vec![pasted_image(2, 2)]);
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(notice.contains("no una base de datos"), "{notice}");
+    Ok(())
+}
+
+#[test]
+fn previews_out_of_sight_are_dropped_when_memory_is_short() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[])?;
+    app_frame(&mut app, &ctx, vec![pasted_image(40, 30)]);
+    for _ in 0..3 {
+        app_frame(&mut app, &ctx, vec![]);
+    }
+    let id = file_block(&app).attachment.expect("its file");
+    // A preview of an image no longer drawn (as if scrolled far away).
+    let texture = ctx.load_texture(
+        "lejos",
+        egui::ColorImage::new([50, 50], vec![egui::Color32::RED; 2500]),
+        egui::TextureOptions::LINEAR,
+    );
+    app.files
+        .previews
+        .insert("lejos".into(), PreviewState::Ready(texture));
+    // Within budget, both stay.
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(app.files.previews.contains_key("lejos"));
+    // Over budget: the one out of sight goes, the one in sight stays.
+    app.files.budget = Some(1);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(!app.files.previews.contains_key("lejos"));
+    assert!(matches!(
+        app.files.previews.get(&id),
+        Some(PreviewState::Ready(_))
+    ));
+    Ok(())
+}
+
+// ---- H7.3: the file dialog ----
+
+thread_local! {
+    /// What the fake file dialog answers in this test thread.
+    static PICKED: std::cell::RefCell<Vec<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn fake_picker() -> Vec<std::path::PathBuf> {
+    PICKED.with(|p| p.borrow().clone())
+}
+
+/// A page with «Antes» and an empty block below it, focused, and a fake
+/// file dialog that answers `picked`.
+fn picker_app(
+    tmp: &TempFolder,
+    picked: &[(&str, &[u8])],
+) -> anyhow::Result<(SilexApp, egui::Context, String)> {
+    let (mut app, ctx) = file_app(tmp, &[])?;
+    let mut paths = Vec::new();
+    for (name, content) in picked {
+        let path = tmp.0.join(name);
+        std::fs::write(&path, content)?;
+        paths.push(path);
+    }
+    PICKED.with(|p| *p.borrow_mut() = paths);
+    app.files.picker = Some(fake_picker);
+    let page = app.selected.clone().unwrap_or_default();
+    let empty = Block {
+        page_id: page,
+        ..block("vacio")
+    };
+    app.blocks.push(empty);
+    app.mark_dirty();
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id("vacio")));
+    app_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, "vacio".into()))
+}
+
+#[test]
+fn slash_archivo_attaches_in_place_of_the_empty_block() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx, _) = picker_app(&tmp, &[("acta.pdf", b"%PDF-1.4"), ("nota.txt", b"hola")])?;
+    app_frame(&mut app, &ctx, type_text("/archivo"));
+    let menu = app.slash.clone().expect("slash menu");
+    assert_eq!(
+        menu.matches,
+        [silex_desktop::editor::SlashItem::AttachFiles]
+    );
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let kinds: Vec<(BlockKind, String)> = app
+        .blocks
+        .iter()
+        .map(|b| (b.kind, b.content.clone()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (BlockKind::Paragraph, "Antes".to_owned()),
+            (BlockKind::File, "acta.pdf".to_owned()),
+            (BlockKind::File, "nota.txt".to_owned()),
+        ],
+        "the empty block gave its place"
+    );
+    assert_eq!(app.notice.as_deref(), Some("Se adjuntaron 2 archivos."));
+    Ok(())
+}
+
+#[test]
+fn a_cancelled_dialog_only_removes_the_command() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx, empty) = picker_app(&tmp, &[])?;
+    app_frame(&mut app, &ctx, type_text("/adj"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks.len(), 2);
+    let block = app
+        .blocks
+        .iter()
+        .find(|b| b.id == empty)
+        .expect("still there");
+    assert_eq!(block.content, "");
+    assert!(app.blocks.iter().all(|b| b.kind != BlockKind::File));
+    assert!(app.files.pick.is_none());
+    Ok(())
+}
+
+#[test]
+fn the_palette_attaches_files_after_the_block_being_edited() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx, _) = picker_app(&tmp, &[("plano.png", b"\x89PNG\r\n\x1a\n")])?;
+    let antes = app.blocks[0].id.clone();
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&antes)));
+    app_frame(&mut app, &ctx, vec![]);
+    app.run_command(&ctx, silex_desktop::palette::Command::AttachFiles)?;
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks[1].content, "plano.png", "right after «Antes»");
+    assert_eq!(
+        app.blocks.len(),
+        3,
+        "the empty block stays: it was not «/archivo»"
+    );
+    Ok(())
+}
+
+// ---- H7.4: freeing space ----
+
+#[test]
+fn freeing_space_keeps_what_undo_can_bring_back() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let tmp = TempFolder::new("silex-files")?;
+    let (mut app, ctx) = file_app(&tmp, &[("acta.pdf", b"%PDF-1.4")])?;
+    let file = file_block(&app);
+    let attachment = file.attachment.clone().expect("its file");
+    // Deleted from the page, but Cmd+Z could bring it back.
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&file.id)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    assert!(app.blocks.iter().all(|b| b.kind != BlockKind::File));
+    app.start_free_space(&ctx)?;
+    assert!(app.db.attachment(&attachment)?.is_some(), "kept for undo");
+    // Undo brings the block back, and it saves.
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, undo());
+    assert_eq!(file_block(&app).attachment, Some(attachment.clone()));
+    app.save_now()?;
+    // With the history gone (another page), it can go.
+    app.blocks.retain(|b| b.kind != BlockKind::File);
+    app.mark_dirty();
+    app.save_now()?;
+    app.history.clear();
+    app.start_free_space(&ctx)?;
+    assert!(app.db.attachment(&attachment)?.is_none());
+    Ok(())
+}
+
+// ---- H7.5: links between pages ----
+
+/// «Recetas» (with «Pan» inside) and «Diario», open, with «Hoy» and an
+/// empty block below it, focused. Returns (app, ctx, recetas, empty block).
+fn links_app() -> anyhow::Result<(SilexApp, egui::Context, String, String)> {
+    let db = Database::open_in_memory()?;
+    let recetas = db.create_page("Recetas", None)?;
+    db.create_page("Pan", Some(&recetas))?;
+    let diario = db.create_page("Diario", None)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(diario.clone())?;
+    app.blocks = vec![
+        Block {
+            content: "Hoy".into(),
+            page_id: diario.clone(),
+            ..block("hoy")
+        },
+        Block {
+            page_id: diario,
+            ..block("vacio")
+        },
+    ];
+    app.mark_dirty();
+    let ctx = egui::Context::default();
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id("vacio")));
+    app_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, recetas, "vacio".into()))
+}
+
+fn link_block(app: &SilexApp) -> Block {
+    app.blocks
+        .iter()
+        .find(|b| b.kind == BlockKind::PageLink)
+        .cloned()
+        .expect("a link block")
+}
+
+#[test]
+fn double_brackets_link_a_page_in_place_of_the_empty_block() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, recetas, empty) = links_app()?;
+    app_frame(&mut app, &ctx, type_text("[["));
+    let picker = app.links.picker.clone().expect("the page picker opens");
+    assert_eq!(picker.replace.as_deref(), Some(empty.as_str()));
+    assert!(
+        app.blocks.iter().all(|b| !b.content.contains("[[")),
+        "brackets gone"
+    );
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("rece"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.links.picker.is_none());
+    let kinds: Vec<BlockKind> = app.blocks.iter().map(|b| b.kind).collect();
+    assert_eq!(
+        kinds,
+        [BlockKind::Paragraph, BlockKind::PageLink],
+        "in its place"
+    );
+    let link = link_block(&app);
+    assert_eq!(link.link.as_deref(), Some(recetas.as_str()));
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t.starts_with("Recetas")),
+        "{painted:?}"
+    );
+    app.save_now()?;
+    let page = app.selected.clone().unwrap_or_default();
+    assert_eq!(
+        app.db.list_blocks(&page)?[1].link.as_deref(),
+        Some(recetas.as_str())
+    );
+    // Cmd+Z takes it away.
+    ctx.memory_mut(|m| m.surrender_focus(app.block_field_id(&link.id)));
+    app_frame(&mut app, &ctx, undo());
+    assert!(app.blocks.iter().all(|b| b.kind != BlockKind::PageLink));
+    Ok(())
+}
+
+#[test]
+fn intro_on_a_link_opens_its_page_and_renames_show_at_once() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, recetas, _) = links_app()?;
+    app.open_link_picker(None, None);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("Pan"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let link = link_block(&app);
+    // Its card shows the page's path, and its current title after a rename.
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.starts_with("Pan") && t.ends_with("Recetas")),
+        "{painted:?}"
+    );
+    let pan = link.link.clone().expect("its page");
+    app.db.rename_page(&pan, "Pan de centeno")?;
+    app.reload_pages()?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t.starts_with("Pan de centeno")),
+        "{painted:?}"
+    );
+    // Intro on the card opens it.
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&link.id)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(app.selected.as_deref(), Some(pan.as_str()));
+    let _ = recetas;
+    Ok(())
+}
+
+#[test]
+fn a_link_to_a_page_in_the_trash_offers_to_restore_it() -> anyhow::Result<()> {
+    let (mut app, ctx, recetas, _) = links_app()?;
+    app.open_link_picker(None, None);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("Recetas"));
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    let link = link_block(&app);
+    app.save_now()?;
+    app.db.trash_page(&recetas)?;
+    app.reload_pages()?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t.contains("en la papelera")),
+        "{painted:?}"
+    );
+    app.block_action(BlockAction::OpenLink, &link.id);
+    assert_eq!(
+        app.links.restore.as_ref().map(|(id, _)| id.clone()),
+        Some(recetas.clone())
+    );
+    // A new window is measured, unseen, on its first frame.
+    app_frame(&mut app, &ctx, vec![]);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.contains("¿Quieres restaurarla y abrirla?")),
+        "{painted:?}"
+    );
+    // «Restaurar y abrir»: as the restore button would.
+    app.links.restore = None;
+    app.restore_from_trash(&recetas)?;
+    assert_eq!(app.selected.as_deref(), Some(recetas.as_str()));
+    assert!(app.db.get_page(&recetas)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn slash_enlace_and_the_palette_open_the_picker_and_escape_closes_it() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, _, empty) = links_app()?;
+    app_frame(&mut app, &ctx, type_text("/enlace"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let picker = app.links.picker.clone().expect("opened by /enlace");
+    assert_eq!(picker.replace.as_deref(), Some(empty.as_str()));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.links.picker.is_none(), "Esc closes it");
+    assert!(app.blocks.iter().all(|b| b.kind != BlockKind::PageLink));
+
+    app.run_command(&ctx, silex_desktop::palette::Command::LinkPage)?;
+    assert!(app.links.picker.is_some(), "opened by the palette");
+    // The page that is open is not offered.
+    let page = app.selected.clone();
+    let offered = links::picker_matches(&app.pages, "", page.as_deref());
+    assert!(offered.iter().all(|p| Some(&p.id) != page.as_ref()));
+    Ok(())
+}
+
+// ---- H7.8: page history ----
+
+#[test]
+fn the_history_lists_versions_and_restores_one_that_cmd_z_takes_back() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, page) = page_history::history_fixture()?;
+    let ctx = egui::Context::default();
+    page_history::open_fixed_history(&mut app)?;
+    let history = app.page_history.as_ref().expect("the window opens");
+    let whens: Vec<String> = history
+        .versions
+        .iter()
+        .map(|v| silex_desktop::versions::describe_when(&v.local, &history.today))
+        .collect();
+    assert_eq!(whens, ["Hoy, 12:00", "Ayer, 09:05", "18 oct, 17:40"]);
+    // The editor does not take keys meanwhile: ↓ chooses a version.
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    assert_eq!(app.page_history.as_ref().map(|h| h.selected), Some(1));
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t.contains("Comprar calabaza")),
+        "the chosen version is shown: {painted:?}"
+    );
+    assert_eq!(app.title, "Recetas", "nothing changes before restoring");
+
+    // Intro restores it: title and blocks, saved at once.
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.page_history.is_none(), "the window closes");
+    let contents = |blocks: &[Block]| blocks.iter().map(|b| b.content.clone()).collect::<Vec<_>>();
+    assert_eq!(app.title, "Recetas de otoño");
+    assert_eq!(contents(&app.blocks).len(), 8);
+    assert!(app.blocks.iter().any(|b| b.checked));
+    assert_eq!(contents(&app.db.list_blocks(&page)?), contents(&app.blocks));
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(notice.starts_with("Se restauró la versión de "), "{notice}");
+    // What there was before is a version too.
+    let versions = app.db.page_versions(&page)?;
+    assert_eq!(versions.len(), 4);
+    assert_eq!(versions[0].title, "Recetas");
+
+    // Cmd+Z brings it back.
+    app.undo();
+    assert_eq!(app.title, "Recetas");
+    assert_eq!(contents(&app.blocks), ["Solo queda la idea de la sopa."]);
+    app.save_now()?;
+    assert_eq!(
+        app.db.get_page(&page)?.map(|p| p.title),
+        Some("Recetas".into())
+    );
+    Ok(())
+}
+
+#[test]
+fn escape_closes_the_history_without_changes() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, _) = page_history::history_fixture()?;
+    let ctx = egui::Context::default();
+    app.run_command(&ctx, silex_desktop::palette::Command::PageHistory)?;
+    assert!(app.page_history.is_some(), "opened by the palette");
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.page_history.is_none());
+    assert_eq!(app.title, "Recetas");
+    assert!(!app.history.can_undo());
+    Ok(())
+}
+
+#[test]
+fn a_database_has_no_history_and_a_new_page_says_it_has_none() -> anyhow::Result<()> {
+    let (mut app, _) = page_history::history_fixture()?;
+    let ctx = egui::Context::default();
+    app.create_database(None)?;
+    app.open_page_history()?;
+    assert!(app.page_history.is_none());
+    assert!(
+        app.notice
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no una base de datos"),
+        "{:?}",
+        app.notice
+    );
+    app.notice = None;
+    app.create_root_page("Nueva")?;
+    app.open_page_history()?;
+    let painted = {
+        app_frame(&mut app, &ctx, vec![]);
+        app_frame(&mut app, &ctx, vec![])
+    };
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.starts_with("Todavía no hay versiones")),
+        "{painted:?}"
+    );
+    assert!(app.page_history.is_some());
+    Ok(())
+}
+
+// ---- H7.9: page export with attachments, on a worker ----
+
+#[test]
+fn a_page_with_files_is_exported_in_the_background() -> anyhow::Result<()> {
+    use silex_desktop::attachment::NewAttachment;
+    // Declared before the app: dropped after it (see above).
+    let tmp = TempFolder::new("silex-app-page-export")?;
+    let dir = tmp.0.clone();
+    let db = Database::open(dir.join("silex.sqlite3"))?;
+    let page = db.create_page("Viaje", None)?;
+    let mut app = SilexApp::new(db)?;
+    app.startup_backup_pending = false;
+    app.open_page(page.clone())?;
+    let mut pdf = b"%PDF-1.7".to_vec();
+    pdf.resize(3_000_000, b' ');
+    let file = app
+        .db
+        .add_attachment(&NewAttachment::from_bytes("billetes.pdf", pdf)?)?;
+    app.blocks = vec![Block {
+        page_id: page.clone(),
+        kind: BlockKind::File,
+        content: file.name.clone(),
+        attachment: Some(file.id.clone()),
+        ..block("f")
+    }];
+    app.mark_dirty();
+    let ctx = egui::Context::default();
+
+    let out = dir.join("exportaciones");
+    app.export_current_page_to(&ctx, &out)?;
+    assert!(app.save.can_close(), "saved before exporting");
+    assert!(app.page_export.is_some(), "on a worker");
+    // A second one meanwhile is refused, not queued.
+    app.export_current_page_to(&ctx, &out)?;
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Ya se está exportando una página.")
+    );
+    // The first frame is drawn before the result is collected: it always
+    // says the export is running.
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t == "Exportando «Viaje» y sus adjuntos…"),
+        "{painted:?}"
+    );
+    let start = std::time::Instant::now();
+    while app.page_export.is_some() && start.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app_frame(&mut app, &ctx, vec![]);
+    }
+    let path = app.last_export.clone().expect("export finished");
+    assert_eq!(path, out.join("Viaje.md"));
+    let copy = out.join("Viaje (adjuntos)").join("billetes.pdf");
+    assert_eq!(std::fs::metadata(copy)?.len(), 3_000_000);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted.iter().any(|t| t.starts_with("Exportado a")),
+        "{painted:?}"
+    );
+
+    // A folder that cannot be created: the error is shown.
+    let blocked = dir.join("no-es-carpeta");
+    std::fs::write(&blocked, b"x")?;
+    app.notice = None;
+    app.export_current_page_to(&ctx, &blocked)?;
+    let start = std::time::Instant::now();
+    while app.page_export.is_some() && start.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app_frame(&mut app, &ctx, vec![]);
+    }
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(
+        notice.starts_with("No se pudo exportar la página"),
+        "{notice}"
+    );
     Ok(())
 }

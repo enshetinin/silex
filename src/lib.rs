@@ -1,4 +1,6 @@
 //! Domain and persistence layer, independent of the desktop UI.
+pub mod attach_job;
+pub mod attachment;
 pub mod db;
 pub mod editor;
 pub mod export;
@@ -12,4 +14,6 @@ pub mod safe_path;
 pub mod save_state;
 pub mod search;
 pub mod settings;
+pub mod space;
+pub mod versions;
 pub mod view;

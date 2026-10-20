@@ -45,9 +45,18 @@ pub enum BlockKind {
     Numbered,
     Quote,
     Code,
+    /// An attachment (ADR 0007): its content is the name shown, and its
+    /// file is `Block::attachment`. Created only by attaching a file, never
+    /// by converting a text block, so it is not in [`BlockKind::ALL`].
+    File,
+    /// A link to another page (ADR 0008): its content is the page's title
+    /// (for search and export), and its page is `Block::link`. Created by
+    /// choosing a page, not by converting a text block.
+    PageLink,
 }
 
 impl BlockKind {
+    /// The kinds a text block can take: the `/` menu and «Convertir en».
     pub const ALL: [BlockKind; 9] = [
         BlockKind::Paragraph,
         BlockKind::Heading1,
@@ -60,7 +69,7 @@ impl BlockKind {
         BlockKind::Code,
     ];
 
-    /// Name stored in SQLite (must match the CHECK in migration 0003).
+    /// Name stored in SQLite (must match the CHECK in migration 0007).
     pub fn as_str(self) -> &'static str {
         match self {
             BlockKind::Paragraph => "paragraph",
@@ -72,11 +81,22 @@ impl BlockKind {
             BlockKind::Numbered => "numbered",
             BlockKind::Quote => "quote",
             BlockKind::Code => "code",
+            BlockKind::File => "file",
+            BlockKind::PageLink => "page_link",
         }
     }
 
     pub fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|k| k.as_str() == name)
+        Self::ALL
+            .into_iter()
+            .chain([BlockKind::File, BlockKind::PageLink])
+            .find(|k| k.as_str() == name)
+    }
+
+    /// Whether the block is edited as text (every kind but a file or a
+    /// link: those are cards).
+    pub fn is_text(self) -> bool {
+        !matches!(self, BlockKind::File | BlockKind::PageLink)
     }
 
     /// Name shown in the UI.
@@ -91,6 +111,8 @@ impl BlockKind {
             BlockKind::Numbered => "Lista numerada",
             BlockKind::Quote => "Cita",
             BlockKind::Code => "Código",
+            BlockKind::File => "Archivo",
+            BlockKind::PageLink => "Enlace a página",
         }
     }
 
@@ -148,6 +170,12 @@ pub struct Block {
     pub position: i64,
     /// Nesting level, 0..=MAX_INDENT (flat list with indent, ADR 0003).
     pub indent: u8,
+    /// The attachment of a [`BlockKind::File`] block (ADR 0007); `None`
+    /// for every other kind.
+    pub attachment: Option<String>,
+    /// The page a [`BlockKind::PageLink`] block points at (ADR 0008);
+    /// `None` for every other kind (and for a link whose page is gone).
+    pub link: Option<String>,
 }
 
 impl Block {

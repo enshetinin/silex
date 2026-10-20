@@ -9,14 +9,45 @@ use super::*;
 
 impl SilexApp {
     /// Exports the open page as it is on screen (saved first when possible).
-    pub(super) fn export_current_page(&mut self) -> Result<()> {
+    pub(super) fn export_current_page(&mut self, ctx: &egui::Context) -> Result<()> {
         let dir = silex_desktop::export::export_root()?;
-        self.export_current_page_to(&dir)
+        self.export_current_page_to(ctx, &dir)
     }
 
-    pub(super) fn export_current_page_to(&mut self, dir: &std::path::Path) -> Result<()> {
+    /// Exports the open page as Markdown into `dir`. A page with files, in
+    /// a database on disk, is exported on a worker thread (H7.9): its
+    /// attachments can take a while to write. The rest takes no time.
+    pub(super) fn export_current_page_to(
+        &mut self,
+        ctx: &egui::Context,
+        dir: &std::path::Path,
+    ) -> Result<()> {
         // A save error is shown by the status bar; export what the user sees anyway.
         let _ = self.save_now();
+        let has_files = self
+            .blocks
+            .iter()
+            .any(|b| b.kind == silex_desktop::model::BlockKind::File);
+        if self.database.is_none()
+            && has_files
+            && let Some(db_path) = self.db.path()
+        {
+            if self.page_export.is_some() {
+                self.notice = Some("Ya se está exportando una página.".into());
+                return Ok(());
+            }
+            let repaint = ctx.clone();
+            let job = silex_desktop::export::PageExportJob::spawn(
+                db_path,
+                dir.to_path_buf(),
+                self.title.clone(),
+                self.blocks.clone(),
+                move || repaint.request_repaint(),
+            )?;
+            self.page_export = Some((job, display_title(&self.title).to_owned()));
+            self.last_export = None;
+            return Ok(());
+        }
         let path = match &self.database {
             Some(state) => {
                 let markdown = silex_desktop::markdown::database_to_markdown(
@@ -27,7 +58,12 @@ impl SilexApp {
                 );
                 silex_desktop::export::export_markdown(dir, &self.title, &markdown)?
             }
-            None => silex_desktop::export::export_page(dir, &self.title, &self.blocks)?,
+            None => silex_desktop::export::export_page_with_files(
+                &self.db,
+                dir,
+                &self.title,
+                &self.blocks,
+            )?,
         };
         self.last_export = Some(path);
         Ok(())
@@ -108,6 +144,18 @@ impl SilexApp {
         Ok(())
     }
 
+    /// Collects the page export from its worker, when it is done.
+    pub(super) fn tick_page_export(&mut self) {
+        let Some(result) = self.page_export.as_ref().and_then(|(job, _)| job.poll()) else {
+            return;
+        };
+        self.page_export = None;
+        match result {
+            Ok(path) => self.last_export = Some(path),
+            Err(err) => self.notice = Some(format!("No se pudo exportar la página: {err:#}")),
+        }
+    }
+
     pub(super) fn tick_workspace_export(&mut self) {
         let Some(result) = self.export_job.as_ref().and_then(|j| j.poll()) else {
             return;
@@ -125,7 +173,9 @@ impl SilexApp {
         }
     }
 
-    /// Files dropped on the window: `.md` files are imported in the background.
+    /// Files dropped on the window: `.md` files are imported as pages, and
+    /// any other file is attached to the open page (ADR 0007). Both in the
+    /// background.
     pub(super) fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -140,19 +190,22 @@ impl SilexApp {
         let (markdown, other): (Vec<PathBuf>, Vec<PathBuf>) = dropped
             .into_iter()
             .partition(|p| silex_desktop::import::is_markdown_path(p));
+        // Both kinds: two results, shown together.
+        self.notice_group = if markdown.is_empty() || other.is_empty() {
+            0
+        } else {
+            2
+        };
+        if !other.is_empty() {
+            self.attach_dropped(ctx, other);
+        }
         if markdown.is_empty() {
-            self.notice = Some(format!(
-                "Solo se importan archivos .md ({} ignorado(s)).",
-                other.len()
-            ));
             return;
         }
         if self.import_job.is_some() {
             self.notice = Some("Ya hay una importación en curso.".into());
             return;
         }
-        // Reported together with the result, so one message does not hide the other.
-        self.import_ignored = other.len();
         let repaint = ctx.clone();
         match silex_desktop::import::ImportJob::spawn(markdown, move || repaint.request_repaint()) {
             Ok(job) => self.import_job = Some(job),
@@ -191,16 +244,21 @@ impl SilexApp {
         })();
         self.report(outcome);
         let mut message = format!("Importada(s) {} página(s).", created.len());
-        let ignored = std::mem::take(&mut self.import_ignored);
-        if ignored > 0 {
-            message.push_str(&format!(
-                " Solo se importan archivos .md ({ignored} ignorado(s))."
-            ));
-        }
         if !errors.is_empty() {
             message.push_str(&format!(" No se importaron: {}", errors.join("; ")));
         }
-        self.notice = Some(message);
+        self.post_notice(message);
+    }
+
+    /// Shows a notice; the second of a drop's two results is added to the
+    /// first (see `notice_group`).
+    pub(super) fn post_notice(&mut self, message: String) {
+        let second = self.notice_group == 1;
+        self.notice_group = self.notice_group.saturating_sub(1);
+        self.notice = Some(match (second, self.notice.take()) {
+            (true, Some(first)) => format!("{first} {message}"),
+            _ => message,
+        });
     }
 
     /// Centered hint while files are dragged over the window.
@@ -213,7 +271,10 @@ impl SilexApp {
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.heading("Suelta archivos .md para importarlos");
+                    ui.heading("Suelta los archivos aquí");
+                    ui.label(
+                        "Los .md se importan como páginas; los demás se adjuntan a esta página (hasta 20 MB cada uno).",
+                    );
                 });
             });
     }

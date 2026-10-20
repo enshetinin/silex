@@ -45,8 +45,37 @@
 - `src/property.rs` (sin SQL ni egui) define los tipos y cómo el texto escrito en una celda se convierte en valor: números con coma o punto decimal, sin separador de miles ni exponentes, siempre finitos; fechas reales entre 0001 y 9999 en `AAAA-MM-DD` o `D/M/AAAA`, guardadas como `AAAA-MM-DD`.
 - Probado: v4→v5 y v1→v5 conservando todo, un fallo a mitad (con `pages.kind` ya añadida) que deja la v4 intacta, y una copia v4 restaurada y actualizada.
 
+## Versión 6 — adjuntos (`0006_attachments.sql`, ADR 0007)
+- `attachments (id, name, mime, size, width, height, created_at, data)`: el archivo como BLOB, como mucho 20 MB (`CHECK (size BETWEEN 0 AND 20971520)` y `CHECK (length(data) = size)`). `data` es la última columna y solo se lee por id (`attachment_data`); `attachment` y `page_attachments` leen los metadatos.
+- `blocks` se reconstruye como en la 0003, conservando los `rowid` y con `rebuild` de `block_search`. Cambia en dos cosas:
+  - el tipo `file` en el `CHECK` de `kind`;
+  - `attachment_id TEXT REFERENCES attachments(id) ON DELETE RESTRICT`, con `CHECK ((kind = 'file') = (attachment_id IS NOT NULL))` e índice parcial `blocks_attachment_idx`.
+- El `content` de un bloque `file` es el nombre que se ve, así que la búsqueda lo encuentra sin tocar FTS5.
+- `save_document` compara y escribe `attachment_id`. Rechaza un bloque `file` sin archivo, uno de texto con archivo y un archivo que no existe (clave foránea), sin cambiar nada de la página. `add_block` y `create_page_with_blocks` no crean bloques `file`.
+- **Borrar un bloque no borra su adjunto:** deshacer puede devolverlo, y la papelera conserva los de sus páginas. Un adjunto en uso no se puede borrar (`RESTRICT`).
+- `src/attachment.rs` (sin SQL ni egui) decide el tipo por la firma del contenido y lee las dimensiones de PNG, JPEG y GIF de su cabecera, sin decodificar. También limpia los nombres y reconoce programas y scripts (por extensión, también con puntos finales, o por contenido).
+- Espacio (H7.4, sin migración): `space_usage` suma tamaños y páginas libres sin leer ningún blob, y `delete_unused_attachments(keep)` borra en una transacción los adjuntos que no usa ningún bloque (de páginas vivas o en la papelera), salvo los de `keep`. Después, `compact` devuelve el espacio al disco.
+- Probado: v5→v6 y v1→v6 conservando los `rowid`, un fallo a mitad (con `blocks` ya reconstruida) que deja la v5 intacta, una copia v5 restaurada y actualizada, y las copias de seguridad con adjuntos.
+
+## Versión 7 — enlaces entre páginas (`0007_page_links.sql`, ADR 0008)
+- `blocks` se reconstruye por tercera vez (como en la 0003 y la 0006, conservando los `rowid` y con `rebuild` de `block_search`). Cambia en dos cosas:
+  - el tipo `page_link` en el `CHECK` de `kind`;
+  - `link_page_id TEXT REFERENCES pages(id) ON DELETE SET NULL`, con `CHECK (kind = 'page_link' OR link_page_id IS NULL)` e índice parcial `blocks_link_idx`, que sirve para los backlinks.
+- El `content` de un enlace es el título de su destino, para la búsqueda y la exportación. `save_document` lo toma del título actual al guardar, y `rename_page` y `save_document` (al cambiar el título de la página) actualizan los enlaces que apuntan a ella, en la misma transacción.
+- `page_link_targets` lee los destinos de los enlaces de una página, también los que están en la papelera.
+- `backlinks` (H7.6) lee las páginas vivas que enlazan a una, sin ella misma, con `blocks_link_idx`. No cambia el esquema.
+- Probado: v6→v7 y v1→v7 conservando los `rowid` y los adjuntos, un fallo a mitad que deja la v6 intacta, y una copia v6 restaurada y actualizada.
+
+## Versión 8 — historial de versiones (`0008_page_versions.sql`, ADR 0009)
+- `page_versions (id, page_id, created_at, title, format, blocks, size)`: una instantánea de una página. `blocks` es una lista JSON (`format` 1, de `src/versions.rs`) con `CHECK (json_valid(blocks))`, y `size` son sus bytes (`CHECK (size = octet_length(blocks))`). `page_id` con `ON DELETE CASCADE` (red de seguridad: las páginas no se borran físicamente) e índice `page_versions_page_idx (page_id, created_at)`. Solo se crea la tabla: no se reconstruye nada.
+- `save_document` guarda, en su misma transacción, cómo estaba la página **antes** del guardado si algo cambia (título o bloques), si su última versión tiene más de 10 minutos y si no es igual a ella. Una página sin bloques, o con todos vacíos (sin texto, archivo ni enlace), no se guarda como versión. Después poda las de esa página (`versions::to_prune`): todas las de 24 horas, la última de cada día (UTC) hasta 30 días y la última de cada semana (de lunes a domingo) después.
+- `save_version` guarda el estado actual sin esperar los 10 minutos (antes de restaurar, H7.8). `page_versions` las lista (la más reciente primero) y `version_blocks` lee una: un formato o tipo de bloque desconocido, o datos dañados, dan un mensaje para esa versión, nunca un error que oculte las demás.
+- Interfaz (H7.8, sin migración): `page_versions` da también la hora local (`strftime(…, 'localtime')`), y `local_today` el día de hoy en hora local. `restorable_blocks` prepara los bloques de una versión para guardarlos: un archivo que ya no está pasa a párrafo («[archivo que ya no está] nombre»), un enlace a una página que no existe pierde su página, y un id que ahora usa otra página recibe uno nuevo.
+- **Adjuntos:** un adjunto que nombra alguna versión (`json_each`) cuenta como en uso en `space_usage` y `delete_unused_attachments`, así que «Liberar espacio» no lo borra.
+- Probado: v7→v8 y v1→v8 conservando los `rowid`, adjuntos y enlaces; un fallo a mitad que deja la v7 intacta; una copia v7 restaurada y actualizada; y la base pasa la verificación de copias con versiones.
+
 ## Evolución
-- Las migraciones publicadas (`0001`, `0002`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
+- Las migraciones publicadas (`0001`…`0008`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).
 - Antes de actualizar una base existente en disco se crea una copia verificada con el esquema antiguo. Si esa copia falla, no se migra.
 - Las copias de esquemas anteriores son válidas: la verificación acepta `1..=LATEST` y la restauración actualiza la base después de restaurar.
@@ -59,7 +88,7 @@
 - Falta backup/restauración con interfaz de usuario.
 - Búsqueda (H5.7): prefijos, orden por `bm25`, fragmentos y sin acentos. Límites: no encuentra texto en mitad de una palabra («tilo» no encuentra «estilo»), ni páginas con unas palabras en el título y otras en un bloque. Las búsquedas con muchas coincidencias tardan ~80 ms con 50 000 bloques (en un hilo aparte, sin bloquear la UI); un índice de prefijos (`prefix='2 3'`) podría acelerarlo (sin medir), pero exige reconstruir las tablas FTS con una migración.
 - Papelera por ramas sin columna nueva: el grupo se identifica por `deleted_at` (resolución de ms, único por operación). Una subpágina borrada antes que su padre es un elemento aparte en la papelera y no vuelve al restaurar al padre. Si en el futuro se necesitan más metadatos del borrado (quién o por qué), hará falta una tabla `trash_batches` con su migración.
-- FTS external-content se enlaza por el `rowid` implícito de `pages`/`blocks` (PK `TEXT`). SQLite documenta que `VACUUM` puede cambiar esos `rowid`. Por eso las copias usan la API de backup (copia páginas y conserva `rowid`), no `VACUUM INTO`, y cada copia pasa el `integrity-check` de FTS5 contra su tabla de contenido (test `verify_detects_search_index_out_of_sync`). No ejecutar `VACUUM` sin un `rebuild` posterior del índice.
+- FTS external-content se enlaza por el `rowid` implícito de `pages`/`blocks` (PK `TEXT`). SQLite documenta que `VACUUM` puede cambiar esos `rowid`. Por eso las copias usan la API de backup (copia páginas y conserva `rowid`), no `VACUUM INTO`, y cada copia pasa el `integrity-check` de FTS5 contra su tabla de contenido (test `verify_detects_search_index_out_of_sync`). No ejecutar `VACUUM` sin un `rebuild` posterior del índice: `Database::compact` (H7.4) lo hace, con una marca en `settings` (`compacting`) que `Database::open` usa para terminar el `rebuild` si se interrumpió.
 - Si un guardado falla, los cambios siguen en memoria, el error se muestra y se reintenta con backoff (`src/save_state.rs`). Cerrar la ventana con cambios sin guardar se bloquea hasta reintentar con éxito o descartar explícitamente. Si el proceso termina sin petición de cierre (p. ej. lo mata el sistema), solo queda el último guardado automático.
 
 ## Tests mínimos posteriores

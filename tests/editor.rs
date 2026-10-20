@@ -10,6 +10,8 @@ fn b(id: &str, kind: BlockKind, indent: u8, content: &str) -> Block {
         checked: kind == BlockKind::Todo,
         position: 0,
         indent,
+        attachment: None,
+        link: None,
     }
 }
 
@@ -520,4 +522,99 @@ mod unicode_integrity {
             assert_eq!(joined, format!("[{text}{text}]"), "{text:?}");
         }
     }
+}
+
+// ---- File blocks (ADR 0007) ----
+
+use silex_desktop::editor::{apply_slash, duplicate_range, selection_text};
+
+fn file(id: &str) -> silex_desktop::model::Block {
+    silex_desktop::model::Block {
+        kind: BlockKind::File,
+        attachment: Some(format!("adjunto-{id}")),
+        ..b(id, BlockKind::Paragraph, 0, "informe.pdf")
+    }
+}
+
+#[test]
+fn text_never_merges_with_a_file_block() {
+    let mut blocks = vec![
+        b("a", BlockKind::Paragraph, 0, "antes"),
+        file("f"),
+        b("c", BlockKind::Paragraph, 0, "después"),
+    ];
+    let before = blocks.clone();
+    // Backspace at the start of the text below a file: nothing.
+    assert_eq!(backspace_at_start(&mut blocks, 2), None);
+    // Delete at the end of the text above a file: nothing.
+    assert_eq!(delete_at_end(&mut blocks, 0), None);
+    // On the file block itself: nothing either.
+    assert_eq!(backspace_at_start(&mut blocks, 1), None);
+    assert_eq!(delete_at_end(&mut blocks, 1), None);
+    assert_eq!(enter(&mut blocks, 1, 0, || "nuevo".into()), None);
+    assert_eq!(apply_slash(&mut blocks, 1, 0, BlockKind::Heading1), None);
+    assert_eq!(apply_slash(&mut blocks, 0, 0, BlockKind::File), None);
+    assert_eq!(blocks, before);
+
+    // The steps before merging still apply: a heading below a file becomes text.
+    blocks[2].kind = BlockKind::Heading2;
+    assert!(backspace_at_start(&mut blocks, 2).is_some());
+    assert_eq!(blocks[2].kind, BlockKind::Paragraph);
+}
+
+#[test]
+fn a_duplicated_file_block_shares_its_attachment() {
+    let mut blocks = vec![file("f")];
+    let mut n = 0;
+    duplicate_range(&mut blocks, 0, 0, || {
+        n += 1;
+        format!("copia-{n}")
+    });
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[1].kind, BlockKind::File);
+    assert_eq!(blocks[1].attachment, blocks[0].attachment);
+    assert_ne!(blocks[1].id, blocks[0].id);
+    // Copied as text, it is its name.
+    assert_eq!(selection_text(&blocks, 0, 0), "informe.pdf");
+}
+
+// ---- Slash menu entries (H7.3) ----
+
+#[test]
+fn the_slash_menu_offers_attaching_files() {
+    use silex_desktop::editor::{SlashItem, slash_items};
+    let all = slash_items("");
+    assert_eq!(all.len(), BlockKind::ALL.len() + 2);
+    assert_eq!(
+        all[BlockKind::ALL.len()..],
+        [SlashItem::LinkPage, SlashItem::AttachFiles]
+    );
+    for query in ["enlace", "pag", "LINK", "vinc"] {
+        assert_eq!(slash_items(query), [SlashItem::LinkPage], "{query}");
+    }
+    for query in ["arch", "ARCHIVO", "adj", "imagen", "pdf", "foto"] {
+        assert_eq!(slash_items(query), [SlashItem::AttachFiles], "{query}");
+    }
+    // «Título 1» and the like are not drowned by it.
+    assert_eq!(slash_items("h1"), [SlashItem::Kind(BlockKind::Heading1)]);
+    assert!(slash_items("zzz").is_empty());
+}
+
+#[test]
+fn text_never_merges_with_a_link_block() {
+    let mut blocks = vec![
+        b("a", BlockKind::Paragraph, 0, "antes"),
+        silex_desktop::model::Block {
+            kind: BlockKind::PageLink,
+            link: Some("otra".into()),
+            ..b("l", BlockKind::Paragraph, 0, "Otra página")
+        },
+        b("c", BlockKind::Paragraph, 0, "después"),
+    ];
+    let before = blocks.clone();
+    assert_eq!(backspace_at_start(&mut blocks, 2), None);
+    assert_eq!(delete_at_end(&mut blocks, 0), None);
+    assert_eq!(enter(&mut blocks, 1, 0, || "x".into()), None);
+    assert_eq!(apply_slash(&mut blocks, 1, 0, BlockKind::Heading1), None);
+    assert_eq!(blocks, before);
 }

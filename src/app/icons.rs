@@ -42,6 +42,8 @@ pub const DOWNLOAD: &str = "\u{e20c}";
 pub const UPLOAD: &str = "\u{e4c0}";
 pub const SETTINGS: &str = "\u{e270}"; // gear
 pub const BACKUP: &str = "\u{e1a0}"; // clock-counter-clockwise
+/// Page history (H7.8): the same clock turning back as backups.
+pub const HISTORY: &str = BACKUP;
 pub const CLOSE: &str = "\u{e4f6}"; // x
 pub const CHECK: &str = "\u{e182}";
 pub const TEXT: &str = "\u{e48a}"; // text-t
@@ -67,6 +69,14 @@ pub const OPEN_EXTERNAL: &str = "\u{e5de}";
 pub const KEYBOARD: &str = "\u{e2d8}";
 pub const TABLE: &str = "\u{e476}";
 pub const KANBAN: &str = "\u{eb54}";
+pub const PAPERCLIP: &str = "\u{e39a}";
+pub const LINK: &str = "\u{e2e2}";
+pub const FILE: &str = "\u{e230}";
+pub const FILE_IMAGE: &str = "\u{ea24}";
+pub const FILE_PDF: &str = "\u{e702}";
+pub const FILE_ZIP: &str = "\u{e958}";
+pub const FILE_AUDIO: &str = "\u{ea20}";
+pub const FILE_VIDEO: &str = "\u{ea22}";
 /// "Aa": the name column of a database (text-aa).
 pub const TEXT_AA: &str = "\u{e6ee}";
 /// Property types (H6.2): text, number, date and select.
@@ -131,6 +141,14 @@ pub const ALL: &[(&str, &str)] = &[
     ("KEYBOARD", KEYBOARD),
     ("TABLE", TABLE),
     ("KANBAN", KANBAN),
+    ("PAPERCLIP", PAPERCLIP),
+    ("LINK", LINK),
+    ("FILE", FILE),
+    ("FILE_IMAGE", FILE_IMAGE),
+    ("FILE_PDF", FILE_PDF),
+    ("FILE_ZIP", FILE_ZIP),
+    ("FILE_AUDIO", FILE_AUDIO),
+    ("FILE_VIDEO", FILE_VIDEO),
     ("TEXT_AA", TEXT_AA),
     ("TEXT_ALIGN_LEFT", TEXT_ALIGN_LEFT),
     ("HASH", HASH),

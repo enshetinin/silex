@@ -14,6 +14,12 @@ pub enum Command {
     AddFavorite,
     RemoveFavorite,
     ExportPage,
+    /// The file dialog, to attach files to the open page (H7.3).
+    AttachFiles,
+    /// The page picker, to link another page (H7.5).
+    LinkPage,
+    /// The versions of the open page (H7.8).
+    PageHistory,
     SaveNow,
     TrashPage,
     OpenTrash,
@@ -50,7 +56,7 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 21] = [
+    pub const ALL: [Command; 24] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
@@ -59,6 +65,9 @@ impl Command {
         Command::AddFavorite,
         Command::RemoveFavorite,
         Command::ExportPage,
+        Command::AttachFiles,
+        Command::LinkPage,
+        Command::PageHistory,
         Command::SaveNow,
         Command::TrashPage,
         Command::OpenTrash,
@@ -84,6 +93,9 @@ impl Command {
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
+            Command::AttachFiles => "Adjuntar archivos…",
+            Command::LinkPage => "Enlazar a una página…",
+            Command::PageHistory => "Historial de versiones…",
             Command::SaveNow => "Guardar ahora",
             Command::TrashPage => "Enviar la página a la papelera",
             Command::OpenTrash => "Abrir la papelera",
@@ -111,6 +123,17 @@ impl Command {
             Command::AddFavorite => &["estrella", "marcar", "favorite", "star"],
             Command::RemoveFavorite => &["estrella", "desmarcar", "favorite", "star"],
             Command::ExportPage => &["md", "descargar", "guardar", "export"],
+            Command::AttachFiles => &[
+                "subir",
+                "agregar",
+                "imagen",
+                "foto",
+                "pdf",
+                "documento",
+                "file",
+            ],
+            Command::LinkPage => &["enlace", "vincular", "mencionar", "referencia", "link"],
+            Command::PageHistory => &["versiones", "anterior", "cambios", "recuperar", "history"],
             Command::SaveNow => &["save"],
             Command::TrashPage => &["borrar", "eliminar", "quitar", "delete"],
             Command::OpenTrash => &["restaurar", "borradas", "eliminadas", "recuperar", "trash"],
@@ -140,6 +163,10 @@ impl Command {
             // Inside a database a child is a row: «Nueva fila» instead.
             Command::NewSubpage => cx.page_open && !cx.database_open,
             Command::NewRow => cx.database_open,
+            // A database shows its table, not blocks.
+            Command::AttachFiles | Command::LinkPage | Command::PageHistory => {
+                cx.page_open && !cx.database_open
+            }
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
             Command::AddFavorite => cx.page_open && !cx.favorite,
             Command::RemoveFavorite => cx.page_open && cx.favorite,
@@ -341,6 +368,9 @@ mod tests {
         assert_eq!(matching_commands("tema cla", &cx()), [Command::ThemeLight]);
         assert_eq!(matching_commands("pequeño", &cx()), [Command::ZoomOut]);
         assert_eq!(matching_commands("anadir", &cx()), [Command::AddFavorite]);
+        assert_eq!(matching_commands("adjuntar", &cx()), [Command::AttachFiles]);
+        assert_eq!(matching_commands("pdf", &cx()), [Command::AttachFiles]);
+        assert_eq!(matching_commands("enlazar", &cx()), [Command::LinkPage]);
         assert!(matching_commands("receta", &cx()).is_empty());
     }
 

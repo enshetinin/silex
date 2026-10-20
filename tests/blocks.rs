@@ -9,6 +9,8 @@ fn block(kind: BlockKind, indent: u8) -> Block {
         checked: false,
         position: 0,
         indent,
+        attachment: None,
+        link: None,
     }
 }
 

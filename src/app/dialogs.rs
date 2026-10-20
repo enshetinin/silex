@@ -109,6 +109,14 @@ impl SilexApp {
 
     /// "Exportada a …" with a button to open the folder.
     pub(super) fn export_bar(&mut self, ui: &mut egui::Ui) {
+        // A page with attachments being exported (H7.9).
+        if let Some((_, title)) = &self.page_export {
+            let text = format!("Exportando «{title}» y sus adjuntos…");
+            Self::banner(ui, icons::EXPORT, &text, |ui| {
+                ui.spinner();
+            });
+            return;
+        }
         let Some(path) = self.last_export.clone() else {
             return;
         };

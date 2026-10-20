@@ -10,12 +10,14 @@ use directories::ProjectDirs;
 use rusqlite::{Connection, MAIN_DB, OptionalExtension, params, types::Value};
 use uuid::Uuid;
 
+use crate::attachment::{Attachment, MAX_SIZE, NewAttachment};
 use crate::model::{
     Block, BlockKind, DatabaseView, MAX_INDENT, NewBlock, Page, PageKind, TrashItem, ViewKind,
 };
 use crate::property::{CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues};
 use crate::search::{self, BlockMatch, Candidate, SearchHit};
 use crate::settings::Settings;
+use crate::versions::{self, VersionBlocks, VersionInfo};
 use crate::view::ViewConfig;
 
 pub mod backup;
@@ -27,6 +29,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (3, include_str!("db/migrations/0003_block_kinds.sql")),
     (4, include_str!("db/migrations/0004_settings.sql")),
     (5, include_str!("db/migrations/0005_databases.sql")),
+    (6, include_str!("db/migrations/0006_attachments.sql")),
+    (7, include_str!("db/migrations/0007_page_links.sql")),
+    (8, include_str!("db/migrations/0008_page_versions.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -46,7 +51,13 @@ pub enum Shift {
 
 pub struct Database {
     conn: Connection,
+    /// A fixed time for page versions (tests only); `None` is SQLite's
+    /// clock. See [`Database::set_clock`].
+    clock: Option<String>,
 }
+
+/// SQLite's UTC time, as stored in `created_at` columns.
+const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 impl Database {
     /// Where the user's database lives. `SILEX_DB_PATH` overrides it
@@ -73,9 +84,10 @@ impl Database {
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path).context("No se puede abrir SQLite")?;
-        let mut db = Self { conn };
+        let mut db = Self { conn, clock: None };
         db.configure()?;
         db.migrate(PreMigrationBackup::Yes)?;
+        db.finish_compaction()?;
         Ok(db)
     }
 
@@ -144,7 +156,7 @@ impl Database {
 
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let mut db = Self { conn };
+        let mut db = Self { conn, clock: None };
         db.configure()?;
         db.migrate(PreMigrationBackup::No)?;
         Ok(db)
@@ -356,13 +368,18 @@ impl Database {
     }
 
     /// Renames a live page. The FTS index follows through its trigger.
+    /// Renames a live page, and the links that point at it (ADR 0008:
+    /// their text is its title, for search and export), in one transaction.
     pub fn rename_page(&self, id: &str, title: &str) -> Result<()> {
-        let affected = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let affected = tx.execute(
             "UPDATE pages SET title = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1 AND deleted_at IS NULL",
             params![id, title],
         )?;
         ensure!(affected == 1, "La página no existe o está en la papelera");
+        retitle_links(&tx, id, title)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -933,6 +950,10 @@ impl Database {
         parent_id: Option<&str>,
         blocks: &[NewBlock],
     ) -> Result<String> {
+        ensure!(
+            blocks.iter().all(|b| b.kind.is_text()),
+            "Una página nueva no puede crearse con archivos adjuntos"
+        );
         let tx = self.conn.transaction()?;
         let page_id = Uuid::new_v4().to_string();
         tx.execute(
@@ -974,7 +995,8 @@ impl Database {
 
     pub fn list_blocks(&self, page_id: &str) -> Result<Vec<Block>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, page_id, kind, content, checked, position, indent
+            "SELECT id, page_id, kind, content, checked, position, indent, attachment_id,
+                    link_page_id
              FROM blocks WHERE page_id = ?1 ORDER BY position, rowid",
         )?;
         let rows = stmt.query_map([page_id], read_block)?;
@@ -982,6 +1004,7 @@ impl Database {
     }
 
     pub fn add_block(&self, page_id: &str, kind: BlockKind) -> Result<String> {
+        ensure!(kind.is_text(), "Un archivo se añade con su adjunto");
         let id = Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO blocks (id, page_id, kind, position)
@@ -1013,20 +1036,42 @@ impl Database {
                 "Sangría no válida en el bloque {}",
                 block.id
             );
+            ensure!(
+                (block.kind == BlockKind::File) == block.attachment.is_some(),
+                "El bloque {} no encaja con su adjunto",
+                block.id
+            );
+            // A link may have lost its page (`ON DELETE SET NULL`), but only
+            // a link points at one.
+            ensure!(
+                block.kind == BlockKind::PageLink || block.link.is_none(),
+                "El bloque {} no es un enlace",
+                block.id
+            );
         }
 
         let tx = self.conn.transaction()?;
-        let affected = tx.execute(
+        let old_title: Option<String> = tx
+            .query_row(
+                "SELECT title FROM pages WHERE id = ?1 AND deleted_at IS NULL",
+                [page_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(old_title) = old_title else {
+            bail!("La página ya no existe o está en la papelera");
+        };
+        let mut changed = old_title != title;
+        tx.execute(
             "UPDATE pages SET title = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1 AND deleted_at IS NULL",
             params![page_id, title],
         )?;
-        if affected != 1 {
-            bail!("La página ya no existe o está en la papelera");
-        }
+        retitle_links(&tx, page_id, title)?;
         let stored: HashMap<String, Block> = {
             let mut stmt = tx.prepare(
-                "SELECT id, page_id, kind, content, checked, position, indent
+                "SELECT id, page_id, kind, content, checked, position, indent, attachment_id,
+                        link_page_id
                  FROM blocks WHERE page_id = ?1",
             )?;
             let rows = stmt.query_map([page_id], read_block)?;
@@ -1035,9 +1080,28 @@ impl Database {
         };
         for id in stored.keys().filter(|id| !seen.contains(id.as_str())) {
             tx.execute("DELETE FROM blocks WHERE id = ?1", [id])?;
+            changed = true;
         }
         for (index, block) in blocks.iter().enumerate() {
             let position = index as i64;
+            // A link's text is its page's current title (ADR 0008), whatever
+            // the open document still holds.
+            let linked;
+            let block = match &block.link {
+                Some(target) => {
+                    let title: Option<String> = tx
+                        .query_row("SELECT title FROM pages WHERE id = ?1", [target], |r| {
+                            r.get(0)
+                        })
+                        .optional()?;
+                    linked = Block {
+                        content: title.unwrap_or_else(|| block.content.clone()),
+                        ..block.clone()
+                    };
+                    &linked
+                }
+                None => block,
+            };
             match stored.get(&block.id) {
                 // Unchanged rows are skipped so FTS is only touched when needed.
                 Some(old)
@@ -1045,11 +1109,15 @@ impl Database {
                         && old.content == block.content
                         && old.checked == block.checked
                         && old.indent == block.indent
+                        && old.attachment == block.attachment
+                        && old.link == block.link
                         && old.position == position => {}
                 Some(_) => {
+                    changed = true;
                     tx.execute(
                         "UPDATE blocks SET kind = ?2, content = ?3, checked = ?4, position = ?5,
-                             indent = ?6, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                             indent = ?6, attachment_id = ?7, link_page_id = ?8,
+                             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                          WHERE id = ?1",
                         params![
                             block.id,
@@ -1057,15 +1125,20 @@ impl Database {
                             block.content,
                             block.checked,
                             position,
-                            block.indent
+                            block.indent,
+                            block.attachment,
+                            block.link
                         ],
-                    )?;
+                    )
+                    .with_context(|| format!("No se pudo guardar el bloque {}", block.id))?;
                 }
                 // An id that exists in another page fails on the primary key.
                 None => {
+                    changed = true;
                     tx.execute(
-                        "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent,
+                                             attachment_id, link_page_id)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         params![
                             block.id,
                             page_id,
@@ -1073,15 +1146,377 @@ impl Database {
                             block.content,
                             block.checked,
                             position,
-                            block.indent
+                            block.indent,
+                            block.attachment,
+                            block.link
                         ],
                     )
                     .with_context(|| format!("No se pudo guardar el bloque {}", block.id))?;
                 }
             }
         }
+        // The page as it was before this save, if its last version is old
+        // enough (ADR 0009).
+        if changed {
+            let mut before: Vec<Block> = stored.into_values().collect();
+            before.sort_by(|a, b| (a.position, &a.id).cmp(&(b.position, &b.id)));
+            save_version(
+                &tx,
+                self.clock.as_deref(),
+                page_id,
+                &old_title,
+                &before,
+                false,
+            )?;
+        }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Saves the page as it is stored now as a version, however recent the
+    /// last one is (before restoring a version, ADR 0009). Returns false if
+    /// it is the same as the last version, or the page has nothing in its blocks.
+    pub fn save_version(&mut self, page_id: &str) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let title: Option<String> = tx
+            .query_row("SELECT title FROM pages WHERE id = ?1", [page_id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let Some(title) = title else {
+            bail!("La página no existe");
+        };
+        let blocks = {
+            let mut stmt = tx.prepare(
+                "SELECT id, page_id, kind, content, checked, position, indent, attachment_id,
+                        link_page_id
+                 FROM blocks WHERE page_id = ?1 ORDER BY position, id",
+            )?;
+            let rows = stmt.query_map([page_id], read_block)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let saved = save_version(&tx, self.clock.as_deref(), page_id, &title, &blocks, true)?;
+        tx.commit()?;
+        Ok(saved)
+    }
+
+    /// The versions of a page, newest first, without their blocks.
+    pub fn page_versions(&self, page_id: &str) -> Result<Vec<VersionInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, page_id, created_at, title, size,
+                    strftime('%Y-%m-%d %H:%M', created_at, 'localtime')
+             FROM page_versions
+             WHERE page_id = ?1 ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([page_id], |r| {
+            Ok(VersionInfo {
+                id: r.get(0)?,
+                page_id: r.get(1)?,
+                created_at: r.get(2)?,
+                title: r.get(3)?,
+                size: r.get::<_, i64>(4)?.try_into().unwrap_or_default(),
+                // Without a time zone (or a bad date), UTC.
+                local: r
+                    .get::<_, Option<String>>(5)?
+                    .unwrap_or_else(|| r.get::<_, String>(2).unwrap_or_default()),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// A version's blocks, or why they cannot be read. `None` if there is
+    /// no such version.
+    pub fn version_blocks(&self, id: i64) -> Result<Option<VersionBlocks>> {
+        let row: Option<(String, i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT page_id, format, blocks FROM page_versions WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(page, format, json)| versions::blocks_from_json(format, &json, &page)))
+    }
+
+    /// Today in the system's time zone, `YYYY-MM-DD` (to say «Hoy» and
+    /// «Ayer» in the history). SQLite asks the system for the zone.
+    pub fn local_today(&self) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))?)
+    }
+
+    /// A version's blocks made safe to save into `page_id` (ADR 0009): a
+    /// file that is no longer there becomes a paragraph that says so, a
+    /// link to a page that no longer exists loses its page, and a block id
+    /// now used by another page gets a new id.
+    pub fn restorable_blocks(&self, page_id: &str, blocks: Vec<Block>) -> Result<Vec<Block>> {
+        let mut restored = Vec::with_capacity(blocks.len());
+        for mut block in blocks {
+            block.page_id = page_id.to_owned();
+            if let Some(file) = &block.attachment {
+                let exists: bool = self.conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM attachments WHERE id = ?1)",
+                    [file],
+                    |r| r.get(0),
+                )?;
+                if !exists {
+                    block.kind = BlockKind::Paragraph;
+                    block.content = format!("[archivo que ya no está] {}", block.content);
+                    block.attachment = None;
+                }
+            }
+            if let Some(page) = &block.link {
+                let exists: bool = self.conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1)",
+                    [page],
+                    |r| r.get(0),
+                )?;
+                if !exists {
+                    block.link = None;
+                }
+            }
+            let elsewhere: bool = self.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM blocks WHERE id = ?1 AND page_id <> ?2)",
+                params![block.id, page_id],
+                |r| r.get(0),
+            )?;
+            if elsewhere {
+                block.id = Uuid::new_v4().to_string();
+            }
+            restored.push(block);
+        }
+        Ok(restored)
+    }
+
+    /// Fixes the time page versions are saved at (`YYYY-MM-DDTHH:MM:SS.sssZ`,
+    /// UTC), or goes back to the real clock with `None`. For tests: the
+    /// 10-minute rule and the thinning depend on it.
+    #[doc(hidden)]
+    pub fn set_clock(&mut self, now: Option<&str>) {
+        self.clock = now.map(str::to_owned);
+    }
+
+    /// Stores a file (ADR 0007) and returns it as listed. Nothing uses it
+    /// until a block points at it (`save_document`). Called from the
+    /// attach worker's own connection: 20 MB take ~0,1 s.
+    pub fn add_attachment(&mut self, file: &NewAttachment) -> Result<Attachment> {
+        let size = file.data.len() as u64;
+        ensure!(
+            size <= MAX_SIZE,
+            "El archivo supera el límite de {}",
+            crate::attachment::format_size(MAX_SIZE)
+        );
+        let id = Uuid::new_v4().to_string();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO attachments (id, name, mime, size, width, height, data)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id,
+                file.name,
+                file.mime,
+                size as i64,
+                file.width,
+                file.height,
+                file.data
+            ],
+        )?;
+        tx.commit()?;
+        Ok(Attachment {
+            id,
+            name: file.name.clone(),
+            mime: file.mime.clone(),
+            size,
+            width: file.width,
+            height: file.height,
+        })
+    }
+
+    /// What the database and its attachments take (H7.4), without reading
+    /// any attachment's data. «Used» means some block points at it, on a
+    /// live page or one in the trash.
+    pub fn space_usage(&self) -> Result<SpaceUsage> {
+        let (used, used_bytes, unused, unused_bytes): (i64, i64, i64, i64) = self.conn.query_row(
+            "WITH in_versions AS (
+                 SELECT json_extract(j.value, '$.attachment')
+                 FROM page_versions v, json_each(v.blocks) j
+                 WHERE json_extract(j.value, '$.attachment') IS NOT NULL)
+             SELECT
+                     COALESCE(SUM(used), 0), COALESCE(SUM(CASE WHEN used THEN size END), 0),
+                     COALESCE(SUM(NOT used), 0), COALESCE(SUM(CASE WHEN NOT used THEN size END), 0)
+                 FROM (SELECT a.size,
+                              EXISTS (SELECT 1 FROM blocks b WHERE b.attachment_id = a.id)
+                              OR a.id IN in_versions AS used
+                       FROM attachments a)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        let page_size: i64 = self
+            .conn
+            .pragma_query_value(None, "page_size", |r| r.get(0))?;
+        let pages: i64 = self
+            .conn
+            .pragma_query_value(None, "page_count", |r| r.get(0))?;
+        let free: i64 = self
+            .conn
+            .pragma_query_value(None, "freelist_count", |r| r.get(0))?;
+        let bytes = |n: i64| u64::try_from(n).unwrap_or_default();
+        Ok(SpaceUsage {
+            database: bytes(page_size * pages),
+            free: bytes(page_size * free),
+            used_attachments: bytes(used) as usize,
+            used_bytes: bytes(used_bytes),
+            unused_attachments: bytes(unused) as usize,
+            unused_bytes: bytes(unused_bytes),
+        })
+    }
+
+    /// Deletes the attachments no block uses (H7.4), except those in
+    /// `keep` (the open page's undo history can still bring their blocks
+    /// back). Returns how many went and their size. They stay in older
+    /// backups. The space is reused, but the file only shrinks with
+    /// [`Database::compact`].
+    pub fn delete_unused_attachments(&mut self, keep: &HashSet<String>) -> Result<(usize, u64)> {
+        let tx = self.conn.transaction()?;
+        let unused: Vec<(String, i64)> = tx
+            .prepare(
+                "WITH in_versions AS (
+                 SELECT json_extract(j.value, '$.attachment')
+                 FROM page_versions v, json_each(v.blocks) j
+                 WHERE json_extract(j.value, '$.attachment') IS NOT NULL)
+                 SELECT id, size FROM attachments a
+                 WHERE NOT EXISTS (SELECT 1 FROM blocks b WHERE b.attachment_id = a.id)
+                   AND a.id NOT IN in_versions",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut count = 0;
+        let mut bytes = 0u64;
+        for (id, size) in unused.iter().filter(|(id, _)| !keep.contains(id)) {
+            tx.execute("DELETE FROM attachments WHERE id = ?1", [id])?;
+            count += 1;
+            bytes += u64::try_from(*size).unwrap_or_default();
+        }
+        tx.commit()?;
+        Ok((count, bytes))
+    }
+
+    /// Gives free space back to the system (`VACUUM`, H7.4). `VACUUM` may
+    /// renumber the implicit `rowid`s the search indexes point at, so both
+    /// are rebuilt after it. A mark is stored first: if the app stops in
+    /// between, the next open finishes the rebuild
+    /// ([`Database::finish_compaction`]).
+    pub fn compact(&mut self) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, '1')
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            [COMPACTING],
+        )?;
+        self.conn
+            .execute_batch("VACUUM")
+            .context("No se pudo compactar la base")?;
+        self.finish_compaction()
+    }
+
+    /// Rebuilds the search indexes if a compaction was interrupted, in one
+    /// transaction with clearing its mark. Cheap when there is no mark.
+    pub fn finish_compaction(&mut self) -> Result<()> {
+        let pending: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM settings WHERE key = ?1)",
+            [COMPACTING],
+            |r| r.get(0),
+        )?;
+        if !pending {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute_batch(
+            "INSERT INTO page_search(page_search) VALUES ('rebuild');
+             INSERT INTO block_search(block_search) VALUES ('rebuild');",
+        )?;
+        tx.execute("DELETE FROM settings WHERE key = ?1", [COMPACTING])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The pages the links of `page_id` point at, live or in the trash
+    /// (ADR 0008).
+    pub fn page_link_targets(&self, page_id: &str) -> Result<Vec<LinkTarget>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT p.id, p.title, p.kind, p.deleted_at IS NOT NULL
+             FROM blocks b JOIN pages p ON p.id = b.link_page_id
+             WHERE b.page_id = ?1",
+        )?;
+        let rows = stmt.query_map([page_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
+            ))
+        })?;
+        let mut targets = Vec::new();
+        for row in rows {
+            let (id, title, kind, trashed) = row?;
+            targets.push(LinkTarget {
+                id,
+                title,
+                // An unknown kind (a newer Silex) shows as a page.
+                kind: PageKind::parse(&kind).unwrap_or(PageKind::Page),
+                trashed,
+            });
+        }
+        Ok(targets)
+    }
+
+    /// The live pages with a link to `page_id`, without itself (ADR 0008,
+    /// «Enlazada desde»). Pages in the trash are left out. Uses the
+    /// partial index on `link_page_id`.
+    pub fn backlinks(&self, page_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT p.id
+             FROM blocks b JOIN pages p ON p.id = b.page_id
+             WHERE b.link_page_id = ?1 AND p.id <> ?1 AND p.deleted_at IS NULL
+             ORDER BY p.title, p.id",
+        )?;
+        let ids = stmt
+            .query_map([page_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(ids)
+    }
+
+    /// An attachment's details, without its data.
+    pub fn attachment(&self, id: &str) -> Result<Option<Attachment>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, mime, size, width, height FROM attachments WHERE id = ?1",
+                [id],
+                read_attachment,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// The attachments used by a page's blocks, without their data.
+    pub fn page_attachments(&self, page_id: &str) -> Result<Vec<Attachment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT a.id, a.name, a.mime, a.size, a.width, a.height
+             FROM blocks b JOIN attachments a ON a.id = b.attachment_id
+             WHERE b.page_id = ?1",
+        )?;
+        let rows = stmt.query_map([page_id], read_attachment)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The content of an attachment (to open, export or preview it).
+    pub fn attachment_data(&self, id: &str) -> Result<Vec<u8>> {
+        self.conn
+            .query_row("SELECT data FROM attachments WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .context("El archivo adjunto ya no existe")
     }
 
     /// Sends a page and all its live subpages to the trash as one branch.
@@ -1452,7 +1887,58 @@ fn read_page(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Page> {
     })
 }
 
-/// Maps a `blocks` row (id, page_id, kind, content, checked, position, indent).
+/// Mark of a compaction in progress, in `settings` (ignored by
+/// `Settings::from_pairs` like any unknown key).
+const COMPACTING: &str = "compacting";
+
+/// What the database file and its attachments take (H7.4), in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpaceUsage {
+    /// The whole file (without its WAL).
+    pub database: u64,
+    /// Space inside the file that is free for reuse (`VACUUM` returns it).
+    pub free: u64,
+    pub used_attachments: usize,
+    pub used_bytes: u64,
+    /// Attachments no block uses.
+    pub unused_attachments: usize,
+    pub unused_bytes: u64,
+}
+
+/// Maps an `attachments` row (id, name, mime, size, width, height).
+fn read_attachment(r: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
+    Ok(Attachment {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        mime: r.get(2)?,
+        size: r.get::<_, i64>(3)?.try_into().unwrap_or_default(),
+        width: r.get(4)?,
+        height: r.get(5)?,
+    })
+}
+
+/// Keeps the text of the links to `page` equal to its title (ADR 0008).
+fn retitle_links(tx: &Connection, page: &str, title: &str) -> Result<()> {
+    tx.execute(
+        "UPDATE blocks SET content = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE link_page_id = ?1 AND content <> ?2",
+        params![page, title],
+    )?;
+    Ok(())
+}
+
+/// A page a link points at, as its card shows it (ADR 0008).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkTarget {
+    pub id: String,
+    pub title: String,
+    pub kind: PageKind,
+    /// In the trash: the link says so, and opening it offers to restore.
+    pub trashed: bool,
+}
+
+/// Maps a `blocks` row (id, page_id, kind, content, checked, position,
+/// indent, attachment_id, link_page_id).
 /// An unknown kind is a conversion error, not a panic.
 fn read_block(r: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
     let kind: String = r.get(2)?;
@@ -1471,5 +1957,64 @@ fn read_block(r: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
         checked: r.get(4)?,
         position: r.get(5)?,
         indent: r.get(6)?,
+        attachment: r.get(7)?,
+        link: r.get(8)?,
     })
+}
+
+/// Saves `blocks` and `title` as a version of `page` (ADR 0009) and thins
+/// out its old versions, inside the caller's transaction. Unless `force`,
+/// nothing is saved if the last version is younger than
+/// [`versions::MIN_GAP_MINUTES`]. Never saves a copy of the last version,
+/// nor a page without anything in its blocks. Returns whether it saved one.
+fn save_version(
+    tx: &Connection,
+    clock: Option<&str>,
+    page: &str,
+    title: &str,
+    blocks: &[Block],
+    force: bool,
+) -> Result<bool> {
+    // An empty page (no blocks, or only empty ones, as when a new page
+    // gets its first block) has nothing worth restoring.
+    let empty =
+        |b: &Block| b.content.trim().is_empty() && b.attachment.is_none() && b.link.is_none();
+    if blocks.iter().all(empty) {
+        return Ok(false);
+    }
+    let now: String = match clock {
+        Some(now) => now.to_owned(),
+        None => tx.query_row(&format!("SELECT {NOW}"), [], |r| r.get(0))?,
+    };
+    let json = versions::blocks_to_json(blocks);
+    let last: Option<(String, i64, String, bool)> = tx
+        .query_row(
+            "SELECT title, format, blocks,
+                    julianday(?2) - julianday(created_at) < ?3 / 1440.0
+             FROM page_versions WHERE page_id = ?1
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            params![page, now, versions::MIN_GAP_MINUTES],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    if let Some((last_title, format, last_json, recent)) = last {
+        let same = last_title == title && format == versions::FORMAT && last_json == json;
+        if same || (recent && !force) {
+            return Ok(false);
+        }
+    }
+    tx.execute(
+        "INSERT INTO page_versions (page_id, created_at, title, format, blocks, size)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![page, now, title, versions::FORMAT, json, json.len() as i64],
+    )?;
+    let dated: Vec<(i64, f64)> = tx
+        .prepare("SELECT id, julianday(created_at) FROM page_versions WHERE page_id = ?1")?
+        .query_map([page], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let now_jd: f64 = tx.query_row("SELECT julianday(?1)", [&now], |r| r.get(0))?;
+    for id in versions::to_prune(&dated, now_jd) {
+        tx.execute("DELETE FROM page_versions WHERE id = ?1", [id])?;
+    }
+    Ok(true)
 }
