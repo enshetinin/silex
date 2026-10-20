@@ -134,4 +134,5 @@ Cada decisión irreversible (formato de documento, sincronización, cifrado, edi
 - `0006-databases.md`: bases de datos como páginas, propiedades tipadas (EAV) y vistas.
 - `0007-attachments.md`: adjuntos como BLOB en SQLite, bloque `file` y su exportación.
 - `0008-page-links.md`: enlaces entre páginas como bloque `page_link` y backlinks.
+- `0009-page-history.md`: historial de versiones de página como instantáneas en `page_versions`.
 - `0006-databases.md`: bases de datos como páginas, filas como subpáginas, propiedades tipadas en tablas propias y vistas con configuración JSON (Hito 6).
