@@ -220,6 +220,29 @@ impl Database {
         ))
     }
 
+    /// The open tabs as last stored ([`crate::tabs::Tabs::to_json`]), if
+    /// any (ADR 0011). Kept in `settings`, which ignores the key.
+    pub fn open_tabs(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [OPEN_TABS],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Remembers the open tabs, to reopen them at the next start.
+    pub fn save_open_tabs(&self, json: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![OPEN_TABS, json],
+        )?;
+        Ok(())
+    }
+
     /// Stores every preference in one transaction.
     pub fn save_settings(&mut self, settings: &Settings) -> Result<()> {
         let tx = self.conn.transaction()?;
@@ -2056,6 +2079,8 @@ fn read_page(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Page> {
 /// Mark of a compaction in progress, in `settings` (ignored by
 /// `Settings::from_pairs` like any unknown key).
 const COMPACTING: &str = "compacting";
+/// `settings` key of the open tabs (ADR 0011).
+const OPEN_TABS: &str = "open_tabs";
 /// `settings` key set once the example templates were created (ADR 0010).
 const EXAMPLE_TEMPLATES: &str = "example_templates";
 

@@ -31,6 +31,7 @@ mod sidebar;
 mod snapshots;
 mod space;
 mod startup;
+mod tab_bar;
 mod table_undo;
 mod templates;
 #[cfg(test)]
@@ -42,8 +43,8 @@ mod view_tabs;
 pub use self::startup::StartupError;
 use self::{
     blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, links::*,
-    page_history::*, row_page::*, search::*, sidebar::*, space::*, table_undo::*, templates::*,
-    view_menus::*, view_tabs::*,
+    page_history::*, row_page::*, search::*, sidebar::*, space::*, tab_bar::*, table_undo::*,
+    templates::*, view_menus::*, view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
@@ -135,6 +136,19 @@ pub struct SilexApp {
     page_history: Option<PageHistory>,
     /// Live templates (ADR 0010), the «Plantillas» section and its picker.
     templates: Templates,
+    /// Open pages (ADR 0011); the active one is `selected`.
+    tabs: silex_desktop::tabs::Tabs,
+    /// What a tab keeps while it is not shown: its undo and scroll.
+    parked: std::collections::HashMap<String, Parked>,
+    /// The tabs as last stored, to write them only when they change.
+    saved_tabs: String,
+    /// Scroll of the open page's blocks as of the last frame.
+    editor_scroll: f32,
+    /// Scroll to restore on the next frame (a tab shown again).
+    pending_scroll: Option<f32>,
+    /// Cmd/Ctrl was held during this frame's clicks in the page: a link
+    /// opens in a new tab.
+    command_click: bool,
     slash: Option<SlashMenu>,
     /// Escape closed the menu for this block until its text changes.
     slash_dismissed: Option<(String, String)>,
@@ -222,6 +236,12 @@ impl SilexApp {
             links: Links::default(),
             page_history: None,
             templates: Templates::default(),
+            tabs: silex_desktop::tabs::Tabs::default(),
+            parked: std::collections::HashMap::new(),
+            saved_tabs: String::new(),
+            editor_scroll: 0.0,
+            pending_scroll: None,
+            command_click: false,
             slash: None,
             slash_dismissed: None,
             selection: None,
@@ -236,7 +256,16 @@ impl SilexApp {
         app.favorites = app.db.list_favorites()?;
         app.templates.list = app.db.list_templates()?;
         app.rebuild_tree();
-        if let Some(row) = app.tree.first() {
+        // The tabs of last time (ADR 0011), those still live; else the
+        // first page. A damaged value only loses the tabs.
+        if let Some(json) = app.db.open_tabs().ok().flatten() {
+            app.saved_tabs = json.clone();
+            app.tabs = silex_desktop::tabs::Tabs::from_json(&json);
+            app.close_tabs_not_live();
+        }
+        if !app.tabs.is_empty() {
+            app.show_active_tab(true)?;
+        } else if let Some(row) = app.tree.first() {
             app.open_page(row.page.id.clone())?;
         }
         // Preferences are not worth refusing to start over: report and use defaults.
@@ -247,9 +276,69 @@ impl SilexApp {
         Ok(app)
     }
 
+    /// Opens a page in the active tab (a click), or shows the tab that
+    /// already has it (ADR 0011). A page that is not live is ignored.
     fn open_page(&mut self, id: String) -> Result<()> {
+        if self.db.get_page(&id)?.is_none() {
+            return Ok(());
+        }
+        if let Some(left) = self.tabs.open_here(&id) {
+            self.parked.remove(&left);
+        }
+        self.show_active_tab(true)
+    }
+
+    /// Shows the active tab's page. The page that was open is saved, and
+    /// its undo and scroll are kept if it is still in a tab. `reload`
+    /// reads the page again even if it is already the one shown.
+    fn show_active_tab(&mut self, reload: bool) -> Result<()> {
+        let Some(id) = self.tabs.active_id().map(str::to_owned) else {
+            return Ok(());
+        };
+        self.save_tabs();
+        let same = self.selected.as_deref() == Some(id.as_str());
+        if same && !reload {
+            return Ok(());
+        }
         self.save_now()?;
+        if let Some(old) = self.selected.clone()
+            && !same
+            && self.tabs.position(&old).is_some()
+        {
+            let history = std::mem::take(&mut self.history);
+            self.parked.insert(
+                old,
+                Parked {
+                    history,
+                    scroll: self.editor_scroll,
+                },
+            );
+        }
+        if !self.load_page(id.clone())? {
+            // Gone meanwhile: its tab closes, and the next one is shown.
+            self.tabs.retain(|t| t != id);
+            self.parked.remove(&id);
+            self.save_tabs();
+            return if self.tabs.is_empty() {
+                Ok(())
+            } else {
+                self.show_active_tab(true)
+            };
+        }
+        if !same {
+            let parked = self.parked.remove(&id);
+            self.pending_scroll = Some(parked.as_ref().map_or(0.0, |p| p.scroll));
+            if let Some(parked) = parked {
+                self.history = parked.history;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads a page into the editor; false if it is not live.
+    fn load_page(&mut self, id: String) -> Result<bool> {
         let page = self.db.get_page(&id)?;
+        let found = page.is_some();
         if let Some(page) = page {
             self.slash = None;
             self.slash_dismissed = None;
@@ -270,12 +359,42 @@ impl SilexApp {
             self.load_links()?;
             self.rebuild_tree();
         }
-        Ok(())
+        Ok(found)
+    }
+
+    /// Stores the tabs if they changed (to reopen them next time). A
+    /// failure is only a notice: the tabs still work.
+    fn save_tabs(&mut self) {
+        let json = self.tabs.to_json();
+        if json != self.saved_tabs {
+            let result = self.db.save_open_tabs(&json);
+            if result.is_ok() {
+                self.saved_tabs = json;
+            }
+            self.report(result);
+        }
+    }
+
+    /// Closes the tabs of pages no longer live (sent to the trash, or
+    /// gone after restoring a backup).
+    fn close_tabs_not_live(&mut self) {
+        let live: HashSet<&str> = self
+            .pages
+            .iter()
+            .chain(&self.templates.list)
+            .map(|p| p.id.as_str())
+            .collect();
+        let closed = self.tabs.retain(|id| live.contains(id));
+        for id in closed {
+            self.parked.remove(&id);
+        }
     }
 
     fn reload_pages(&mut self) -> Result<()> {
         self.pages = self.db.list_pages()?;
         self.templates.list = self.db.list_templates()?;
+        self.close_tabs_not_live();
+        self.save_tabs();
         // A linked page may have gone to the trash, or come back.
         self.load_links()?;
         self.trash_count = self.db.trash_count()?;
@@ -290,8 +409,12 @@ impl SilexApp {
         Ok(())
     }
 
-    /// Opens the first page in the tree, or shows the empty state.
+    /// Shows the active tab, else the first page in the tree, or the
+    /// empty state.
     fn open_first_page(&mut self) -> Result<()> {
+        if !self.tabs.is_empty() {
+            return self.show_active_tab(true);
+        }
         match self.tree.first().map(|r| r.page.id.clone()) {
             Some(id) => self.open_page(id),
             None => {
@@ -436,6 +559,39 @@ impl SilexApp {
         if self.search.is_some() {
             return;
         }
+        // Tabs (ADR 0011), not while a dialog has the keyboard. Cmd+T is
+        // a new tab: the search window, to choose its page.
+        let dialog = self.links.picker.is_some()
+            || self.page_history.is_some()
+            || self.templates.picker.is_some();
+        if !dialog && pressed(Sc::new(M::COMMAND, Key::T)) {
+            self.open_search(ctx);
+            if let Some(window) = &mut self.search {
+                window.new_tab = true;
+            }
+            return;
+        }
+        let close_tab = !dialog && pressed(Sc::new(M::COMMAND, Key::W));
+        let previous_tab = !dialog && pressed(Sc::new(M::CTRL | M::SHIFT, Key::Tab));
+        let next_tab = !dialog && !previous_tab && pressed(Sc::new(M::CTRL, Key::Tab));
+        const NUMBERS: [Key; 9] = [
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+            Key::Num9,
+        ];
+        let numbered = if dialog {
+            None
+        } else {
+            NUMBERS
+                .iter()
+                .position(|key| pressed(Sc::new(M::COMMAND, *key)))
+        };
         let new_subpage = pressed(Sc::new(M::COMMAND | M::SHIFT, Key::N));
         let new_page = !new_subpage && pressed(Sc::new(M::COMMAND, Key::N));
         // Exact Alt only: Alt+Shift+↑/↓ moves blocks instead.
@@ -452,6 +608,21 @@ impl SilexApp {
         let rename = pressed(Sc::new(M::NONE, Key::F2));
 
         let result = (|| -> Result<()> {
+            if close_tab {
+                self.close_tab(self.tabs.active())?;
+            }
+            if previous_tab || next_tab {
+                self.cycle_tab(next_tab)?;
+            }
+            // Cmd+9 is the last tab, as in a browser.
+            if let Some(number) = numbered {
+                let index = if number == 8 {
+                    self.tabs.len().saturating_sub(1)
+                } else {
+                    number
+                };
+                self.select_tab(index)?;
+            }
             if new_subpage && let Some(id) = self.selected.clone() {
                 self.create_subpage(&id)?;
             }

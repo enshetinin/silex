@@ -1445,6 +1445,83 @@ fn backups_menu() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- H8.1: tabs ----
+
+/// The demo workspace with three tabs: «Guía de estilo» (active),
+/// «Recetas» and «Notas de lectura».
+fn tabs_demo() -> anyhow::Result<SilexApp> {
+    let mut app = demo_app()?;
+    let find = |app: &SilexApp, title: &str| {
+        app.pages
+            .iter()
+            .find(|p| p.title == title)
+            .map(|p| p.id.clone())
+            .unwrap_or_default()
+    };
+    let guide = find(&app, "Guía de estilo");
+    let recipes = find(&app, "Recetas");
+    let notes = find(&app, "Notas de lectura");
+    app.open_page(guide)?;
+    app.open_in_new_tab(&recipes)?;
+    app.open_in_new_tab(&notes)?;
+    app.select_tab(0)?;
+    Ok(app)
+}
+
+#[test]
+fn tabs_are_named_and_a_click_switches() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(tabs_demo()?);
+    assert_accessible(&harness, "tabs");
+    let tabs: Vec<String> = harness
+        .root()
+        .children_recursive()
+        .map(|n| n.accesskit_node())
+        .filter(|n| n.role() == egui::accesskit::Role::Tab)
+        .filter_map(|n| n.label())
+        .collect();
+    assert_eq!(tabs, ["Guía de estilo", "Recetas", "Notas de lectura"]);
+    assert!(harness.query_by_label("Cerrar «Guía de estilo»").is_some());
+    // The bar keeps its size frame after frame.
+    let rect = |h: &Harness<'_, SilexApp>| {
+        h.get_all_by_label("Notas de lectura")
+            .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Tab)
+            .map(|n| n.rect())
+    };
+    let before = rect(&harness);
+    for _ in 0..30 {
+        harness.step();
+    }
+    assert_eq!(rect(&harness), before);
+    harness
+        .get_all_by_label("Recetas")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Tab)
+        .expect("the «Recetas» tab")
+        .click();
+    harness.run();
+    assert_eq!(harness.state().tabs.active(), 1);
+    // Its «×» closes it.
+    harness.get_by_label("Cerrar «Recetas»").click();
+    harness.run();
+    assert_eq!(harness.state().tabs.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn tabs() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), tabs_demo()?);
+    harness.run();
+    harness.snapshot("tabs_light");
+    Ok(())
+}
+
 // ---- H7.11: templates ----
 
 /// The demo workspace with the «Plantillas» section unfolded (so the

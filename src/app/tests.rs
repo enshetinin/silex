@@ -3681,3 +3681,185 @@ fn an_open_template_says_so_is_editable_and_survives_other_trashing() -> anyhow:
     assert_ne!(app.selected.as_deref(), Some(template.as_str()));
     Ok(())
 }
+
+// ---- H8.1: tabs ----
+
+/// «Uno», «Dos» and «Tres», each with a paragraph; «Uno» open.
+fn tabs_app() -> anyhow::Result<(SilexApp, egui::Context, [String; 3])> {
+    let mut db = Database::open_in_memory()?;
+    let mut ids = Vec::new();
+    for title in ["Uno", "Dos", "Tres"] {
+        let id = db.create_page(title, None)?;
+        db.save_document(
+            &id,
+            title,
+            &[Block {
+                page_id: id.clone(),
+                content: format!("Texto de {title}"),
+                ..block(&format!("b-{title}"))
+            }],
+        )?;
+        ids.push(id);
+    }
+    let mut app = SilexApp::new(db)?;
+    app.open_page(ids[0].clone())?;
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![]);
+    let ids: [String; 3] = ids.try_into().map_err(|_| anyhow::anyhow!("three pages"))?;
+    Ok((app, ctx, ids))
+}
+
+fn tab_ids(app: &SilexApp) -> Vec<String> {
+    app.tabs.ids().to_vec()
+}
+
+#[test]
+fn a_click_replaces_the_tab_and_cmd_click_opens_another() -> anyhow::Result<()> {
+    let (mut app, _ctx, [uno, dos, tres]) = tabs_app()?;
+    assert_eq!(tab_ids(&app), std::slice::from_ref(&uno));
+    app.open_page(dos.clone())?;
+    assert_eq!(
+        tab_ids(&app),
+        std::slice::from_ref(&dos),
+        "a click: the same tab"
+    );
+    app.open_in_new_tab(&tres)?;
+    assert_eq!(tab_ids(&app), [dos.clone(), tres.clone()]);
+    assert_eq!(app.selected.as_deref(), Some(tres.as_str()));
+    // A page that has a tab: its tab is shown, not a copy.
+    app.open_page(dos.clone())?;
+    assert_eq!(tab_ids(&app), [dos.clone(), tres.clone()]);
+    assert_eq!(app.tabs.active(), 0);
+    // The «…» menu and Cmd/Ctrl+click in the sidebar.
+    app.apply(RowAction::OpenInNewTab(uno.clone()))?;
+    assert_eq!(tab_ids(&app), [dos, uno.clone(), tres]);
+    assert_eq!(app.selected.as_deref(), Some(uno.as_str()));
+    Ok(())
+}
+
+#[test]
+fn each_tab_keeps_its_undo_and_scroll() -> anyhow::Result<()> {
+    let (mut app, ctx, [uno, dos, _]) = tabs_app()?;
+    app.blocks[0].content = "Uno cambiado".into();
+    app.mark_dirty();
+    app.editor_scroll = 120.0;
+    app.open_in_new_tab(&dos)?;
+    assert_eq!(
+        app.db.list_blocks(&uno)?[0].content,
+        "Uno cambiado",
+        "saved on leaving"
+    );
+    assert!(!app.history.can_undo(), "«Dos» has its own history");
+    // Back to «Uno»: Cmd+Z still undoes the change, and the scroll is back.
+    app.select_tab(0)?;
+    assert_eq!(app.pending_scroll, Some(120.0));
+    assert!(app.history.can_undo());
+    app.undo();
+    assert_eq!(app.blocks[0].content, "Texto de Uno");
+    app_frame(&mut app, &ctx, vec![]);
+    // Closing a tab forgets its undo.
+    app.close_tab(0)?;
+    app.open_in_new_tab(&uno)?;
+    assert!(!app.history.can_undo());
+    Ok(())
+}
+
+#[test]
+fn tabs_close_and_switch_with_the_keyboard() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, ctx, [uno, dos, tres]) = tabs_app()?;
+    app.open_in_new_tab(&dos)?;
+    app.open_in_new_tab(&tres)?;
+    assert_eq!(tab_ids(&app), [uno.clone(), dos.clone(), tres.clone()]);
+    app_frame(&mut app, &ctx, vec![key(Key::Num1, M::COMMAND)]);
+    assert_eq!(app.selected.as_deref(), Some(uno.as_str()));
+    app_frame(&mut app, &ctx, vec![key(Key::Num9, M::COMMAND)]);
+    assert_eq!(app.selected.as_deref(), Some(tres.as_str()), "9: the last");
+    app_frame(&mut app, &ctx, vec![key(Key::Tab, M::CTRL)]);
+    assert_eq!(app.selected.as_deref(), Some(uno.as_str()), "goes round");
+    app_frame(&mut app, &ctx, vec![key(Key::Tab, M::CTRL | M::SHIFT)]);
+    assert_eq!(app.selected.as_deref(), Some(tres.as_str()));
+    app_frame(&mut app, &ctx, vec![key(Key::W, M::COMMAND)]);
+    assert_eq!(tab_ids(&app), [uno.clone(), dos.clone()]);
+    assert_eq!(app.selected.as_deref(), Some(dos.as_str()));
+    app_frame(&mut app, &ctx, vec![key(Key::W, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![key(Key::W, M::COMMAND)]);
+    assert_eq!(
+        tab_ids(&app),
+        std::slice::from_ref(&uno),
+        "the last tab stays"
+    );
+    // Cmd+T: the search, and what is chosen opens in a new tab.
+    app_frame(&mut app, &ctx, vec![key(Key::T, M::COMMAND)]);
+    assert!(app.search.as_ref().is_some_and(|s| s.new_tab));
+    app_frame(&mut app, &ctx, type_text("Dos"));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(tab_ids(&app), [uno, dos.clone()]);
+    assert_eq!(app.selected.as_deref(), Some(dos.as_str()));
+    Ok(())
+}
+
+#[test]
+fn a_page_sent_to_the_trash_closes_its_tab() -> anyhow::Result<()> {
+    let (mut app, _ctx, [uno, dos, tres]) = tabs_app()?;
+    app.open_in_new_tab(&dos)?;
+    app.open_in_new_tab(&tres)?;
+    // Another tab's page: the open one stays.
+    app.trash_page(&uno)?;
+    assert_eq!(tab_ids(&app), [dos.clone(), tres.clone()]);
+    assert_eq!(app.selected.as_deref(), Some(tres.as_str()));
+    // The open one: its neighbour is shown.
+    app.trash_page(&tres)?;
+    assert_eq!(tab_ids(&app), std::slice::from_ref(&dos));
+    assert_eq!(app.selected.as_deref(), Some(dos.as_str()));
+    // Restoring does not reopen a tab.
+    app.restore_from_trash(&uno)?;
+    assert_eq!(tab_ids(&app), [uno]);
+    Ok(())
+}
+
+#[test]
+fn the_thirteenth_tab_closes_the_oldest() -> anyhow::Result<()> {
+    let (mut app, _ctx, [uno, _, _]) = tabs_app()?;
+    let mut ids = Vec::new();
+    for n in 0..12 {
+        ids.push(app.db.create_page(&format!("Página {n}"), None)?);
+    }
+    app.reload_pages()?;
+    for id in &ids {
+        app.open_in_new_tab(id)?;
+    }
+    assert_eq!(app.tabs.len(), silex_desktop::tabs::MAX_TABS);
+    assert!(
+        app.tabs.position(&uno).is_none(),
+        "«Uno», the oldest, closed"
+    );
+    Ok(())
+}
+
+#[test]
+fn tabs_come_back_after_closing_the_app() -> anyhow::Result<()> {
+    let tmp = TempFolder::new("silex-app-tabs")?;
+    let path = tmp.0.join("silex.sqlite3");
+    let (uno, dos, tres) = {
+        let db = Database::open(&path)?;
+        let uno = db.create_page("Uno", None)?;
+        let dos = db.create_page("Dos", None)?;
+        let tres = db.create_page("Tres", None)?;
+        let mut app = SilexApp::new(db)?;
+        app.startup_backup_pending = false;
+        app.open_page(uno.clone())?;
+        app.open_in_new_tab(&dos)?;
+        app.open_in_new_tab(&tres)?;
+        app.select_tab(1)?;
+        (uno, dos, tres)
+    };
+    // «Tres» went to the trash meanwhile (another copy of the app).
+    Database::open(&path)?.trash_page(&tres)?;
+    let mut app = SilexApp::new(Database::open(&path)?)?;
+    app.startup_backup_pending = false;
+    assert_eq!(tab_ids(&app), [uno, dos.clone()]);
+    assert_eq!(app.selected.as_deref(), Some(dos.as_str()));
+    Ok(())
+}

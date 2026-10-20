@@ -35,6 +35,7 @@ Lo que ya existe y condiciona la decisión:
 - **Deshacer por pestaña:** al salir de una pestaña se guarda su página (como hoy al cambiar de página) y su deshacer se aparta con ella; al volver, Cmd+Z sigue funcionando. Se pierde al cerrar la pestaña o la app (como hoy).
 - **Límite:** 12 pestañas. Abrir otra cierra la usada hace más tiempo, nunca la activa.
 - **Papelera:** una página que va a la papelera cierra su pestaña; restaurar una página no la reabre.
+  - *Actualización (H8.1):* restaurar desde la papelera la abre en la pestaña actual, como cualquier clic. Clic central en una página de la barra lateral también la abre en una pestaña nueva.
 - **Plantillas y bases de datos:** se abren en pestañas como cualquier página.
 - **Accesibilidad:** cada pestaña es un botón con el título y su estado (seleccionada), y «Cerrar «Título»» para su «×».
 

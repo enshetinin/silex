@@ -61,5 +61,5 @@
 - [ ] Evaluar cifrado y sincronización únicamente con ADR, threat model y pruebas.
 
 ## Hito 8 — varias páginas a la vista (P1 del PRD)
-- [ ] Pestañas: abrir, cerrar y cambiar con ratón y teclado, con el deshacer de cada una y recordadas al cerrar la app. *(ADR 0011 aceptado el 2026-10-20; historia H8.1.)*
+- [ ] Pestañas: abrir, cerrar y cambiar con ratón y teclado, con el deshacer de cada una y recordadas al cerrar la app. *(ADR 0011 aceptado el 2026-10-20; historia H8.1.)* *(H8.1: `src/tabs.rs` con las reglas (una pestaña por página, 12 como mucho cerrando la usada hace más tiempo, nunca ninguna) y la barra en `src/app/tab_bar.rs`, que aparece con dos o más. Cmd/Ctrl+clic o clic central en la barra lateral, «Abrir en una pestaña nueva» en los menús, y Cmd/Ctrl+clic en enlaces y backlinks; Cmd/Ctrl+T (búsqueda en pestaña nueva), Cmd/Ctrl+W, Ctrl+Tab, Ctrl+Mayús+Tab y Cmd/Ctrl+1…9. Cada pestaña conserva su deshacer y su desplazamiento; la papelera cierra las suyas; vuelven al abrir la app (clave `open_tabs` de `settings`). Pestañas con rol de pestaña y «Cerrar «Título»». Tests verdes y captura en macOS; verificación manual pendiente (`docs/MANUAL_QA.md`, sección 25).)*
 - [ ] Vista dividida de consulta: otra página (o tabla) a la derecha, solo para leer, con «Editar aquí». *(ADR 0011; historia H8.2. Editar en los dos paneles, solo si hace falta después.)*

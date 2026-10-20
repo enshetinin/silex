@@ -1066,7 +1066,8 @@ impl SilexApp {
                 return;
             }
             BlockAction::OpenLink => {
-                let result = self.open_link(id);
+                // Cmd/Ctrl+click opens it in a new tab (ADR 0011).
+                let result = self.open_link(id, self.command_click);
                 self.report(result);
                 return;
             }
@@ -1140,6 +1141,12 @@ impl SilexApp {
             });
             return;
         };
+        self.tab_bar(ui);
+        if self.selected.as_deref() != Some(page_id.as_str()) {
+            // Another tab was chosen or closed: drawn on the next frame.
+            ui.ctx().request_repaint();
+            return;
+        }
         self.top_bar(ui, &page_id);
         if self.selected.as_deref() != Some(page_id.as_str()) {
             // The page was trashed (or another opened) from the top bar.
@@ -1181,163 +1188,167 @@ impl SilexApp {
         let mut block_action: Option<(BlockAction, String)> = None;
         let mut hovered = None;
         let mut open_backlink = None;
+        self.command_click = ui.input(|i| i.modifiers.command);
         let pointer = ui.ctx().pointer_hover_pos();
-        egui::ScrollArea::vertical()
+        let mut scroll_area = egui::ScrollArea::vertical()
             .id_salt("silex_editor_blocks")
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                const COLUMN: f32 = 720.0;
-                let width = ui.available_width().min(COLUMN + GUTTER);
-                let side = ((ui.available_width() - width) / 2.0).max(0.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(side);
-                    ui.vertical(|ui| {
-                        ui.set_width(width);
-                        ui.add_space(theme::space::XL);
-                        edit = self.page_title(ui, &page_id);
-                        // A row of a database shows its properties (H6.2b).
-                        if self.row_page.is_some() {
-                            ui.add_space(theme::space::SM);
-                            ui.horizontal_top(|ui| {
-                                gutter_space(ui);
-                                ui.vertical(|ui| self.row_properties(ui));
-                            });
-                        }
-                        ui.add_space(theme::space::LG);
+            .auto_shrink(false);
+        // A tab shown again goes back to where it was (ADR 0011).
+        if let Some(offset) = self.pending_scroll.take() {
+            scroll_area = scroll_area.vertical_scroll_offset(offset);
+        }
+        let scrolled = scroll_area.show(ui, |ui| {
+            const COLUMN: f32 = 720.0;
+            let width = ui.available_width().min(COLUMN + GUTTER);
+            let side = ((ui.available_width() - width) / 2.0).max(0.0);
+            ui.horizontal(|ui| {
+                ui.add_space(side);
+                ui.vertical(|ui| {
+                    ui.set_width(width);
+                    ui.add_space(theme::space::XL);
+                    edit = self.page_title(ui, &page_id);
+                    // A row of a database shows its properties (H6.2b).
+                    if self.row_page.is_some() {
+                        ui.add_space(theme::space::SM);
+                        ui.horizontal_top(|ui| {
+                            gutter_space(ui);
+                            ui.vertical(|ui| self.row_properties(ui));
+                        });
+                    }
+                    ui.add_space(theme::space::LG);
 
-                        let numbers = list_numbers(&self.blocks);
-                        let scroll_to = self.pending_focus.as_ref().map(|(id, _)| id.clone());
-                        self.caret = None;
-                        let selected = self.selection_range();
-                        let mut clicked_kind = None;
-                        let ctx = ui.ctx().clone();
-                        let focused = ctx.memory(|m| m.focused());
-                        for (index, (block, number)) in
-                            self.blocks.iter_mut().zip(numbers).enumerate()
+                    let numbers = list_numbers(&self.blocks);
+                    let scroll_to = self.pending_focus.as_ref().map(|(id, _)| id.clone());
+                    self.caret = None;
+                    let selected = self.selection_range();
+                    let mut clicked_kind = None;
+                    let ctx = ui.ctx().clone();
+                    let focused = ctx.memory(|m| m.focused());
+                    for (index, (block, number)) in self.blocks.iter_mut().zip(numbers).enumerate()
+                    {
+                        let field = field_id(self.doc_generation, "block", &block.id);
+                        let view = BlockView {
+                            number,
+                            scroll_into_view: scroll_to.as_deref() == Some(block.id.as_str()),
+                            selected: selected.is_some_and(|(a, b)| (a..=b).contains(&index)),
+                            show_handle: self.hovered_block.as_deref() == Some(block.id.as_str())
+                                || egui::Popup::is_id_open(&ctx, handle_menu_id(&block.id)),
+                            focused: focused == Some(field),
+                            attachment: block
+                                .attachment
+                                .as_ref()
+                                .and_then(|a| self.files.attachments.get(a)),
+                            preview: block
+                                .attachment
+                                .as_ref()
+                                .and_then(|a| self.files.previews.get(a)),
+                            link: (block.kind == BlockKind::PageLink)
+                                .then(|| link_state(&self.pages, &self.links.targets, block)),
+                        };
+                        if index > 0 {
+                            ui.add_space(heading_space(block.kind));
+                        }
+                        let out = block_field(ui, self.doc_generation, block, &view);
+                        // An image in sight: kept, or decoded if it has no preview (H7.2).
+                        if let Some(id) = &block.attachment
+                            && self
+                                .files
+                                .attachments
+                                .get(id)
+                                .is_some_and(|a| silex_desktop::attachment::has_preview(&a.mime))
+                            && ui.is_rect_visible(out.rect)
                         {
-                            let field = field_id(self.doc_generation, "block", &block.id);
-                            let view = BlockView {
-                                number,
-                                scroll_into_view: scroll_to.as_deref() == Some(block.id.as_str()),
-                                selected: selected.is_some_and(|(a, b)| (a..=b).contains(&index)),
-                                show_handle: self.hovered_block.as_deref()
-                                    == Some(block.id.as_str())
-                                    || egui::Popup::is_id_open(&ctx, handle_menu_id(&block.id)),
-                                focused: focused == Some(field),
-                                attachment: block
-                                    .attachment
-                                    .as_ref()
-                                    .and_then(|a| self.files.attachments.get(a)),
-                                preview: block
-                                    .attachment
-                                    .as_ref()
-                                    .and_then(|a| self.files.previews.get(a)),
-                                link: (block.kind == BlockKind::PageLink)
-                                    .then(|| link_state(&self.pages, &self.links.targets, block)),
-                            };
-                            if index > 0 {
-                                ui.add_space(heading_space(block.kind));
+                            self.files.seen.insert(id.clone());
+                            if !self.files.previews.contains_key(id) {
+                                self.files.wanted.push(id.clone());
                             }
-                            let out = block_field(ui, self.doc_generation, block, &view);
-                            // An image in sight: kept, or decoded if it has no preview (H7.2).
-                            if let Some(id) = &block.attachment
-                                && self.files.attachments.get(id).is_some_and(|a| {
-                                    silex_desktop::attachment::has_preview(&a.mime)
-                                })
-                                && ui.is_rect_visible(out.rect)
-                            {
-                                self.files.seen.insert(id.clone());
-                                if !self.files.previews.contains_key(id) {
-                                    self.files.wanted.push(id.clone());
-                                }
-                            }
-                            if pointer.is_some_and(|p| out.rect.contains(p)) {
-                                hovered = Some(block.id.clone());
-                            }
-                            let kind = if out.other_changed {
-                                Some(EditKind::Other)
+                        }
+                        if pointer.is_some_and(|p| out.rect.contains(p)) {
+                            hovered = Some(block.id.clone());
+                        }
+                        let kind = if out.other_changed {
+                            Some(EditKind::Other)
+                        } else {
+                            out.text_changed.then(|| EditKind::Text(block.id.clone()))
+                        };
+                        if let Some(kind) = kind {
+                            // Two fields changed in one frame (rare): one non-text step.
+                            edit = Some(if edit.is_some() {
+                                EditKind::Other
                             } else {
-                                out.text_changed.then(|| EditKind::Text(block.id.clone()))
-                            };
-                            if let Some(kind) = kind {
-                                // Two fields changed in one frame (rare): one non-text step.
-                                edit = Some(if edit.is_some() {
-                                    EditKind::Other
-                                } else {
-                                    kind
-                                });
-                            }
-                            if let Some(action) = out.action {
-                                block_action = Some((action, block.id.clone()));
-                            }
-                            if out.caret.is_some() {
-                                self.caret = out.caret;
-                            }
-                            if let Some(menu) =
-                                self.slash.as_ref().filter(|m| m.block_id == block.id)
-                                && let Some(kind) = slash_menu_ui(ui, menu, out.rect)
-                            {
-                                clicked_kind = Some((kind, block.id.clone()));
-                            }
-                        }
-                        if let Some((kind, id)) = clicked_kind {
-                            self.pending_key = Some((EditorKey::Slash(kind), id));
-                        }
-                        // Files being stored by the attach worker (ADR 0007).
-                        if self.files.adding > 0 {
-                            ui.add_space(theme::space::SM);
-                            ui.horizontal(|ui| {
-                                gutter_space(ui);
-                                let text = match self.files.adding {
-                                    1 => "Añadiendo 1 archivo…".to_owned(),
-                                    n => format!("Añadiendo {n} archivos…"),
-                                };
-                                ui.label(egui::RichText::new(text).color(p.text_muted));
+                                kind
                             });
-                            ui.ctx()
-                                .request_repaint_after(std::time::Duration::from_millis(250));
                         }
-
+                        if let Some(action) = out.action {
+                            block_action = Some((action, block.id.clone()));
+                        }
+                        if out.caret.is_some() {
+                            self.caret = out.caret;
+                        }
+                        if let Some(menu) = self.slash.as_ref().filter(|m| m.block_id == block.id)
+                            && let Some(kind) = slash_menu_ui(ui, menu, out.rect)
+                        {
+                            clicked_kind = Some((kind, block.id.clone()));
+                        }
+                    }
+                    if let Some((kind, id)) = clicked_kind {
+                        self.pending_key = Some((EditorKey::Slash(kind), id));
+                    }
+                    // Files being stored by the attach worker (ADR 0007).
+                    if self.files.adding > 0 {
                         ui.add_space(theme::space::SM);
                         ui.horizontal(|ui| {
-                            // The "+" lines up with the text, not the button's edge.
-                            ui.add_space(
-                                GUTTER + ui.spacing().item_spacing.x
-                                    - ui.spacing().button_padding.x,
-                            );
-                            let add = ui
-                                .add(
-                                    egui::Button::new((
-                                        icons::icon(icons::PLUS).color(p.text_muted),
-                                        egui::RichText::new(" Añadir bloque").color(p.text_muted),
-                                    ))
-                                    .frame_when_inactive(false),
-                                )
-                                .accessible_name("Añadir bloque");
-                            if add.clicked() {
-                                // In memory, like every other edit: undoable and saved by the autosave.
-                                let block = Block {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    page_id: page_id.clone(),
-                                    kind: BlockKind::Paragraph,
-                                    content: String::new(),
-                                    checked: false,
-                                    position: 0,
-                                    indent: 0,
-                                    attachment: None,
-                                    link: None,
-                                };
-                                self.pending_focus = Some((block.id.clone(), 0));
-                                self.blocks.push(block);
-                                self.mark_dirty();
-                            }
+                            gutter_space(ui);
+                            let text = match self.files.adding {
+                                1 => "Añadiendo 1 archivo…".to_owned(),
+                                n => format!("Añadiendo {n} archivos…"),
+                            };
+                            ui.label(egui::RichText::new(text).color(p.text_muted));
                         });
-                        // The pages that link here (H7.6).
-                        open_backlink = self.backlinks_section(ui);
-                        ui.add_space(theme::space::XXL);
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(250));
+                    }
+
+                    ui.add_space(theme::space::SM);
+                    ui.horizontal(|ui| {
+                        // The "+" lines up with the text, not the button's edge.
+                        ui.add_space(
+                            GUTTER + ui.spacing().item_spacing.x - ui.spacing().button_padding.x,
+                        );
+                        let add = ui
+                            .add(
+                                egui::Button::new((
+                                    icons::icon(icons::PLUS).color(p.text_muted),
+                                    egui::RichText::new(" Añadir bloque").color(p.text_muted),
+                                ))
+                                .frame_when_inactive(false),
+                            )
+                            .accessible_name("Añadir bloque");
+                        if add.clicked() {
+                            // In memory, like every other edit: undoable and saved by the autosave.
+                            let block = Block {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                page_id: page_id.clone(),
+                                kind: BlockKind::Paragraph,
+                                content: String::new(),
+                                checked: false,
+                                position: 0,
+                                indent: 0,
+                                attachment: None,
+                                link: None,
+                            };
+                            self.pending_focus = Some((block.id.clone(), 0));
+                            self.blocks.push(block);
+                            self.mark_dirty();
+                        }
                     });
+                    // The pages that link here (H7.6).
+                    open_backlink = self.backlinks_section(ui);
+                    ui.add_space(theme::space::XXL);
                 });
             });
+        });
+        self.editor_scroll = scrolled.state.clamped_offset().y;
         self.hovered_block = hovered;
         if let Some(kind) = edit {
             self.changed(kind);
@@ -1346,7 +1357,7 @@ impl SilexApp {
             self.block_action(action, &id);
         }
         if let Some(id) = open_backlink {
-            let result = self.open_page(id);
+            let result = self.open_page_in(id, self.command_click);
             self.report(result);
         }
     }

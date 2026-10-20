@@ -228,3 +228,15 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - «+» de «Páginas» → «Nueva página desde plantilla…», y Cmd+K → «plantilla»: el buscador filtra al escribir, ↑ ↓ e Intro crean la página, Esc cierra sin crear nada. Desde el menú «…» de una página, la nueva va dentro de ella y lo dice.
 - Las plantillas no salen en el árbol, en Cmd+K, al enlazar (`[[`) ni en «Enlazada desde». «Exportar todo» las escribe en `Plantillas/`.
 - Con VoiceOver: «Plantillas» se anuncia como botón (desplegado o no), y cada plantilla del buscador por su título.
+
+## 25. Pestañas (H8.1)
+- Cmd/Ctrl+clic en una página de la barra lateral (o clic central, o «Abrir en una pestaña nueva» en su menú): aparece la barra de pestañas con las dos. Un clic normal cambia la página de la pestaña actual.
+- Cmd/Ctrl+clic en una tarjeta de enlace y en «Enlazada desde»: en una pestaña nueva.
+- Escribe en una pestaña, cambia a otra y vuelve: Cmd+Z deshace lo escrito, y la página está desplazada donde la dejaste.
+- Ctrl+Tab y Ctrl+Mayús+Tab recorren las pestañas; Cmd/Ctrl+1…8 van a cada una y Cmd/Ctrl+9 a la última. En macOS, Ctrl+Tab es la tecla Control.
+- Cmd/Ctrl+W y la «×» cierran la pestaña; la última no se cierra. Clic central en una pestaña también la cierra.
+- Cmd/Ctrl+T abre la búsqueda; lo que elijas se abre en una pestaña nueva.
+- Abre 13 pestañas: se cierra la que usaste hace más tiempo, nunca la que ves.
+- Manda a la papelera una página con pestaña: la pestaña se cierra. Si era la activa, se ve la de al lado.
+- Cierra la app con varias pestañas y vuelve a abrirla: vuelven, con la misma activa.
+- Con VoiceOver: cada pestaña se anuncia como pestaña, con su título y si está seleccionada; su «×» como «Cerrar «Título»».

@@ -21,6 +21,8 @@ pub(super) struct Rename {
 /// Something the user asked for on a page row (click, menu, keyboard).
 pub(super) enum RowAction {
     Open(String),
+    /// In a new tab (ADR 0011): Cmd/Ctrl+click, middle click or the menu.
+    OpenInNewTab(String),
     Toggle(String),
     StartRename(String),
     CommitRename,
@@ -433,8 +435,11 @@ impl SilexApp {
             }
             return actions;
         }
+        let command = ui.input(|i| i.modifiers.command);
         if out.row.double_clicked() {
             actions.push(RowAction::StartRename(id.clone()));
+        } else if out.row.middle_clicked() || (out.row.clicked() && command) {
+            actions.push(RowAction::OpenInNewTab(id.clone()));
         } else if out.row.clicked() {
             actions.push(RowAction::Open(id.clone()));
         }
@@ -494,6 +499,9 @@ impl SilexApp {
         let mut action = None;
         if ui.button("Abrir").clicked() {
             action = Some(RowAction::Open(owned()));
+        }
+        if ui.button("Abrir en una pestaña nueva").clicked() {
+            action = Some(RowAction::OpenInNewTab(owned()));
         }
         if ui.button("Renombrar").clicked() {
             action = Some(RowAction::StartRename(owned()));
@@ -568,6 +576,7 @@ impl SilexApp {
     pub(super) fn apply(&mut self, action: RowAction) -> Result<()> {
         match action {
             RowAction::Open(id) => self.open_page(id),
+            RowAction::OpenInNewTab(id) => self.open_in_new_tab(&id),
             RowAction::Toggle(id) => {
                 self.toggle_expanded(&id);
                 Ok(())
@@ -849,6 +858,19 @@ impl SilexApp {
                     (format!("{cmd}+Mayús+N"), "Nueva subpágina"),
                     (format!("{cmd}+K"), "Buscar páginas y acciones"),
                     ("Alt+↑ / Alt+↓".to_owned(), "Página anterior / siguiente"),
+                    (format!("{cmd}+clic"), "Abrir en una pestaña nueva"),
+                    (
+                        format!("{cmd}+T / {cmd}+W"),
+                        "Nueva pestaña / cerrar pestaña",
+                    ),
+                    (
+                        "Ctrl+Tab / Ctrl+Mayús+Tab".to_owned(),
+                        "Pestaña siguiente / anterior",
+                    ),
+                    (
+                        format!("{cmd}+1 … {cmd}+9"),
+                        "Ir a una pestaña (9: la última)",
+                    ),
                     ("F2".to_owned(), "Renombrar la página abierta"),
                     (format!("{cmd}+S"), "Guardar ahora"),
                     (format!("{cmd}+Z / {cmd}+Mayús+Z"), "Deshacer / rehacer"),

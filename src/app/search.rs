@@ -29,6 +29,8 @@ const COMMAND_ROW: f32 = 32.0;
 
 pub(super) struct SearchWindow {
     pub(super) query: String,
+    /// Opened with Cmd+T: the page chosen opens in a new tab (ADR 0011).
+    pub(super) new_tab: bool,
     /// The query last sent to the search (its results may still be coming).
     requested: String,
     /// Commands matching the query, listed before the pages.
@@ -97,6 +99,7 @@ impl SilexApp {
             scroll_to_selected: false,
             composing: false,
             open_when_ready: false,
+            new_tab: false,
         });
     }
 
@@ -160,8 +163,8 @@ impl SilexApp {
     }
 
     /// Opens a result. A content match puts the cursor on the match.
-    fn open_search_hit(&mut self, hit: &SearchHit) -> Result<()> {
-        self.open_page(hit.page.id.clone())?;
+    fn open_search_hit(&mut self, hit: &SearchHit, new_tab: bool) -> Result<()> {
+        self.open_page_in(hit.page.id.clone(), new_tab)?;
         if self.selected.as_deref() != Some(hit.page.id.as_str()) {
             anyhow::bail!("La página ya no existe o está en la papelera");
         }
@@ -366,7 +369,7 @@ impl SilexApp {
         }
         // Closing: the worker thread ends with the window.
         let result = match chosen {
-            Some(Entry::Page(hit)) => self.open_search_hit(&hit),
+            Some(Entry::Page(hit)) => self.open_search_hit(&hit, window.new_tab),
             Some(Entry::Command(command)) => self.run_command(ctx, command),
             None => Ok(()),
         };

@@ -15,6 +15,7 @@ pub mod save_state;
 pub mod search;
 pub mod settings;
 pub mod space;
+pub mod tabs;
 pub mod templates;
 pub mod versions;
 pub mod view;
