@@ -1,8 +1,8 @@
 //! Several rows at once (H11.2): a box in front of each row chooses it
 //! (Shift+click chooses the range from the last box clicked), the header's
 //! box chooses every row in sight, and while rows are chosen the toolbar
-//! becomes a bar to act on all of them: send them to the trash or put a
-//! value in one property. Each action is one transaction and one step of
+//! becomes a bar to act on all of them: duplicate them (H11.4), send them
+//! to the trash or put a value in one property. Each action is one transaction and one step of
 //! Cmd+Z. Escape, «×», changing the view or its filters empty the
 //! selection; rows that leave the table leave it too. Only in the table
 //! view: a board has no boxes.
@@ -221,6 +221,13 @@ pub(super) fn selection_bar(
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .width(240.0)
             .show(|ui| bulk_menu(ui, state, actions));
+        if ui
+            .add(small(icons::COPY, " Duplicar"))
+            .accessible_name("Duplicar")
+            .clicked()
+        {
+            actions.push(TableAction::DuplicateSelected);
+        }
         if ui
             .add(small(icons::TRASH, " Enviar a la papelera"))
             .accessible_name("Enviar a la papelera")

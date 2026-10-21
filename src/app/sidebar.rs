@@ -34,6 +34,8 @@ pub(super) enum RowAction {
     Reorder(String, Shift),
     Move(String, Option<String>),
     Trash(String),
+    /// A copy right below it (H11.4), asking about its subpages.
+    Duplicate(String),
     /// A new page from a template, inside a page or at the root (ADR 0010).
     UseTemplate(String, Option<String>),
     /// «Nueva página desde plantilla…», inside a page or at the root.
@@ -518,6 +520,9 @@ impl SilexApp {
         if ui.button("Renombrar").clicked() {
             action = Some(RowAction::StartRename(owned()));
         }
+        if ui.button("Duplicar").clicked() {
+            action = Some(RowAction::Duplicate(owned()));
+        }
         let child = if page.kind == PageKind::Database {
             "Nueva fila"
         } else {
@@ -608,6 +613,7 @@ impl SilexApp {
             RowAction::Reorder(id, shift) => self.reorder_page(&id, shift),
             RowAction::Move(id, parent) => self.move_page(&id, parent.as_deref()),
             RowAction::Trash(id) => self.trash_page(&id),
+            RowAction::Duplicate(id) => self.start_duplicate(&id),
             RowAction::UseTemplate(id, parent) => self.use_template(&id, parent.as_deref()),
             RowAction::FromTemplate(parent) => {
                 self.open_template_picker(parent);

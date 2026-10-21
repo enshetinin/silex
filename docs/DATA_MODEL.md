@@ -113,3 +113,7 @@
 - Las cascadas existentes hacen el resto: `blocks`, `page_versions`, `db_values` y, de una base, `db_properties`, `db_select_options` y `db_views`. Los disparadores `AFTER DELETE` mantienen `page_search` y `block_search`, también en las cascadas. `blocks.link_page_id` pasa a `NULL` («Página que ya no existe») y `pages.parent_id` de elementos sueltos, también.
 - `save_document` guarda como `NULL` un `link_page_id` que ya no existe, en lugar de fallar la clave foránea.
 - Los adjuntos quedan sin uso y los borra «Liberar espacio». Las copias de seguridad anteriores conservan lo borrado.
+
+## Duplicar (H11.4, sin migración)
+- `duplicate_page(id, con_hijos)` y `duplicate_pages(ids)` copian en una transacción: página con `kind` y bloques nuevos (mismos `attachment_id` y `link_page_id`), `db_values` de las filas y, de una base, `db_properties` (también las borradas, con su `deleted_at`), `db_select_options` y `db_views`. En `db_views.config` (JSON) se sustituye cada id viejo de propiedad u opción por el nuevo; los UUID no se repiten, así que el reemplazo de texto es seguro.
+- La copia va justo debajo del original: se renumera `sort_order` de las hermanas vivas. No se copian `favorite_at`, `template_at` ni `page_versions`.

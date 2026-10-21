@@ -16,6 +16,7 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::NewPage | Command::NewSubpage | Command::NewRow => icons::PLUS,
         Command::NewDatabase => icons::TABLE,
         Command::RenamePage => icons::TEXT,
+        Command::DuplicatePage => icons::COPY,
         Command::AddFavorite | Command::RemoveFavorite => icons::STAR,
         Command::ExportPage | Command::ExportWorkspace => icons::EXPORT,
         Command::AttachFiles => icons::PAPERCLIP,
@@ -85,6 +86,7 @@ impl SilexApp {
             (Command::NewSubpage, Some(id)) => self.create_subpage(&id)?,
             // The open page is renamed in its title, as from its "…" menu.
             (Command::RenamePage, Some(_)) => self.focus_title = true,
+            (Command::DuplicatePage, Some(id)) => self.start_duplicate(&id)?,
             (Command::AddFavorite, Some(id)) => self.set_favorite(&id, true)?,
             (Command::RemoveFavorite, Some(id)) => self.set_favorite(&id, false)?,
             (Command::ExportPage, Some(_)) => self.export_current_page(ctx)?,

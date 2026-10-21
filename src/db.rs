@@ -549,6 +549,33 @@ impl Database {
         Ok(id)
     }
 
+    /// Duplicates a live page (H11.4) in one transaction: «Título (copia)»
+    /// right below it, with new blocks (same files and links, the files
+    /// not copied), the values of a row, and the properties, options and
+    /// views of a database (its views pointing at the copy's properties).
+    /// With `children`, its subpages (or a database's rows) come along,
+    /// all the way down. Not a template's; no favorite, no history.
+    /// Returns the copy's id.
+    pub fn duplicate_page(&mut self, id: &str, children: bool) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        let copy = duplicate_in(&tx, id, children)?;
+        tx.commit()?;
+        Ok(copy)
+    }
+
+    /// Duplicates several live pages (the rows chosen in a table, H11.4)
+    /// in one transaction, each right below itself, with its subpages. If
+    /// one cannot be copied, none is. Returns the copies' ids, in order.
+    pub fn duplicate_pages(&mut self, ids: &[String]) -> Result<Vec<String>> {
+        let tx = self.conn.transaction()?;
+        let copies = ids
+            .iter()
+            .map(|id| duplicate_in(&tx, id, true))
+            .collect::<Result<_>>()?;
+        tx.commit()?;
+        Ok(copies)
+    }
+
     /// Creates the example templates (ADR 0010) the first time; never
     /// again, even if they are trashed. Returns whether it created them.
     pub fn create_example_templates(&mut self) -> Result<bool> {
@@ -2369,6 +2396,206 @@ fn is_template(conn: &Connection, id: &str) -> Result<bool> {
         [id],
         |r| r.get(0),
     )?)
+}
+
+/// Duplicates `id` in `tx` (see [`Database::duplicate_page`]).
+fn duplicate_in(tx: &Connection, id: &str, children: bool) -> Result<String> {
+    let (parent, title): (Option<String>, String) = tx
+        .query_row(
+            "SELECT parent_id, title FROM pages WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .context("La página no existe o está en la papelera")?;
+    ensure!(
+        !is_template(tx, id)?,
+        "Una plantilla no se duplica: usa «Nueva página desde plantilla»"
+    );
+    let shown = if title.trim().is_empty() {
+        "Sin título"
+    } else {
+        title.as_str()
+    };
+    let mut ids = HashMap::new();
+    let copy = copy_page_tree(
+        tx,
+        id,
+        parent.as_deref(),
+        &format!("{shown} (copia)"),
+        children,
+        &mut ids,
+    )?;
+    // Right below the original among its live siblings.
+    let mut siblings: Vec<String> = tx
+        .prepare(
+            "SELECT id FROM pages WHERE parent_id IS ?1 AND deleted_at IS NULL
+                 AND template_at IS NULL AND id <> ?2
+             ORDER BY sort_order, created_at, id",
+        )?
+        .query_map(params![parent, copy], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let at = siblings
+        .iter()
+        .position(|s| s == id)
+        .context("La página no aparece entre sus hermanas")?;
+    siblings.insert(at + 1, copy.clone());
+    for (position, sibling) in siblings.iter().enumerate() {
+        tx.execute(
+            "UPDATE pages SET sort_order = ?2 WHERE id = ?1",
+            params![sibling, position as i64],
+        )?;
+    }
+    Ok(copy)
+}
+
+/// A row's value as stored: property id, then text, number, flag, date
+/// and option (only the one of its kind is set).
+type StoredValue = (
+    String,
+    Option<String>,
+    Option<f64>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+);
+
+/// Copies the page `from` (and, with `children`, its live subpages) under
+/// `parent`, named `title` (its subpages keep theirs). `ids` maps the ids
+/// of copied properties and options to the new ones, for the views and
+/// values of the pages copied after them. Returns the new page's id.
+fn copy_page_tree(
+    tx: &Connection,
+    from: &str,
+    parent: Option<&str>,
+    title: &str,
+    children: bool,
+    ids: &mut HashMap<String, String>,
+) -> Result<String> {
+    let (kind, sort_order): (String, i64) = tx.query_row(
+        "SELECT kind, sort_order FROM pages WHERE id = ?1",
+        [from],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let id = Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO pages (id, title, parent_id, kind, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, title, parent, kind, sort_order],
+    )?;
+    copy_blocks(tx, from, &id, None)?;
+    if kind == PageKind::Database.as_str() {
+        copy_schema(tx, from, &id, ids)?;
+    }
+    // A row's values, for the copy's properties if they were copied too.
+    let values: Vec<StoredValue> = tx
+        .prepare(
+            "SELECT property_id, text_value, number_value, bool_value, date_value, option_id
+             FROM db_values WHERE page_id = ?1",
+        )?
+        .query_map([from], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mapped = |old: &String| ids.get(old).cloned().unwrap_or_else(|| old.clone());
+    for (property, text, number, flag, date, option) in &values {
+        tx.execute(
+            "INSERT INTO db_values
+                 (page_id, property_id, text_value, number_value, bool_value, date_value, option_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id,
+                mapped(property),
+                text,
+                number,
+                flag,
+                date,
+                option.as_ref().map(mapped)
+            ],
+        )?;
+    }
+    if children {
+        let subpages: Vec<(String, String)> = tx
+            .prepare(
+                "SELECT id, title FROM pages WHERE parent_id = ?1 AND deleted_at IS NULL
+                 ORDER BY sort_order, created_at, id",
+            )?
+            .query_map([from], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (child, title) in subpages {
+            copy_page_tree(tx, &child, Some(&id), &title, true, ids)?;
+        }
+    }
+    Ok(id)
+}
+
+/// Copies a database's properties (also deleted ones, which can still be
+/// restored), options and views to the database `to`, noting the new ids
+/// in `ids`. Views point at the new properties and options: their config
+/// names them by id, and ids are unique, so each old id is replaced.
+fn copy_schema(
+    tx: &Connection,
+    from: &str,
+    to: &str,
+    ids: &mut HashMap<String, String>,
+) -> Result<()> {
+    let properties: Vec<(String, String, String, i64, Option<String>)> = tx
+        .prepare(
+            "SELECT id, name, kind, position, deleted_at FROM db_properties
+             WHERE database_id = ?1 ORDER BY position, id",
+        )?
+        .query_map([from], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (old, name, kind, position, deleted) in properties {
+        let new = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO db_properties (id, database_id, name, kind, position, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![new, to, name, kind, position, deleted],
+        )?;
+        let options: Vec<(String, String, String, i64)> = tx
+            .prepare(
+                "SELECT id, name, color, position FROM db_select_options WHERE property_id = ?1",
+            )?
+            .query_map([&old], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (old_option, name, color, position) in options {
+            let new_option = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO db_select_options (id, property_id, name, color, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![new_option, new, name, color, position],
+            )?;
+            ids.insert(old_option, new_option);
+        }
+        ids.insert(old, new);
+    }
+    let views: Vec<(String, String, i64, String)> = tx
+        .prepare(
+            "SELECT name, kind, position, config FROM db_views WHERE database_id = ?1
+             ORDER BY position, id",
+        )?
+        .query_map([from], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (name, kind, position, mut config) in views {
+        for (old, new) in ids.iter() {
+            config = config.replace(old.as_str(), new);
+        }
+        tx.execute(
+            "INSERT INTO db_views (id, database_id, name, kind, position, config)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![Uuid::new_v4().to_string(), to, name, kind, position, config],
+        )?;
+    }
+    Ok(())
 }
 
 /// Copies the blocks of `from` to the new page `to` (new ids, same files

@@ -1143,6 +1143,157 @@ fn select_two(harness: &mut Harness<'_, SilexApp>) {
     click_button(harness, "Poner valor…");
 }
 
+// ---- H11.4: duplicating ----
+
+/// The sidebar row of `title`, right-clicked: its page menu.
+fn sidebar_menu(harness: &mut Harness<'_, SilexApp>, title: &str) {
+    harness
+        .get_all_by_label(title)
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .unwrap_or_else(|| panic!("sidebar row {title:?}"))
+        .click_secondary();
+    harness.run();
+}
+
+/// The live pages right below the page `id`.
+fn children_of(harness: &Harness<'_, SilexApp>, id: &str) -> Vec<String> {
+    harness
+        .state()
+        .pages
+        .iter()
+        .filter(|p| p.parent_id.as_deref() == Some(id))
+        .map(|p| p.title.clone())
+        .collect()
+}
+
+#[test]
+fn a_page_with_subpages_asks_before_it_is_duplicated() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    sidebar_menu(&mut harness, "Proyecto Silex");
+    menu_item(&harness, "Duplicar").expect("«Duplicar»").click();
+    harness.run();
+    assert_accessible(&harness, "duplicate dialog");
+    assert!(text_containing(&harness, "Tiene 2 subpáginas.").is_some());
+    // «Cancelar»: nothing.
+    click_button(&mut harness, "Cancelar");
+    let count = harness.state().pages.len();
+
+    sidebar_menu(&mut harness, "Proyecto Silex");
+    menu_item(&harness, "Duplicar").expect("«Duplicar»").click();
+    harness.run();
+    click_button(&mut harness, "Solo esta página");
+    let copy = harness.state().selected.clone().expect("the copy opens");
+    assert_eq!(harness.state().title, "Proyecto Silex (copia)");
+    assert!(children_of(&harness, &copy).is_empty());
+    assert_eq!(harness.state().pages.len(), count + 1);
+
+    sidebar_menu(&mut harness, "Proyecto Silex");
+    menu_item(&harness, "Duplicar").expect("«Duplicar»").click();
+    harness.run();
+    click_button(&mut harness, "Con las subpáginas");
+    let copy = harness.state().selected.clone().expect("the copy opens");
+    assert_eq!(
+        children_of(&harness, &copy),
+        ["Diseño de la interfaz", "Guía de estilo"]
+    );
+    // A page without subpages is copied at once, also from the palette.
+    let recetas = harness
+        .state()
+        .pages
+        .iter()
+        .find(|p| p.title == "Recetas")
+        .map(|p| p.id.clone())
+        .expect("Recetas");
+    harness.state_mut().open_page(recetas)?;
+    harness.run();
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .run_command(&ctx, silex_desktop::palette::Command::DuplicatePage)?;
+    harness.run();
+    assert!(harness.state().duplicate_dialog.is_none(), "nothing to ask");
+    assert_eq!(harness.state().title, "Recetas (copia)");
+    Ok(())
+}
+
+#[test]
+fn rows_are_duplicated_below_themselves_and_cmd_z_takes_them_back() -> anyhow::Result<()> {
+    use eframe::egui::{Key, Modifiers};
+    use silex_desktop::property::CellValue;
+    let (app, _, _) = database_app()?;
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Acciones de «Rayuela»");
+    menu_item(&harness, "Duplicar").expect("«Duplicar»").click();
+    harness.run();
+    assert_eq!(
+        shown_rows(&harness),
+        ["Rayuela", "Rayuela (copia)", "Pedro Páramo", "Ficciones"]
+    );
+    {
+        let state = harness.state();
+        let d = state.database.as_ref().expect("open");
+        let copy = &d.rows[d.order[1]].id;
+        let autor = &d
+            .properties
+            .iter()
+            .find(|p| p.name == "Autor")
+            .expect("Autor")
+            .id;
+        assert_eq!(
+            d.values.get(copy).and_then(|c| c.get(autor)),
+            Some(&CellValue::Text("Julio Cortázar".into()))
+        );
+    }
+    assert!(harness.state().database.is_some(), "the table stays open");
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    harness.run();
+    assert_eq!(
+        shown_rows(&harness),
+        ["Rayuela", "Pedro Páramo", "Ficciones"]
+    );
+
+    // The chosen rows, together: one step of Cmd+Z.
+    harness.get_by_label("Seleccionar «Rayuela»").click();
+    harness.run();
+    harness.get_by_label("Seleccionar «Ficciones»").click();
+    harness.run();
+    click_button(&mut harness, "Duplicar");
+    assert_eq!(
+        shown_rows(&harness),
+        [
+            "Rayuela",
+            "Rayuela (copia)",
+            "Pedro Páramo",
+            "Ficciones",
+            "Ficciones (copia)"
+        ]
+    );
+    assert!(chosen_rows(&harness).is_empty());
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    harness.run();
+    assert_eq!(
+        shown_rows(&harness),
+        ["Rayuela", "Pedro Páramo", "Ficciones"]
+    );
+    Ok(())
+}
+
+#[test]
+fn duplicate_dialog() -> anyhow::Result<()> {
+    snapshot_with(
+        "duplicate_dialog_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            sidebar_menu(harness, "Proyecto Silex");
+            if let Some(item) = menu_item(harness, "Duplicar") {
+                item.click();
+            }
+            harness.run();
+            harness.event(egui::Event::PointerMoved(egui::pos2(1000.0, 700.0)));
+        },
+    )
+}
+
 // ---- H11.3, ADR 0013: deleting for good from the trash ----
 
 /// The demo app with «Recetas» and «Proyecto Silex» (with its two

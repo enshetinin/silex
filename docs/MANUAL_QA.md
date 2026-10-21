@@ -313,3 +313,12 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - «Vaciar la papelera»: la confirmación cuenta todas las páginas; tras confirmar, la papelera queda vacía y su número en la barra lateral, a 0.
 - «Copias y exportación» → «Liberar espacio»: los adjuntos de las páginas borradas aparecen como sin uso y se liberan.
 - Restaura una copia de seguridad anterior: lo borrado vuelve. Cierra y abre la app: lo borrado sigue borrado.
+
+## 35. Duplicar (H11.4)
+- Clic derecho en una página sin subpáginas → «Duplicar»: aparece «Título (copia)» justo debajo y se abre, con el mismo contenido, imágenes, archivos y enlaces. No es favorita aunque el original lo sea.
+- En una página con subpáginas, «Duplicar» pregunta: «Con las subpáginas» copia el árbol entero; «Solo esta página», solo ella; «Cancelar» (o Esc), nada.
+- Una base: «Con las filas» o «Solo la estructura». La copia tiene las mismas columnas, opciones, colores y vistas (con sus filtros, orden y agrupación funcionando); cambiar una opción en la copia no toca el original.
+- En la tabla, «⋯» de una fila → «Duplicar»: la copia queda justo debajo, con sus valores. Cmd/Ctrl+Z la quita.
+- Elige varias filas → «Duplicar» en la barra: cada copia debajo de su original; un Cmd/Ctrl+Z las quita todas.
+- Cmd+K → «Duplicar la página» hace lo mismo con la página abierta.
+- «Copias y exportación»: el espacio de adjuntos no crece al duplicar una página con archivos. Cierra y abre la app: las copias siguen ahí.

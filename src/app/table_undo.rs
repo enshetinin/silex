@@ -40,6 +40,8 @@ pub(super) enum TableOp {
     DeleteProperty(String),
     /// Several rows sent to the trash together (H11.2).
     TrashRows(Vec<String>),
+    /// Several rows added together: the copies of the chosen rows (H11.4).
+    AddRows(Vec<String>),
     /// A value put in several cells at once (H11.2).
     Cells(Vec<CellChange>),
 }
@@ -192,8 +194,11 @@ impl SilexApp {
                     }
                 }
             }
-            TableOp::TrashRows(rows) => {
-                if undo {
+            TableOp::TrashRows(rows) | TableOp::AddRows(rows) => {
+                // Undoing new rows sends them to the trash; redoing brings
+                // them back.
+                let restore = matches!(op, TableOp::TrashRows(_)) == undo;
+                if restore {
                     self.db.restore_pages(rows)?;
                 } else {
                     self.db.trash_pages(rows)?;
@@ -201,7 +206,7 @@ impl SilexApp {
                 self.reload_pages()?;
                 if let Some(state) = self.database.as_mut() {
                     state.values = self.db.database_values(&state.id)?;
-                    if undo {
+                    if restore {
                         state.apply_view();
                     }
                 }

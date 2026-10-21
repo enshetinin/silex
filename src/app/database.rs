@@ -229,6 +229,8 @@ pub(super) enum TableAction {
     AddOption(String, String),
     /// The chosen rows to the trash (H11.2).
     TrashSelected,
+    /// A copy of each chosen row, right below it (H11.4).
+    DuplicateSelected,
     /// A value (none: empty) in one property of the chosen rows.
     SetSelected(String, Option<CellValue>),
     /// Views as tabs (H6.3b): by index in `views`, or by id.
@@ -581,6 +583,7 @@ impl SilexApp {
                 self.reload_properties()?;
             }
             TableAction::TrashSelected => self.trash_selected(database)?,
+            TableAction::DuplicateSelected => self.duplicate_selected()?,
             TableAction::SetSelected(property, value) => self.set_selected(&property, value)?,
             TableAction::SwitchView(index) => self.switch_view(index)?,
             TableAction::AddView(kind) => self.add_view(kind)?,

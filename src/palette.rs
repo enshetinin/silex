@@ -11,6 +11,8 @@ pub enum Command {
     NewSubpage,
     NewRow,
     RenamePage,
+    /// A copy of the open page right below it (H11.4).
+    DuplicatePage,
     AddFavorite,
     RemoveFavorite,
     ExportPage,
@@ -64,13 +66,14 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 26] = [
+    pub const ALL: [Command; 27] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
         Command::NewRow,
         Command::NewFromTemplate,
         Command::RenamePage,
+        Command::DuplicatePage,
         Command::AddFavorite,
         Command::RemoveFavorite,
         Command::ExportPage,
@@ -100,6 +103,7 @@ impl Command {
             Command::NewSubpage => "Nueva subpágina",
             Command::NewRow => "Nueva fila",
             Command::RenamePage => "Renombrar la página",
+            Command::DuplicatePage => "Duplicar la página",
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
@@ -132,6 +136,7 @@ impl Command {
             Command::NewSubpage => &["crear", "hija", "anidada", "child"],
             Command::NewRow => &["crear", "entrada", "registro", "row"],
             Command::RenamePage => &["titulo", "nombre", "cambiar", "rename"],
+            Command::DuplicatePage => &["copiar", "clonar", "copia", "duplicate", "copy"],
             Command::AddFavorite => &["estrella", "marcar", "favorite", "star"],
             Command::RemoveFavorite => &["estrella", "desmarcar", "favorite", "star"],
             Command::ExportPage => &["md", "descargar", "guardar", "export"],
@@ -184,6 +189,8 @@ impl Command {
             }
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
             Command::AddFavorite => cx.page_open && !cx.favorite && !cx.template_open,
+            // A template makes pages with «Nueva página desde plantilla».
+            Command::DuplicatePage => cx.page_open && !cx.template_open,
             Command::RemoveFavorite => cx.page_open && cx.favorite,
             // A page: not a database, a row of one, or a template.
             Command::SaveAsTemplate => {

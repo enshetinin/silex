@@ -18,6 +18,7 @@ mod database;
 mod date_picker;
 mod dialogs;
 mod document;
+mod duplicate;
 mod files;
 mod frame;
 pub mod icons;
@@ -47,7 +48,7 @@ mod view_tabs;
 
 pub use self::startup::StartupError;
 use self::{
-    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, links::*,
+    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, duplicate::*, files::*, links::*,
     page_history::*, privacy::*, read_only::*, row_page::*, row_selection::*, search::*,
     side_panel::*, sidebar::*, space::*, tab_bar::*, table_undo::*, templates::*, view_menus::*,
     view_tabs::*,
@@ -77,6 +78,8 @@ pub struct SilexApp {
     expanded: HashSet<String>,
     trash_count: usize,
     trash_dialog: Option<TrashDialog>,
+    /// «Duplicar» asking about the subpages (H11.4).
+    duplicate_dialog: Option<DuplicateDialog>,
     favorites: Vec<Page>,
     /// The search window (Cmd+K), while open.
     search: Option<SearchWindow>,
@@ -232,6 +235,7 @@ impl SilexApp {
             expanded: HashSet::new(),
             trash_count: 0,
             trash_dialog: None,
+            duplicate_dialog: None,
             favorites: Vec::new(),
             search: None,
             database: None,
@@ -846,6 +850,7 @@ impl SilexApp {
         self.close_dialog(&ctx);
         self.restore_dialog(&ctx);
         self.trash_dialog(&ctx);
+        self.duplicate_dialog(&ctx);
         self.free_space_dialog(&ctx);
         self.link_picker(&ctx);
         self.link_restore_dialog(&ctx);
