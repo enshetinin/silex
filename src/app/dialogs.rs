@@ -335,7 +335,7 @@ impl SilexApp {
             return;
         };
         let (mut undo, mut close) = (false, false);
-        Self::banner(ui, icons::TRASH, &notice.text(), |ui| {
+        Self::banner(ui, icons::TRASH, &notice.text, |ui| {
             // Left to right, so Tab visits them in the order they are seen.
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 right_aligned(ui, egui::Id::unique("silex-trash-notice"), |ui| {
@@ -345,7 +345,7 @@ impl SilexApp {
                     ));
                     undo = ui
                         .button("Deshacer")
-                        .on_hover_text(format!("Devolver la fila a su sitio   {shortcut}"))
+                        .on_hover_text(format!("Devolver a su sitio   {shortcut}"))
                         .accessible_name("Deshacer el envío a la papelera")
                         .clicked();
                     close = ui

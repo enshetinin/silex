@@ -289,10 +289,19 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - Windows (Narrador) y Linux (Orca), si es posible: lo mismo, y anota lo que no se lea.
 
 ## 32. Borrar filas a la vista (H11.1)
-- En «Lecturas», pasa el ratón por una fila: aparece «⋯» al final de la fila, bajo el «+» de la cabecera. Con muchas columnas (o la ventana estrecha), sigue en el borde derecho visible sin desplazarse. Su menú es el mismo que el del clic derecho en el nombre. «Enviar a la papelera» quita la fila y muestra «Fila «…» enviada a la papelera.» con «Deshacer». Pulsa «Deshacer»: la fila vuelve a su sitio.
+- En «Lecturas», pasa el ratón por una fila: aparece «⋯» al final de la fila, bajo el «+» de la cabecera. Con muchas columnas (o la ventana estrecha), va en una franja fija a la derecha: no se desplaza ni tapa la última celda. Su menú es el mismo que el del clic derecho en el nombre. «Enviar a la papelera» quita la fila y muestra «Fila «…» enviada a la papelera.» con «Deshacer». Pulsa «Deshacer»: la fila vuelve a su sitio.
 - Con Tab, llega a «⋯» tras la última celda de la fila (se ve con el foco) y pulsa Supr: la fila va a la papelera. Cmd/Ctrl+Z la devuelve.
 - Enfoca una casilla o una celda sin escribir en ella (Esc tras editarla) y pulsa Retroceso: la fila va a la papelera. En el nombre de la fila, Retroceso solo borra letras.
 - Tras enviar una fila a la papelera, cambia otra celda: el aviso desaparece (su «Deshacer» ya no la devolvería).
 - Con un menú de celda abierto (selección o fecha), Supr y Retroceso no borran la fila.
 - En el tablero: pasa el ratón por una tarjeta y usa su «⋯» (incluye «Mover a»); enfoca una tarjeta con Tab y pulsa Supr. Arrastrar desde «⋯» no mueve la tarjeta.
 - Con VoiceOver, «⋯» se anuncia como «Acciones de «Título»» y el botón del aviso como «Deshacer el envío a la papelera».
+
+## 33. Varias filas a la vez (H11.2)
+- En «Lecturas», pasa el ratón por una fila: aparece su casilla delante del nombre. Márcala: la fila se resalta y la barra de herramientas pasa a «1 fila seleccionada», «Poner valor…», «Enviar a la papelera» y «×».
+- Mayús+clic en la casilla de otra fila: se eligen todas las de en medio. Un clic en una elegida la quita.
+- La casilla de la cabecera elige todas las filas visibles (con un filtro, solo las que se ven); se ve a medias si hay algunas; otro clic las quita todas.
+- «Poner valor…» → «Leído» → «Marcar»: todas las elegidas quedan marcadas. Cmd/Ctrl+Z las deja como estaban, de una vez. Prueba también una opción de «Estado», un número (y uno mal escrito: lo explica), una fecha con «Hoy» y «Vaciar».
+- «Enviar a la papelera»: se van todas y el aviso dice «N filas enviadas a la papelera.»; «Deshacer» las devuelve a su sitio. En la papelera aparecen como entradas separadas.
+- Esc (sin escribir en una celda) y «×» quitan la selección. Cambiar de vista, añadir un filtro o un orden, u ocultar una columna también.
+- Cierra y abre la app tras cada acción: los cambios siguen ahí.

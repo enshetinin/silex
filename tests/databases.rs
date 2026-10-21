@@ -237,3 +237,99 @@ fn database_markdown_has_a_column_per_property() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---- H11.2: acting on several rows at once ----
+
+#[test]
+fn several_rows_go_to_the_trash_together_and_come_back_together() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let rows: Vec<String> = ["Rayuela", "Pedro Páramo", "Ficciones", "Aleph"]
+        .into_iter()
+        .map(|t| db.create_row(&base, t))
+        .collect::<anyhow::Result<_>>()?;
+    // A row with a subpage takes it along.
+    db.create_page("Notas", Some(&rows[0]))?;
+    let chosen = [rows[0].clone(), rows[2].clone(), rows[3].clone()];
+    assert_eq!(db.trash_pages(&chosen)?, 4);
+    assert_eq!(titles(&db.database_rows(&base)?), ["Pedro Páramo"]);
+    // Each row is its own trash entry, and can come back alone…
+    assert_eq!(db.list_trash()?.len(), 3);
+    db.restore_page(&rows[3])?;
+    assert_eq!(titles(&db.database_rows(&base)?), ["Pedro Páramo", "Aleph"]);
+    // …or with the others, in one go, in their places.
+    db.restore_pages(&chosen[..2])?;
+    assert_eq!(
+        titles(&db.database_rows(&base)?),
+        ["Rayuela", "Pedro Páramo", "Ficciones", "Aleph"]
+    );
+    assert_eq!(
+        titles(&db.list_pages()?)
+            .iter()
+            .filter(|t| **t == "Notas")
+            .count(),
+        1
+    );
+    assert!(db.list_trash()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn restoring_several_rows_is_all_or_nothing() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let a = db.create_row(&base, "Rayuela")?;
+    let b = db.create_row(&base, "Ficciones")?;
+    db.trash_pages(std::slice::from_ref(&a))?;
+    // `b` is not in the trash: nothing comes back.
+    assert!(db.restore_pages(&[a.clone(), b.clone()]).is_err());
+    assert_eq!(titles(&db.database_rows(&base)?), ["Ficciones"]);
+    // Trashing nothing (or only gone rows) changes nothing.
+    assert_eq!(db.trash_pages(&[])?, 0);
+    assert_eq!(db.trash_pages(&[a])?, 0);
+    Ok(())
+}
+
+#[test]
+fn several_values_are_set_in_one_transaction_or_not_at_all() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let a = db.create_row(&base, "Rayuela")?;
+    let b = db.create_row(&base, "Ficciones")?;
+    let leido = db.add_property(&base, "Leído", PropertyKind::Checkbox)?;
+    let paginas = db.add_property(&base, "Páginas", PropertyKind::Number)?;
+    let yes = CellValue::Checkbox(true);
+    db.set_values(&[
+        (a.as_str(), leido.as_str(), Some(&yes)),
+        (b.as_str(), leido.as_str(), Some(&yes)),
+    ])?;
+    let values = db.database_values(&base)?;
+    for row in [&a, &b] {
+        assert_eq!(values.get(row).and_then(|c| c.get(&leido)), Some(&yes));
+    }
+    // A value of the wrong kind in the middle: nothing changes.
+    let number = CellValue::Number(10.0);
+    let wrong = CellValue::Text("diez".into());
+    assert!(
+        db.set_values(&[
+            (a.as_str(), paginas.as_str(), Some(&number)),
+            (b.as_str(), paginas.as_str(), Some(&wrong)),
+        ])
+        .is_err()
+    );
+    assert!(
+        db.database_values(&base)?
+            .get(&a)
+            .and_then(|c| c.get(&paginas))
+            .is_none()
+    );
+    // `None` clears.
+    db.set_values(&[
+        (a.as_str(), leido.as_str(), None),
+        (b.as_str(), leido.as_str(), None),
+    ])?;
+    let values = db.database_values(&base)?;
+    assert!(values.get(&a).and_then(|c| c.get(&leido)).is_none());
+    assert!(values.get(&b).and_then(|c| c.get(&leido)).is_none());
+    Ok(())
+}

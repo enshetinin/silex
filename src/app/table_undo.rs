@@ -5,11 +5,12 @@
 //! and starts empty each time the database is opened.
 //!
 //! Undoable: cell values, row names, adding a row (undone by sending it to
-//! the trash), sending a row to the trash, adding and deleting properties.
+//! the trash), sending a row to the trash, adding and deleting properties,
+//! and the actions on several rows at once (H11.2), each as one step.
 //! Not undoable here: renaming or moving properties, options and views.
 //!
-//! A row sent to the trash from the table or the board (menu, «⋯», Supr)
-//! shows a notice with «Deshacer» (H11.1). It is the same step as Cmd+Z,
+//! Rows sent to the trash from the table or the board (menu, «⋯», Supr,
+//! the selection bar) show a notice with «Deshacer» (H11.1). It is the same step as Cmd+Z,
 //! so the notice leaves as soon as another change is recorded or anything
 //! is undone: its button never undoes something else.
 use anyhow::Result;
@@ -37,20 +38,28 @@ pub(super) enum TableOp {
     TrashRow(String),
     AddProperty(String),
     DeleteProperty(String),
+    /// Several rows sent to the trash together (H11.2).
+    TrashRows(Vec<String>),
+    /// A value put in several cells at once (H11.2).
+    Cells(Vec<CellChange>),
 }
 
-/// The notice of a row just sent to the trash (H11.1).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One cell changed by an action on several rows (H11.2).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct CellChange {
+    pub(super) row: String,
+    pub(super) property: String,
+    pub(super) before: Option<CellValue>,
+    pub(super) after: Option<CellValue>,
+}
+
+/// The notice of rows just sent to the trash (H11.1): what it says, and
+/// the step «Deshacer» undoes.
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct TrashNotice {
     pub(super) database: String,
-    pub(super) row: String,
-    pub(super) title: String,
-}
-
-impl TrashNotice {
-    pub(super) fn text(&self) -> String {
-        format!("Fila «{}» enviada a la papelera.", self.title)
-    }
+    pub(super) op: TableOp,
+    pub(super) text: String,
 }
 
 #[derive(Debug, Default)]
@@ -183,6 +192,30 @@ impl SilexApp {
                     }
                 }
             }
+            TableOp::TrashRows(rows) => {
+                if undo {
+                    self.db.restore_pages(rows)?;
+                } else {
+                    self.db.trash_pages(rows)?;
+                }
+                self.reload_pages()?;
+                if let Some(state) = self.database.as_mut() {
+                    state.values = self.db.database_values(&state.id)?;
+                    if undo {
+                        state.apply_view();
+                    }
+                }
+            }
+            TableOp::Cells(changes) => {
+                let cells = changes
+                    .iter()
+                    .map(|c| {
+                        let value = if undo { &c.before } else { &c.after };
+                        (c.row.clone(), c.property.clone(), value.clone())
+                    })
+                    .collect();
+                self.store_cells(cells)?;
+            }
             TableOp::AddProperty(property) | TableOp::DeleteProperty(property) => {
                 let delete = matches!(op, TableOp::AddProperty(_)) == undo;
                 if delete {
@@ -201,10 +234,10 @@ impl SilexApp {
     /// last change. Otherwise it is dropped.
     pub(super) fn current_trash_notice(&mut self) -> Option<TrashNotice> {
         let notice = self.trash_notice.as_ref()?;
-        let current = self.database.as_ref().is_some_and(|d| {
-            d.id == notice.database
-                && d.history.last() == Some(&TableOp::TrashRow(notice.row.clone()))
-        });
+        let current = self
+            .database
+            .as_ref()
+            .is_some_and(|d| d.id == notice.database && d.history.last() == Some(&notice.op));
         if !current {
             self.trash_notice = None;
         }

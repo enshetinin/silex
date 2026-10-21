@@ -1081,75 +1081,18 @@ impl Database {
         value: Option<&CellValue>,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        let (database, kind): (String, String) = tx
-            .query_row(
-                "SELECT database_id, kind FROM db_properties WHERE id = ?1 AND deleted_at IS NULL",
-                [property_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .context("La propiedad no existe o está borrada")?;
-        let kind = PropertyKind::parse(&kind)
-            .with_context(|| format!("tipo de propiedad desconocido: {kind}"))?;
-        let is_row: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND parent_id = ?2 AND deleted_at IS NULL)",
-            params![row_id, database],
-            |r| r.get(0),
-        )?;
-        ensure!(
-            is_row,
-            "La fila no existe, está en la papelera o es de otra base de datos"
-        );
-        if let Some(value) = value {
-            ensure!(
-                value.kind() == kind,
-                "Un valor de tipo {} no cabe en una propiedad de tipo {}",
-                value.kind().label(),
-                kind.label()
-            );
-        }
-        match value.filter(|v| !v.is_empty()) {
-            None => {
-                tx.execute(
-                    "DELETE FROM db_values WHERE page_id = ?1 AND property_id = ?2",
-                    params![row_id, property_id],
-                )?;
-            }
-            Some(value) => {
-                let (mut text, mut number, mut flag, mut date, mut option) =
-                    (None, None, None, None, None);
-                match value {
-                    CellValue::Text(t) => text = Some(t.as_str()),
-                    CellValue::Number(n) => {
-                        ensure!(n.is_finite(), "El número no es válido");
-                        number = Some(*n);
-                    }
-                    CellValue::Checkbox(on) => flag = Some(i64::from(*on)),
-                    CellValue::Date(d) => date = Some(d.to_string()),
-                    CellValue::Select(id) => {
-                        let belongs: bool = tx.query_row(
-                            "SELECT EXISTS (SELECT 1 FROM db_select_options WHERE id = ?1 AND property_id = ?2)",
-                            params![id, property_id],
-                            |r| r.get(0),
-                        )?;
-                        ensure!(belongs, "La opción no es de esta propiedad");
-                        option = Some(id.as_str());
-                    }
-                }
-                tx.execute(
-                    "INSERT INTO db_values
-                         (page_id, property_id, text_value, number_value, bool_value, date_value, option_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                     ON CONFLICT (page_id, property_id) DO UPDATE SET
-                         text_value = excluded.text_value,
-                         number_value = excluded.number_value,
-                         bool_value = excluded.bool_value,
-                         date_value = excluded.date_value,
-                         option_id = excluded.option_id,
-                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-                    params![row_id, property_id, text, number, flag, date, option],
-                )?;
-            }
+        write_value(&tx, row_id, property_id, value)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Sets several cells in one transaction (H11.2), each as
+    /// [`Database::set_value`] would: (row, property, value). If one of
+    /// them is rejected, none changes.
+    pub fn set_values(&mut self, cells: &[(&str, &str, Option<&CellValue>)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for (row_id, property_id, value) in cells {
+            write_value(&tx, row_id, property_id, *value)?;
         }
         tx.commit()?;
         Ok(())
@@ -1741,6 +1684,14 @@ impl Database {
     /// restoring brings back exactly what was trashed together. Returns the
     /// number of pages trashed (0 if the page was not live).
     pub fn trash_page(&self, id: &str) -> Result<usize> {
+        self.trash_pages(&[id.to_owned()])
+    }
+
+    /// Sends several pages (with their live subpages) to the trash in one
+    /// transaction (H11.2). Each stays its own trash entry and can be
+    /// restored alone; [`Database::restore_pages`] brings them back
+    /// together. Returns the number of pages trashed.
+    pub fn trash_pages(&self, ids: &[String]) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;
         // Strictly later than any existing deleted_at (millisecond resolution),
         // so two trash operations never merge into one branch.
@@ -1752,16 +1703,19 @@ impl Database {
             [],
             |r| r.get(0),
         )?;
-        let trashed = tx.execute(
-            "WITH RECURSIVE branch(id) AS (
-                 SELECT id FROM pages WHERE id = ?1 AND deleted_at IS NULL
-                 UNION
-                 SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
-                 WHERE p.deleted_at IS NULL
-             )
-             UPDATE pages SET deleted_at = ?2 WHERE id IN (SELECT id FROM branch)",
-            params![id, stamp],
-        )?;
+        let mut trashed = 0;
+        for id in ids {
+            trashed += tx.execute(
+                "WITH RECURSIVE branch(id) AS (
+                     SELECT id FROM pages WHERE id = ?1 AND deleted_at IS NULL
+                     UNION
+                     SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
+                     WHERE p.deleted_at IS NULL
+                 )
+                 UPDATE pages SET deleted_at = ?2 WHERE id IN (SELECT id FROM branch)",
+                params![id, stamp],
+            )?;
+        }
         tx.commit()?;
         Ok(trashed)
     }
@@ -1812,40 +1766,18 @@ impl Database {
     /// If its parent is no longer live, the page comes back at the root.
     pub fn restore_page(&mut self, id: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
-        let (parent, stamp): (Option<String>, String) = tx
-            .query_row(
-                "SELECT parent_id, deleted_at FROM pages WHERE id = ?1 AND deleted_at IS NOT NULL",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .context("La página no está en la papelera")?;
-        tx.execute(
-            "WITH RECURSIVE branch(id) AS (
-                 SELECT ?1
-                 UNION
-                 SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
-                 WHERE p.deleted_at = ?2
-             )
-             UPDATE pages SET deleted_at = NULL WHERE id IN (SELECT id FROM branch)",
-            params![id, stamp],
-        )?;
-        let parent_is_live = match &parent {
-            Some(parent) => tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND deleted_at IS NULL)",
-                [parent],
-                |r| r.get(0),
-            )?,
-            None => true,
-        };
-        if !parent_is_live {
-            tx.execute(
-                "UPDATE pages SET parent_id = NULL,
-                     sort_order = (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages
-                                   WHERE parent_id IS NULL AND id <> ?1)
-                 WHERE id = ?1",
-                [id],
-            )?;
+        restore_branch(&tx, id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Restores several trashed pages in one transaction (H11.2), each as
+    /// [`Database::restore_page`] would. If one is not in the trash, none
+    /// comes back.
+    pub fn restore_pages(&mut self, ids: &[String]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for id in ids {
+            restore_branch(&tx, id)?;
         }
         tx.commit()?;
         Ok(())
@@ -2066,6 +1998,127 @@ fn read_cell(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Option<CellVa
     Ok(CellValue::from_columns(
         kind, text, number, flag, date, option,
     ))
+}
+
+/// Writes one cell inside `tx` (see [`Database::set_value`] for the rules).
+fn write_value(
+    tx: &Connection,
+    row_id: &str,
+    property_id: &str,
+    value: Option<&CellValue>,
+) -> Result<()> {
+    let (database, kind): (String, String) = tx
+        .query_row(
+            "SELECT database_id, kind FROM db_properties WHERE id = ?1 AND deleted_at IS NULL",
+            [property_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .context("La propiedad no existe o está borrada")?;
+    let kind = PropertyKind::parse(&kind)
+        .with_context(|| format!("tipo de propiedad desconocido: {kind}"))?;
+    let is_row: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND parent_id = ?2 AND deleted_at IS NULL)",
+        params![row_id, database],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        is_row,
+        "La fila no existe, está en la papelera o es de otra base de datos"
+    );
+    if let Some(value) = value {
+        ensure!(
+            value.kind() == kind,
+            "Un valor de tipo {} no cabe en una propiedad de tipo {}",
+            value.kind().label(),
+            kind.label()
+        );
+    }
+    match value.filter(|v| !v.is_empty()) {
+        None => {
+            tx.execute(
+                "DELETE FROM db_values WHERE page_id = ?1 AND property_id = ?2",
+                params![row_id, property_id],
+            )?;
+        }
+        Some(value) => {
+            let (mut text, mut number, mut flag, mut date, mut option) =
+                (None, None, None, None, None);
+            match value {
+                CellValue::Text(t) => text = Some(t.as_str()),
+                CellValue::Number(n) => {
+                    ensure!(n.is_finite(), "El número no es válido");
+                    number = Some(*n);
+                }
+                CellValue::Checkbox(on) => flag = Some(i64::from(*on)),
+                CellValue::Date(d) => date = Some(d.to_string()),
+                CellValue::Select(id) => {
+                    let belongs: bool = tx.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM db_select_options WHERE id = ?1 AND property_id = ?2)",
+                        params![id, property_id],
+                        |r| r.get(0),
+                    )?;
+                    ensure!(belongs, "La opción no es de esta propiedad");
+                    option = Some(id.as_str());
+                }
+            }
+            tx.execute(
+                "INSERT INTO db_values
+                     (page_id, property_id, text_value, number_value, bool_value, date_value, option_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (page_id, property_id) DO UPDATE SET
+                     text_value = excluded.text_value,
+                     number_value = excluded.number_value,
+                     bool_value = excluded.bool_value,
+                     date_value = excluded.date_value,
+                     option_id = excluded.option_id,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                params![row_id, property_id, text, number, flag, date, option],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Restores one trashed page and the subpages trashed with it, inside `tx`
+/// (see [`Database::restore_page`]).
+fn restore_branch(tx: &Connection, id: &str) -> Result<()> {
+    let (parent, stamp): (Option<String>, String) = tx
+        .query_row(
+            "SELECT parent_id, deleted_at FROM pages WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .context("La página no está en la papelera")?;
+    tx.execute(
+        "WITH RECURSIVE branch(id) AS (
+             SELECT ?1
+             UNION
+             SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
+             WHERE p.deleted_at = ?2
+         )
+         UPDATE pages SET deleted_at = NULL WHERE id IN (SELECT id FROM branch)",
+        params![id, stamp],
+    )?;
+    let parent_is_live = match &parent {
+        Some(parent) => tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND deleted_at IS NULL)",
+            [parent],
+            |r| r.get(0),
+        )?,
+        None => true,
+    };
+    if !parent_is_live {
+        tx.execute(
+            "UPDATE pages SET parent_id = NULL,
+                 sort_order = (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages
+                               WHERE parent_id IS NULL AND id <> ?1)
+             WHERE id = ?1",
+            [id],
+        )?;
+    }
+    Ok(())
 }
 
 /// Kind of a live page; `None` if it is missing or in the trash.

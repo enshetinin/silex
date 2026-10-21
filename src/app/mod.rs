@@ -28,6 +28,7 @@ mod palette;
 mod privacy;
 mod read_only;
 mod row_page;
+mod row_selection;
 mod search;
 mod side_panel;
 mod sidebar;
@@ -47,8 +48,9 @@ mod view_tabs;
 pub use self::startup::StartupError;
 use self::{
     blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, links::*,
-    page_history::*, privacy::*, read_only::*, row_page::*, search::*, side_panel::*, sidebar::*,
-    space::*, tab_bar::*, table_undo::*, templates::*, view_menus::*, view_tabs::*,
+    page_history::*, privacy::*, read_only::*, row_page::*, row_selection::*, search::*,
+    side_panel::*, sidebar::*, space::*, tab_bar::*, table_undo::*, templates::*, view_menus::*,
+    view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop

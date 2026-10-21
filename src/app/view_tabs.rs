@@ -265,6 +265,7 @@ impl SilexApp {
             .unwrap_or(was)
             .min(state.views.len().saturating_sub(1));
         state.pinned.clear();
+        state.clear_selection();
         state.apply_view();
         self.remember_view();
         Ok(())
@@ -288,6 +289,7 @@ impl SilexApp {
         {
             state.view = index;
             state.pinned.clear();
+            state.clear_selection();
             state.editing = None;
             state.apply_view();
         }
