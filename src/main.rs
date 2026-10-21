@@ -8,6 +8,7 @@ use anyhow::Result;
 use silex_desktop::db::Database;
 
 fn main() -> Result<()> {
+    let started = std::time::Instant::now();
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Silex")
         .with_app_id(app::APP_ID)
@@ -22,7 +23,14 @@ fn main() -> Result<()> {
     };
     // A packaged app has no terminal: if it cannot start, say why on screen.
     let app: Box<dyn eframe::App> = match Database::open_default().and_then(app::SilexApp::new) {
-        Ok(app) => Box::new(app),
+        Ok(mut app) => {
+            // H9.3b: `SILEX_STARTUP_TIMING=1` prints how long the window took
+            // to show the app; `=exit` also closes it (for measuring).
+            if let Some(timing) = std::env::var_os("SILEX_STARTUP_TIMING") {
+                app.time_startup(started, timing == "exit");
+            }
+            Box::new(app)
+        }
         Err(err) => {
             eprintln!("Silex: {err:#}");
             let path = Database::default_path().ok();

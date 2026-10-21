@@ -155,3 +155,17 @@ Cada decisión irreversible (formato de documento, sincronización, cifrado, edi
 - `0011-tabs-and-split-view.md`: pestañas con deshacer propio y vista dividida de consulta (solo lectura).
 - `0012-encryption-and-sync.md`: evaluación de cifrado y sincronización; cifrado de disco del sistema, datos locales endurecidos y sin sincronización por ahora.
 - `0006-databases.md`: bases de datos como páginas, filas como subpáginas, propiedades tipadas en tablas propias y vistas con configuración JSON (Hito 6).
+
+## Rendimiento (H9.3b)
+
+Objetivos, fijados con estas medidas (release, Apple M3, macOS):
+
+| Qué | Objetivo | Medido |
+|---|---|---|
+| Ventana lista (desde `main` hasta el segundo frame), en caliente | < 300 ms | ~137 ms |
+| Ventana lista, primer arranque (sin cachés del sistema) | < 1 s | ~670 ms |
+| Abrir la base y crear la app, 5000 páginas | < 50 ms | 0,5 ms + 5,6 ms |
+| Abrir una página y dibujar su primer frame, 5000 páginas | < 16 ms | 3,2 ms de media, 4,6 ms el peor |
+| Un frame en reposo (CPU, sin GPU), 5000 páginas | < 4 ms | 0,9 ms |
+
+Casi todo el arranque es crear la ventana y la GPU (wgpu); lo de Silex (abrir la base, leer las páginas, el primer frame con las fuentes) son unos 15 ms con 5000 páginas. Cómo medir: `SILEX_DB_PATH=<base de prueba> SILEX_STARTUP_TIMING=exit target/release/silex-desktop` escribe «ventana lista en …» y cierra la app (con `=1` la deja abierta); la base de prueba sale de `cargo run --release --example seed -- <ruta-nueva>`, y sus copias quedan junto a ella. Las medidas por tamaño: `cargo test --release --bin silex-desktop startup_and_navigation -- --ignored --nocapture` (100, 1000 y 5000 páginas en una base en disco). No son tests de CI: los tiempos dependen de la máquina. Windows y Linux, sin medir.

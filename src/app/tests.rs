@@ -4087,3 +4087,77 @@ fn the_window_minimum_grows_with_the_interface_size() -> anyhow::Result<()> {
     assert!(min_sizes(&ctx, &mut app).is_empty());
     Ok(())
 }
+
+/// Manual (H9.3b): `cargo test --release --bin silex-desktop startup_and_navigation -- --ignored --nocapture`.
+/// Prints what a user waits for, on a database on disk: opening it,
+/// building the app, the first frame (fonts included), a frame at rest,
+/// and opening a page (plus its first frame). Workspaces of 100, 1000 and
+/// 5000 pages, in trees of ten, with 10–20 text blocks each.
+#[test]
+#[ignore = "scale smoke test; run manually"]
+fn startup_and_navigation_smoke() -> anyhow::Result<()> {
+    use silex_desktop::model::NewBlock;
+    use std::time::{Duration, Instant};
+    for (pages, blocks) in [(100, 10), (1_000, 20), (5_000, 20)] {
+        let folder = TempFolder::new("silex-perf")?;
+        let path = folder.0.join("silex.sqlite3");
+        let mut ids = Vec::new();
+        {
+            let mut db = Database::open(&path)?;
+            let mut parent: Option<String> = None;
+            for p in 0..pages {
+                let content: Vec<NewBlock> = (0..blocks)
+                    .map(|b| NewBlock {
+                        kind: BlockKind::ALL[b % BlockKind::ALL.len()],
+                        indent: 0,
+                        checked: false,
+                        content: format!("Bloque {b} de la página {p}: texto de ejemplo"),
+                    })
+                    .collect();
+                let under = if p % 10 == 0 { None } else { parent.as_deref() };
+                let id = db.create_page_with_blocks(&format!("Página {p}"), under, &content)?;
+                if p % 10 == 0 {
+                    parent = Some(id.clone());
+                }
+                ids.push(id);
+            }
+        }
+
+        let t = Instant::now();
+        let db = Database::open(&path)?;
+        let open = t.elapsed();
+        let t = Instant::now();
+        let mut app = SilexApp::new(db)?;
+        let new = t.elapsed();
+        let ctx = egui::Context::default();
+        let t = Instant::now();
+        sized_frame(&mut app, &ctx, vec![]);
+        let first = t.elapsed();
+        let t = Instant::now();
+        for _ in 0..20 {
+            sized_frame(&mut app, &ctx, vec![]);
+        }
+        let rest = t.elapsed() / 20;
+
+        // Opening pages spread over the workspace, then their first frame.
+        let mut worst = Duration::ZERO;
+        let mut total = Duration::ZERO;
+        let step = (pages / 50).max(1);
+        let picks: Vec<&String> = ids.iter().step_by(step).take(50).collect();
+        for id in &picks {
+            let t = Instant::now();
+            app.open_page((*id).clone())?;
+            sized_frame(&mut app, &ctx, vec![]);
+            let took = t.elapsed();
+            worst = worst.max(took);
+            total += took;
+        }
+        let average = total / picks.len() as u32;
+        println!(
+            "{pages} páginas × {blocks} bloques: abrir la base {open:?}, crear la app {new:?}, \
+             primer frame {first:?}, frame en reposo {rest:?}, abrir página {average:?} \
+             (peor {worst:?})"
+        );
+    }
+    Ok(())
+}

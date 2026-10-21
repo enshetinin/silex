@@ -95,6 +95,11 @@ pub struct SilexApp {
     focus_title: bool,
     /// Fonts and styles installed (done on the first frame).
     theme_installed: bool,
+    /// `SILEX_STARTUP_TIMING` (H9.3b): when the process started, to print
+    /// how long the window took to show the app; frames drawn since.
+    startup: Option<(Instant, u8)>,
+    /// `SILEX_STARTUP_TIMING=exit`: close once it is printed.
+    startup_exit: bool,
     /// Block under the pointer last frame (shows its handle).
     hovered_block: Option<String>,
     /// Theme and interface size (stored in the database).
@@ -202,6 +207,13 @@ fn display_title(title: &str) -> &str {
 }
 
 impl SilexApp {
+    /// Prints, on the second frame (the first one is on screen by then),
+    /// how long it took since `started` (H9.3b). `exit` closes the app then.
+    pub fn time_startup(&mut self, started: Instant, exit: bool) {
+        self.startup = Some((started, 0));
+        self.startup_exit = exit;
+    }
+
     pub fn new(db: Database) -> Result<Self> {
         let mut pages = db.list_pages()?;
         if pages.is_empty() {
@@ -227,6 +239,8 @@ impl SilexApp {
             blocks: Vec::new(),
             focus_title: false,
             theme_installed: false,
+            startup: None,
+            startup_exit: false,
             hovered_block: None,
             settings: Settings::default(),
             save: SaveState::default(),
@@ -811,6 +825,16 @@ impl SilexApp {
             let _ = self.save_now();
         }
         self.handle_close_request(&ctx);
+        if let Some((started, frames)) = &mut self.startup {
+            *frames += 1;
+            if *frames == 2 {
+                eprintln!("Silex: ventana lista en {:?}", started.elapsed());
+                self.startup = None;
+                if self.startup_exit {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
         self.search_window(&ctx);
         self.shortcuts_dialog(&ctx);
         self.close_dialog(&ctx);
