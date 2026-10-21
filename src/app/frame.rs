@@ -51,6 +51,11 @@ impl SilexApp {
                                 .sense(egui::Sense::click())
                                 .truncate(),
                         );
+                        // A link to the ancestor page for screen readers too.
+                        ui.ctx().accesskit_node_builder(link.id, |node| {
+                            node.set_role(egui::accesskit::Role::Link);
+                            node.set_label(format!("Abrir «{title}»"));
+                        });
                         if link.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }

@@ -81,6 +81,21 @@ pub fn button(
 }
 
 /// Font for painting an icon directly.
+/// A decorative icon where a label would go: painted, with nothing for
+/// screen readers (an icon glyph means nothing to them; the text beside
+/// it says what it is).
+pub fn decoration(ui: &mut egui::Ui, icon: &str, size: f32, color: Color32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        font(size),
+        color,
+    );
+    response
+}
+
 pub fn font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(FAMILY.into()))
 }

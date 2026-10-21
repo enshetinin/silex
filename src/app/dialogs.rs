@@ -266,7 +266,7 @@ impl SilexApp {
         match self.save.status() {
             SaveStatus::Saved => {
                 ui.label(egui::RichText::new("Guardado").small().color(p.text_muted));
-                ui.label(icons::icon(icons::CHECK).size(14.0).color(p.text_muted));
+                icons::decoration(ui, icons::CHECK, 14.0, p.text_muted);
             }
             SaveStatus::Dirty => {
                 ui.label(
@@ -286,7 +286,7 @@ impl SilexApp {
                         .color(p.danger),
                 )
                 .on_hover_text(message);
-                ui.label(icons::icon(icons::WARNING).color(p.danger));
+                icons::decoration(ui, icons::WARNING, theme::icon::MD, p.danger);
             }
         }
     }
@@ -301,7 +301,7 @@ impl SilexApp {
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(icons::icon(icon).color(p.text_muted));
+                    icons::decoration(ui, icon, theme::icon::MD, p.text_muted);
                     ui.add(egui::Label::new(egui::RichText::new(text).color(p.text)).wrap());
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),

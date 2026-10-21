@@ -271,3 +271,19 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - Arrastra y pulsa Esc antes de soltar: no se mueve nada. Soltar sobre el propio bloque tampoco mueve nada.
 - En una página larga (la semilla), arrastra hasta el borde de arriba o de abajo: la página se desplaza sola.
 - Arrastra una tarea marcada, una lista sangrada, un archivo y un enlace: llegan con su tipo, su sangría y su contenido. Cierra y abre la app: el orden se mantiene.
+
+## 30. Tablas al estilo nuevo (H10.2)
+- Abre «Lecturas» en claro y en oscuro: filas más altas, solo líneas horizontales y el estado como una píldora con punto, legible en ambos temas.
+- Pasa el ratón por una fila y selecciona una celda: la píldora se sigue leyendo sobre el gris.
+- Cambia el color de una opción: la píldora toma el nuevo color en la tabla, el tablero y el menú de opciones.
+- Un nombre de opción largo en una columna estrecha se corta con «…» sin salirse de la celda.
+- Las flechas, Tab y el clic en las cabeceras siguen funcionando igual que antes.
+
+## 31. Accesibilidad (H9.3a)
+- macOS, con VoiceOver (Cmd+F5): abre «Guía de estilo». Recorre la ventana con Tab: barra superior, «Buscar», favoritos, «Plantillas», «Páginas +», el árbol, «Papelera», «Copias y exportación», «Atajos de teclado», y después «Añadir a favoritos», «Más acciones de la página» y el título. Cada uno se anuncia con su nombre.
+- La ruta de arriba («Proyecto Silex») se anuncia como enlace; el título, como «Título de la página»; ningún icono se lee como un símbolo raro (por ejemplo, junto a «Guardado»).
+- «Plantillas» dice si está desplegada o plegada.
+- Entra en un bloque, pulsa Esc y luego Tab: el foco sale del texto. «Atajos de teclado» lo explica.
+- En «Lecturas», Tab recorre las vistas, «Filtrar», «Ordenar», «Columnas» y «+ Propiedad» de izquierda a derecha; los nombres de las filas se anuncian como «Nombre, fila 1»…
+- Con Cmd+K, el campo se anuncia como «Buscar páginas o acciones».
+- Windows (Narrador) y Linux (Orca), si es posible: lo mismo, y anota lo que no se lea.

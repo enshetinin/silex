@@ -120,7 +120,7 @@ fn read_only_block(
                 });
         }
         BlockKind::File => {
-            ui.label(icons::icon(icons::PAPERCLIP).color(p.text_muted));
+            icons::decoration(ui, icons::PAPERCLIP, theme::icon::MD, p.text_muted);
             match (&block.attachment, interactive) {
                 (Some(file), true) => {
                     if ui
@@ -149,7 +149,7 @@ fn read_only_block(
                 Some(page) => (icons::PAGE, display_title(&page.title).to_owned()),
                 None => (icons::LINK, display_title(text).to_owned()),
             };
-            ui.label(icons::icon(icon).color(p.text_muted));
+            icons::decoration(ui, icon, theme::icon::MD, p.text_muted);
             match (live, interactive) {
                 (Some(page), true) => {
                     if ui.link(egui::RichText::new(title).color(p.text)).clicked() {

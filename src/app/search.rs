@@ -242,24 +242,26 @@ impl SilexApp {
                     .inner_margin(egui::Margin::symmetric(14, 10))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(
-                                icons::icon(icons::SEARCH)
-                                    .size(theme::icon::LG)
-                                    .color(p.text_muted),
-                            );
+                            icons::decoration(ui, icons::SEARCH, theme::icon::LG, p.text_muted);
                             let esc_width = 32.0;
-                            let field = ui.add(
-                                TextEdit::singleline(&mut window.query)
-                                    .id(search_field_id())
-                                    .frame(egui::Frame::NONE)
-                                    .margin(egui::Margin::ZERO)
-                                    .font(egui::FontId::proportional(16.0))
-                                    .hint_text(
-                                        egui::RichText::new("Buscar páginas o acciones")
-                                            .color(p.text_faint),
-                                    )
-                                    .desired_width(ui.available_width() - esc_width),
-                            );
+                            let field = ui
+                                .add(
+                                    TextEdit::singleline(&mut window.query)
+                                        .id(search_field_id())
+                                        .frame(egui::Frame::NONE)
+                                        .margin(egui::Margin::ZERO)
+                                        .font(egui::FontId::proportional(16.0))
+                                        // As tall as the row, its text centred:
+                                        // on the line of the icon and «Esc».
+                                        .min_size(egui::vec2(0.0, ui.spacing().interact_size.y))
+                                        .align(egui::Align2::LEFT_CENTER)
+                                        .hint_text(
+                                            egui::RichText::new("Buscar páginas o acciones")
+                                                .color(p.text_faint),
+                                        )
+                                        .desired_width(ui.available_width() - esc_width),
+                                )
+                                .accessible_name("Buscar páginas o acciones");
                             // Typing always goes to the field, unless Tab moved
                             // the focus to a result.
                             let nothing_focused = ui.memory(|m| m.focused().is_none());

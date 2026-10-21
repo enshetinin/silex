@@ -38,11 +38,7 @@ impl StartupError {
             .show(ui, |ui| {
                 ui.set_max_width(560.0);
                 ui.horizontal(|ui| {
-                    ui.label(
-                        icons::icon(icons::WARNING)
-                            .size(theme::icon::LG)
-                            .color(p.warning),
-                    );
+                    icons::decoration(ui, icons::WARNING, theme::icon::LG, p.warning);
                     ui.heading("Silex no se ha podido abrir");
                 });
                 ui.add_space(theme::space::MD);

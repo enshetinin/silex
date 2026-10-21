@@ -1507,14 +1507,16 @@ impl SilexApp {
         let p = theme::current(ui.ctx());
         ui.horizontal(|ui| {
             gutter_space(ui);
-            let title = ui.add(
-                TextEdit::singleline(&mut self.title)
-                    .id(field_id(self.doc_generation, "title", page_id))
-                    .font(egui::TextStyle::Name(theme::text::TITLE.into()))
-                    .frame(egui::Frame::NONE)
-                    .hint_text(egui::RichText::new("Sin título").color(p.text_faint))
-                    .desired_width(f32::INFINITY),
-            );
+            let title = ui
+                .add(
+                    TextEdit::singleline(&mut self.title)
+                        .id(field_id(self.doc_generation, "title", page_id))
+                        .font(egui::TextStyle::Name(theme::text::TITLE.into()))
+                        .frame(egui::Frame::NONE)
+                        .hint_text(egui::RichText::new("Sin título").color(p.text_faint))
+                        .desired_width(f32::INFINITY),
+                )
+                .accessible_name("Título de la página");
             if std::mem::take(&mut self.focus_title) {
                 title.request_focus();
             }
@@ -1557,7 +1559,60 @@ impl SilexApp {
                 }
             }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Left to right, so Tab visits them in the order they are seen.
+            right_aligned(ui, egui::Id::unique("silex-page-actions"), |ui| {
+                // In a database, the buttons undo the table's changes (H6.4).
+                let table = self.database.as_ref().map(|d| &d.history);
+                let (can_undo, can_redo) = match table {
+                    Some(history) => (history.can_undo(), history.can_redo()),
+                    None => (self.history.can_undo(), self.history.can_redo()),
+                };
+                let table = table.is_some();
+                use egui::{Key, KeyboardShortcut as Sc, Modifiers as M};
+                if icons::button(
+                    ui,
+                    can_undo,
+                    icons::UNDO,
+                    p.text_muted,
+                    "Deshacer",
+                    Some(Sc::new(M::COMMAND, Key::Z)),
+                )
+                .clicked()
+                {
+                    if table {
+                        self.undo_table();
+                    } else {
+                        self.undo();
+                    }
+                }
+                if icons::button(
+                    ui,
+                    can_redo,
+                    icons::REDO,
+                    p.text_muted,
+                    "Rehacer",
+                    Some(Sc::new(M::COMMAND | M::SHIFT, Key::Z)),
+                )
+                .clicked()
+                {
+                    if table {
+                        self.redo_table();
+                    } else {
+                        self.redo();
+                    }
+                }
+                let star_color = if is_favorite { p.accent } else { p.text_muted };
+                let star_tip = if is_favorite {
+                    "Quitar de favoritos"
+                } else {
+                    "Añadir a favoritos"
+                };
+                // A template cannot be a favorite (ADR 0010).
+                if !template
+                    && icons::button(ui, true, icons::STAR, star_color, star_tip, None).clicked()
+                {
+                    action = Some(RowAction::Favorite(page_id.to_owned(), !is_favorite));
+                }
                 let more = icons::button(
                     ui,
                     true,
@@ -1600,58 +1655,6 @@ impl SilexApp {
                         ui.close();
                     }
                 });
-                let star_color = if is_favorite { p.accent } else { p.text_muted };
-                let star_tip = if is_favorite {
-                    "Quitar de favoritos"
-                } else {
-                    "Añadir a favoritos"
-                };
-                // A template cannot be a favorite (ADR 0010).
-                if !template
-                    && icons::button(ui, true, icons::STAR, star_color, star_tip, None).clicked()
-                {
-                    action = Some(RowAction::Favorite(page_id.to_owned(), !is_favorite));
-                }
-                // In a database, the buttons undo the table's changes (H6.4).
-                let table = self.database.as_ref().map(|d| &d.history);
-                let (can_undo, can_redo) = match table {
-                    Some(history) => (history.can_undo(), history.can_redo()),
-                    None => (self.history.can_undo(), self.history.can_redo()),
-                };
-                let table = table.is_some();
-                use egui::{Key, KeyboardShortcut as Sc, Modifiers as M};
-                if icons::button(
-                    ui,
-                    can_redo,
-                    icons::REDO,
-                    p.text_muted,
-                    "Rehacer",
-                    Some(Sc::new(M::COMMAND | M::SHIFT, Key::Z)),
-                )
-                .clicked()
-                {
-                    if table {
-                        self.redo_table();
-                    } else {
-                        self.redo();
-                    }
-                }
-                if icons::button(
-                    ui,
-                    can_undo,
-                    icons::UNDO,
-                    p.text_muted,
-                    "Deshacer",
-                    Some(Sc::new(M::COMMAND, Key::Z)),
-                )
-                .clicked()
-                {
-                    if table {
-                        self.undo_table();
-                    } else {
-                        self.undo();
-                    }
-                }
             });
         });
         if let Some(property) = restore_property {

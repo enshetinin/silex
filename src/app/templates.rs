@@ -44,7 +44,8 @@ fn section_toggle(ui: &mut egui::Ui, title: &str, open: bool) -> egui::Response 
             icons::CARET_RIGHT
         };
         ui.add(egui::Label::new(egui::RichText::new(title).small().weak()).selectable(false));
-        ui.add(egui::Label::new(icons::icon(caret).size(12.0).weak()).selectable(false));
+        let weak = ui.visuals().weak_text_color();
+        icons::decoration(ui, caret, 12.0, weak);
     });
     let response = ui
         .interact(
@@ -54,7 +55,10 @@ fn section_toggle(ui: &mut egui::Ui, title: &str, open: bool) -> egui::Response 
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(if open { "Plegar" } else { "Desplegar" });
-    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, open, title));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, title));
+    // Screen readers say whether the section is folded.
+    ui.ctx()
+        .accesskit_node_builder(response.id, |node| node.set_expanded(open));
     focus_ring(ui, row.response.rect, &response);
     ui.add_space(2.0);
     response
