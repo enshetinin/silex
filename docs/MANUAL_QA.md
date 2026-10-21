@@ -305,3 +305,11 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - «Enviar a la papelera»: se van todas y el aviso dice «N filas enviadas a la papelera.»; «Deshacer» las devuelve a su sitio. En la papelera aparecen como entradas separadas.
 - Esc (sin escribir en una celda) y «×» quitan la selección. Cambiar de vista, añadir un filtro o un orden, u ocultar una columna también.
 - Cierra y abre la app tras cada acción: los cambios siguen ahí.
+
+## 34. Borrar para siempre (H11.3)
+- Con una copia de la base (o la semilla), envía a la papelera una página con subpáginas, una base de datos y una página suelta. Abre «Papelera»: cada elemento tiene «Restaurar» y «Borrar para siempre», y abajo «Vaciar la papelera».
+- «Borrar para siempre» en la página con subpáginas: la confirmación dice cuántas subpáginas van con ella, que no se puede deshacer y que las copias anteriores lo conservan. «Cancelar» (o Esc) vuelve a la lista sin borrar nada.
+- Confírmalo: desaparece de la papelera, la búsqueda ya no la encuentra y un enlace a ella en otra página se ve como «Página que ya no existe». Edita esa otra página: se guarda sin errores.
+- «Vaciar la papelera»: la confirmación cuenta todas las páginas; tras confirmar, la papelera queda vacía y su número en la barra lateral, a 0.
+- «Copias y exportación» → «Liberar espacio»: los adjuntos de las páginas borradas aparecen como sin uso y se liberan.
+- Restaura una copia de seguridad anterior: lo borrado vuelve. Cierra y abre la app: lo borrado sigue borrado.

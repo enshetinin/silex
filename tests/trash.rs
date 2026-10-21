@@ -163,3 +163,149 @@ fn trash_and_restore_persist_after_reopen() -> anyhow::Result<()> {
     }
     result
 }
+
+// ---- H11.3, ADR 0013: deleting for good ----
+
+/// Raw access to the same file, for integrity checks.
+fn check_integrity(path: &std::path::Path) -> anyhow::Result<()> {
+    let conn = Connection::open(path)?;
+    let broken: Vec<String> = conn
+        .prepare("PRAGMA foreign_key_check")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    assert!(broken.is_empty(), "foreign keys: {broken:?}");
+    silex_desktop::db::backup::verify_backup(path)?;
+    Ok(())
+}
+
+fn temp_db() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("silex-purge-{}.sqlite3", uuid::Uuid::new_v4()))
+}
+
+fn remove_db(path: &std::path::Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+#[test]
+fn deleting_a_trash_item_removes_its_branch_and_everything_on_it() -> anyhow::Result<()> {
+    use silex_desktop::model::Block;
+    use silex_desktop::property::{CellValue, PropertyKind};
+    let path = temp_db();
+    let result = (|| -> anyhow::Result<()> {
+        let mut db = Database::open(&path)?;
+        let [notas, viaje, islandia, trabajo] = tree(&db)?;
+        let base = db.create_database("Lecturas", Some(&viaje))?;
+        let row = db.create_row(&base, "Rayuela")?;
+        let autor = db.add_property(&base, "Autor", PropertyKind::Text)?;
+        db.set_value(&row, &autor, Some(&CellValue::Text("Cortázar".into())))?;
+        let link = Block {
+            id: uuid::Uuid::new_v4().to_string(),
+            page_id: trabajo.clone(),
+            kind: BlockKind::PageLink,
+            content: String::new(),
+            checked: false,
+            position: 0,
+            indent: 0,
+            attachment: None,
+            link: Some(islandia.clone()),
+        };
+        let text = Block {
+            id: uuid::Uuid::new_v4().to_string(),
+            page_id: islandia.clone(),
+            kind: BlockKind::Paragraph,
+            content: "géiseres".into(),
+            link: None,
+            ..link.clone()
+        };
+        db.save_document(&trabajo, "Trabajo", std::slice::from_ref(&link))?;
+        db.save_document(&islandia, "Islandia", std::slice::from_ref(&text))?;
+        db.save_version(&islandia)?;
+
+        // A live page cannot be deleted for good.
+        assert!(db.purge_trash_item(&notas).is_err());
+        db.trash_page(&notas)?;
+        // Nor a page inside a trashed branch: only the branch, from its head.
+        assert!(db.purge_trash_item(&viaje).is_err());
+        assert_eq!(db.purge_trash_item(&notas)?, 5);
+
+        assert!(db.list_trash()?.is_empty());
+        for id in [&notas, &viaje, &islandia, &base, &row] {
+            assert!(db.get_page(id)?.is_none() && db.restore_page(id).is_err());
+        }
+        assert!(db.search("géiseres")?.is_empty());
+        assert!(db.search("Rayuela")?.is_empty());
+        assert!(db.page_versions(&islandia)?.is_empty());
+        assert!(db.database_properties(&base)?.is_empty());
+        // The link in «Trabajo» stays, pointing nowhere…
+        let blocks = db.list_blocks(&trabajo)?;
+        assert_eq!(
+            (blocks[0].kind, blocks[0].link.clone()),
+            (BlockKind::PageLink, None)
+        );
+        // …and a document still holding the old id saves anyway.
+        db.save_document(&trabajo, "Trabajo", std::slice::from_ref(&link))?;
+        assert_eq!(db.list_blocks(&trabajo)?[0].link, None);
+        assert_eq!(live_titles(&db)?, ["Trabajo"]);
+        drop(db);
+        check_integrity(&path)
+    })();
+    remove_db(&path);
+    result
+}
+
+#[test]
+fn emptying_the_trash_deletes_every_item_and_keeps_live_pages() -> anyhow::Result<()> {
+    let path = temp_db();
+    let result = (|| -> anyhow::Result<()> {
+        let mut db = Database::open(&path)?;
+        let [notas, viaje, _, trabajo] = tree(&db)?;
+        db.add_block(&trabajo, BlockKind::Paragraph)?;
+        // Two items: «Viaje» (with Islandia) first, then «Notas» alone.
+        db.trash_page(&viaje)?;
+        db.trash_page(&notas)?;
+        assert_eq!(trash_summary(&db)?.len(), 2);
+        assert_eq!(db.empty_trash()?, 3);
+        assert!(db.list_trash()?.is_empty());
+        assert_eq!(live_titles(&db)?, ["Trabajo"]);
+        assert_eq!(db.list_blocks(&trabajo)?.len(), 1);
+        // Nothing to empty: nothing happens.
+        assert_eq!(db.empty_trash()?, 0);
+        drop(db);
+        check_integrity(&path)
+    })();
+    remove_db(&path);
+    result
+}
+
+#[test]
+fn a_loose_row_of_a_deleted_database_comes_back_as_a_page_at_the_root() -> anyhow::Result<()> {
+    use silex_desktop::model::PageKind;
+    let path = temp_db();
+    let result = (|| -> anyhow::Result<()> {
+        let mut db = Database::open(&path)?;
+        let base = db.create_database("Lecturas", None)?;
+        let loose = db.create_row(&base, "Rayuela")?;
+        db.create_row(&base, "Ficciones")?;
+        // The row goes to the trash first, on its own; then the database.
+        db.trash_page(&loose)?;
+        db.trash_page(&base)?;
+        let lecturas = db
+            .list_trash()?
+            .into_iter()
+            .find(|t| t.page.id == base)
+            .expect("in the trash");
+        assert_eq!(lecturas.subpages, 1, "only Ficciones went with it");
+        assert_eq!(db.purge_trash_item(&base)?, 2);
+        // The loose row is still in the trash, and comes back at the root.
+        assert_eq!(trash_summary(&db)?, [("Rayuela".to_owned(), 0)]);
+        db.restore_page(&loose)?;
+        let page = db.get_page(&loose)?.expect("live");
+        assert_eq!((page.parent_id, page.kind), (None, PageKind::Page));
+        drop(db);
+        check_integrity(&path)
+    })();
+    remove_db(&path);
+    result
+}

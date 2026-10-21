@@ -123,3 +123,5 @@ CREATE TABLE db_views (
 1. Las filas no aparecen en la barra lateral, como en Notion.
 2. La tabla empieza sin deshacer propio; llega en H6.4.
 3. Primera versión con cinco tipos: texto, número, casilla, fecha y selección. La selección múltiple sería la siguiente.
+
+*Actualización (ADR 0013, 2026-10-21):* la papelera ya permite borrar para siempre, con confirmación. Las cascadas y el `SET NULL` dejan de ser solo una red de seguridad: se ejecutan al borrar.

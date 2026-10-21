@@ -1253,9 +1253,18 @@ impl Database {
                             r.get(0)
                         })
                         .optional()?;
-                    linked = Block {
-                        content: title.unwrap_or_else(|| block.content.clone()),
-                        ..block.clone()
+                    // A page deleted for good (ADR 0013) leaves the link
+                    // pointing nowhere, even if the open document (or its
+                    // undo) still holds the old id.
+                    linked = match title {
+                        Some(title) => Block {
+                            content: title,
+                            ..block.clone()
+                        },
+                        None => Block {
+                            link: None,
+                            ..block.clone()
+                        },
                     };
                     &linked
                 }
@@ -1781,6 +1790,61 @@ impl Database {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Deletes a trash entry for good (H11.3, ADR 0013): the page and what
+    /// was trashed with it, in one transaction. Its blocks, versions, values
+    /// and (a database's) properties and views go by the foreign keys, and
+    /// the search index by its triggers; links to it point nowhere; its
+    /// files stay until «Liberar espacio». Pages trashed earlier on their
+    /// own stay in the trash. Only the head of an entry can be deleted, and
+    /// never a live page. Returns how many pages went.
+    pub fn purge_trash_item(&mut self, id: &str) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let (parent, stamp): (Option<String>, String) = tx
+            .query_row(
+                "SELECT parent_id, deleted_at FROM pages WHERE id = ?1 AND deleted_at IS NOT NULL",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .context("La página no está en la papelera")?;
+        let inside: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND deleted_at = ?2)",
+            params![parent, stamp],
+            |r| r.get(0),
+        )?;
+        ensure!(
+            !inside,
+            "Esta página se envió a la papelera con la de arriba: se borra con ella"
+        );
+        let branch: Vec<String> = tx
+            .prepare(
+                "WITH RECURSIVE branch(id) AS (
+                     SELECT ?1
+                     UNION
+                     SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
+                     WHERE p.deleted_at = ?2
+                 )
+                 SELECT id FROM branch",
+            )?
+            .query_map(params![id, stamp], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut deleted = 0;
+        for page in &branch {
+            deleted += tx.execute("DELETE FROM pages WHERE id = ?1", [page])?;
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+
+    /// Deletes every page in the trash for good, in one transaction (see
+    /// [`Database::purge_trash_item`]). Returns how many pages went.
+    pub fn empty_trash(&mut self) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let deleted = tx.execute("DELETE FROM pages WHERE deleted_at IS NOT NULL", [])?;
+        tx.commit()?;
+        Ok(deleted)
     }
 
     pub fn trash_count(&self) -> Result<usize> {

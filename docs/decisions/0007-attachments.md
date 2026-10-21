@@ -129,3 +129,5 @@ CREATE TABLE attachments (
 4. Los adjuntos sin usar nunca se borran solos: solo con «Liberar espacio» y confirmación (H7.4).
    - *Actualización (H7.4):* borrar filas no reduce un archivo SQLite, y las copias tampoco, porque copian las páginas libres. Por eso «Liberar espacio» también compacta (`VACUUM`) en un hilo con su propia conexión. Como `VACUUM` puede renumerar los `rowid` implícitos, después se reconstruyen los dos índices de búsqueda. Antes de empezar se guarda una marca en `settings`, y si la app se detiene a mitad, la siguiente apertura termina la reconstrucción. No se borran los adjuntos que el historial de deshacer de la página abierta aún puede devolver.
 5. Silex no abre ejecutables ni scripts: ofrece «Mostrar en la carpeta».
+
+*Actualización (ADR 0013, 2026-10-21):* la papelera ya permite borrar para siempre, con confirmación. Las cascadas y el `SET NULL` dejan de ser solo una red de seguridad: se ejecutan al borrar.

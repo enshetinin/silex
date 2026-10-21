@@ -1143,6 +1143,98 @@ fn select_two(harness: &mut Harness<'_, SilexApp>) {
     click_button(harness, "Poner valor…");
 }
 
+// ---- H11.3, ADR 0013: deleting for good from the trash ----
+
+/// The demo app with «Recetas» and «Proyecto Silex» (with its two
+/// subpages and «Guía de estilo») in the trash, and the trash open.
+fn trash_app() -> anyhow::Result<SilexApp> {
+    let mut app = demo_app()?;
+    let id = |app: &SilexApp, title: &str| {
+        app.pages
+            .iter()
+            .find(|p| p.title == title)
+            .map(|p| p.id.clone())
+            .expect("page")
+    };
+    let recetas = id(&app, "Recetas");
+    let proyecto = id(&app, "Proyecto Silex");
+    app.db.trash_page(&recetas)?;
+    app.db.trash_page(&proyecto)?;
+    app.reload_pages()?;
+    app.open_page(id(&app, "Notas de lectura"))?;
+    app.open_trash_dialog();
+    Ok(app)
+}
+
+#[test]
+fn trash_items_are_deleted_for_good_only_after_confirming() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(trash_app()?);
+    assert_accessible(&harness, "trash");
+    click_button(&mut harness, "Borrar «Recetas» para siempre");
+    assert_accessible(&harness, "confirm one");
+    assert_eq!(
+        text_containing(&harness, "se borrará").as_deref(),
+        Some("«Recetas» se borrará para siempre.")
+    );
+    // «Cancelar» goes back to the list: nothing is deleted.
+    click_button(&mut harness, "Cancelar");
+    assert_eq!(harness.state().db.list_trash()?.len(), 2);
+    assert!(
+        harness
+            .query_by_label("Borrar «Recetas» para siempre")
+            .is_some()
+    );
+
+    click_button(&mut harness, "Borrar «Recetas» para siempre");
+    click_button(&mut harness, "Confirmar: borrar para siempre");
+    let trash = harness.state().db.list_trash()?;
+    assert_eq!(trash.len(), 1);
+    assert_eq!(trash[0].page.title, "Proyecto Silex");
+    assert!(
+        harness
+            .query_by_label("Borrar «Recetas» para siempre")
+            .is_none()
+    );
+
+    // «Vaciar la papelera» counts the pages that go with each entry.
+    click_button(&mut harness, "Vaciar la papelera");
+    assert_eq!(
+        text_containing(&harness, "Se borrar").as_deref(),
+        Some("Se borrarán para siempre 4 páginas (con sus subpáginas y filas).")
+    );
+    click_button(&mut harness, "Confirmar: borrar para siempre");
+    assert!(harness.state().db.list_trash()?.is_empty());
+    assert_eq!(harness.state().trash_count, 0);
+    assert!(text_containing(&harness, "La papelera está vacía.").is_some());
+    // An empty trash has nothing to empty.
+    let empty = harness
+        .get_all_by_label("Vaciar la papelera")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Button)
+        .expect("button");
+    assert!(empty.accesskit_node().is_disabled());
+    Ok(())
+}
+
+#[test]
+fn trash_confirm() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), trash_app()?);
+    harness.run();
+    click_button(&mut harness, "Vaciar la papelera");
+    // The pointer out of the way: where the button was is not steady.
+    harness.event(egui::Event::PointerMoved(egui::pos2(1000.0, 700.0)));
+    harness.run();
+    harness.snapshot("trash_confirm_light");
+    Ok(())
+}
+
 /// A row under the pointer shows its «⋯»; the trash notice offers «Deshacer».
 #[test]
 fn database_row_trashed() -> anyhow::Result<()> {

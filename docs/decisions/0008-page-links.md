@@ -77,3 +77,5 @@ Requisitos:
 3. Un enlace a una página en la papelera lo dice, y abrirlo ofrece restaurarla.
 4. Los backlinks de páginas en la papelera no se muestran.
 5. Al exportar una página suelta, el destino se escribe como texto, sin enlace.
+
+*Actualización (ADR 0013, 2026-10-21):* la papelera ya permite borrar para siempre, con confirmación. Las cascadas y el `SET NULL` dejan de ser solo una red de seguridad: se ejecutan al borrar.
