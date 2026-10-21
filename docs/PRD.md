@@ -49,7 +49,7 @@ La versión incluida en este repositorio es una **base técnica**, no la entrega
 - No pérdida de cambios en cierres normales; tests de crash/power-loss antes de afirmar garantía fuerte.
 - Migración reversible con copias seguras; datos existentes deben sobrevivir actualizaciones.
 - Instalación sin servidor de base de datos.
-- Arranque, navegación y edición perceptiblemente responsivos; medir antes de fijar SLOs.
+- Arranque, navegación y edición perceptiblemente responsivos. Objetivos fijados con medidas (H9.3b, `docs/ARCHITECTURE.md`, «Rendimiento»): ventana lista en < 300 ms en caliente y < 1 s en frío, abrir una página en < 16 ms (un frame) y un frame en reposo en < 4 ms de CPU, con 5000 páginas.
 - Accesibilidad: navegación teclado, lectura de etiquetas y foco; auditar antes de v1.0.
 
 ## Definición de terminado de una historia
