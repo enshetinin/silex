@@ -80,6 +80,52 @@ pub fn button(
     response.accessible_name(name)
 }
 
+/// A «⋯» button at `rect` that is seen only while `shown` (its row
+/// or card is under the pointer), on hover, with the keyboard focus or
+/// with its menu open (H11.1). It is always there, so Tab reaches it, and
+/// its `id` is fixed, so the focus on it can be told from outside.
+/// `fill` is painted under it while seen, so it can sit over text.
+pub fn more_button(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id: egui::Id,
+    shown: bool,
+    fill: Color32,
+    name: &str,
+) -> egui::Response {
+    // It also takes drags, so a card under it (which can be dragged) does
+    // not take the press away from it.
+    let response = ui.interact(rect, id, egui::Sense::click_and_drag());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+    let menu_open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+    let seen = shown || menu_open || response.hovered() || response.has_focus();
+    if seen && ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&response);
+        ui.painter().rect_filled(rect, visuals.corner_radius, fill);
+        if response.hovered() || response.has_focus() || menu_open {
+            ui.painter()
+                .rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                visuals.corner_radius,
+                ui.visuals().selection.stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        let color = crate::app::theme::current(ui.ctx()).text_muted;
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            DOTS_THREE,
+            font(crate::app::theme::icon::MD),
+            color,
+        );
+    }
+    response.on_hover_text(name).accessible_name(name)
+}
+
 /// Font for painting an icon directly.
 /// A decorative icon where a label would go: painted, with nothing for
 /// screen readers (an icon glyph means nothing to them; the text beside

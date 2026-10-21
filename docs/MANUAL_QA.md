@@ -287,3 +287,12 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - En «Lecturas», Tab recorre las vistas, «Filtrar», «Ordenar», «Columnas» y «+ Propiedad» de izquierda a derecha; los nombres de las filas se anuncian como «Nombre, fila 1»…
 - Con Cmd+K, el campo se anuncia como «Buscar páginas o acciones».
 - Windows (Narrador) y Linux (Orca), si es posible: lo mismo, y anota lo que no se lea.
+
+## 32. Borrar filas a la vista (H11.1)
+- En «Lecturas», pasa el ratón por una fila: aparece «⋯» al final de la fila, bajo el «+» de la cabecera. Con muchas columnas (o la ventana estrecha), sigue en el borde derecho visible sin desplazarse. Su menú es el mismo que el del clic derecho en el nombre. «Enviar a la papelera» quita la fila y muestra «Fila «…» enviada a la papelera.» con «Deshacer». Pulsa «Deshacer»: la fila vuelve a su sitio.
+- Con Tab, llega a «⋯» tras la última celda de la fila (se ve con el foco) y pulsa Supr: la fila va a la papelera. Cmd/Ctrl+Z la devuelve.
+- Enfoca una casilla o una celda sin escribir en ella (Esc tras editarla) y pulsa Retroceso: la fila va a la papelera. En el nombre de la fila, Retroceso solo borra letras.
+- Tras enviar una fila a la papelera, cambia otra celda: el aviso desaparece (su «Deshacer» ya no la devolvería).
+- Con un menú de celda abierto (selección o fecha), Supr y Retroceso no borran la fila.
+- En el tablero: pasa el ratón por una tarjeta y usa su «⋯» (incluye «Mover a»); enfoca una tarjeta con Tab y pulsa Supr. Arrastrar desde «⋯» no mueve la tarjeta.
+- Con VoiceOver, «⋯» se anuncia como «Acciones de «Título»» y el botón del aviso como «Deshacer el envío a la papelera».

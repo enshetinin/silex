@@ -1,8 +1,9 @@
 //! A database's board view (H6.5, ADR 0006): the rows as cards, in one
 //! column per option of a select property, after a column for the rows
 //! without one. Dragging a card to another column sets that value (one
-//! change in the table's undo); the card's context menu does the same with
-//! «Mover a…», and a click (or Intro) opens the row as a page. The view's
+//! change in the table's undo); the card's context menu (or its «⋯»,
+//! H11.1) does the same with «Mover a…», and a click (or Intro) opens the
+//! row as a page. Supr with a card focused sends it to the trash. The view's
 //! filters, sort and hidden properties apply as in the table. A column's
 //! header opens its menu: the option's name and color, moving it, and
 //! deleting it (its cards go to the first column).
@@ -36,6 +37,11 @@ struct CardDrag(String);
 
 fn card_id(row: &str) -> egui::Id {
     egui::Id::unique(("silex-card", row))
+}
+
+/// A card's «⋯» button (H11.1).
+fn card_menu_id(row: &str) -> egui::Id {
+    egui::Id::unique(("silex-card-menu", row))
 }
 
 fn group_menu_id(option: &str) -> egui::Id {
@@ -99,6 +105,8 @@ struct Board<'a> {
     rename: &'a mut Option<(String, String)>,
     /// The column waiting for «Borrar» to be confirmed.
     delete: &'a mut Option<String>,
+    /// The card or «⋯» with the keyboard focus (Cmd+Z is for the table).
+    handle_focus: &'a mut Option<egui::Id>,
     actions: &'a mut Vec<TableAction>,
     cells: &'a mut Vec<CellAction>,
 }
@@ -139,6 +147,7 @@ impl SilexApp {
             new_property,
             group_rename,
             option_delete,
+            handle_focus,
             ..
         } = state;
         let Some(config) = views.get(*view).map(|v| &v.config) else {
@@ -166,6 +175,7 @@ impl SilexApp {
             dragging: egui::DragAndDrop::has_payload_of_type::<CardDrag>(ui.ctx()),
             rename: group_rename,
             delete: option_delete,
+            handle_focus,
             actions,
             cells,
         };
@@ -478,10 +488,12 @@ impl Board<'_> {
             }
             egui::WidgetInfo::labeled(egui::Role::Button, true, label)
         });
+        // Under the pointer, also when it is on the card's «⋯».
+        let pointed = !self.dragging && ui.rect_contains_pointer(rect);
         let card = CardLook {
             title: (!naming).then_some((title.as_str(), untitled)),
             lines: &lines,
-            hovered: response.hovered() || response.has_focus(),
+            hovered: pointed || response.hovered() || response.has_focus(),
         };
         if held {
             // Its place stays marked; the card follows the pointer on top.
@@ -532,6 +544,44 @@ impl Board<'_> {
             self.actions.push(TableAction::Open(row_id.clone()));
         }
         response.context_menu(|ui| self.card_menu(ui, &row_id, option));
+        if response.has_focus() {
+            *self.handle_focus = Some(id);
+            if take_delete_key(ui.ctx()) {
+                self.actions
+                    .push(TableAction::Row(RowAction::Trash(row_id.clone())));
+            }
+        }
+
+        // «⋯» at the top right, by the name: the same menu (H11.1).
+        if naming || held {
+            return;
+        }
+        let side = icons::BUTTON;
+        let at = egui::Rect::from_min_size(
+            egui::pos2(
+                rect.right() - CARD_PAD / 2.0 - side,
+                rect.top() + CARD_PAD + (TITLE_HEIGHT - side) / 2.0,
+            ),
+            egui::Vec2::splat(side),
+        );
+        let menu_id = card_menu_id(&row_id);
+        let shown = pointed || response.has_focus();
+        let menu = icons::more_button(
+            ui,
+            at,
+            menu_id,
+            shown,
+            p.bg,
+            &format!("Acciones de «{title}»"),
+        );
+        egui::Popup::menu(&menu).show(|ui| self.card_menu(ui, &row_id, option));
+        if menu.has_focus() {
+            *self.handle_focus = Some(menu_id);
+            if take_delete_key(ui.ctx()) {
+                self.actions
+                    .push(TableAction::Row(RowAction::Trash(row_id.clone())));
+            }
+        }
     }
 
     /// A card's menu: the other columns it can move to, then the usual

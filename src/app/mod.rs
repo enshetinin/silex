@@ -110,6 +110,9 @@ pub struct SilexApp {
     /// Notices still to come from one drop (import and attach): the second
     /// is joined to the first instead of hiding it.
     notice_group: u8,
+    /// A row just sent to the trash from its table or board: its notice
+    /// offers «Deshacer» (H11.1).
+    trash_notice: Option<TrashNotice>,
     close_dialog: bool,
     /// Set once the user may leave: everything saved or changes discarded.
     allow_close: bool,
@@ -246,6 +249,7 @@ impl SilexApp {
             save: SaveState::default(),
             notice: None,
             notice_group: 0,
+            trash_notice: None,
             close_dialog: false,
             allow_close: false,
             backup_job: None,

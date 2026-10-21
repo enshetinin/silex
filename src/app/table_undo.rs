@@ -7,6 +7,11 @@
 //! Undoable: cell values, row names, adding a row (undone by sending it to
 //! the trash), sending a row to the trash, adding and deleting properties.
 //! Not undoable here: renaming or moving properties, options and views.
+//!
+//! A row sent to the trash from the table or the board (menu, «⋯», Supr)
+//! shows a notice with «Deshacer» (H11.1). It is the same step as Cmd+Z,
+//! so the notice leaves as soon as another change is recorded or anything
+//! is undone: its button never undoes something else.
 use anyhow::Result;
 use silex_desktop::property::CellValue;
 
@@ -34,6 +39,20 @@ pub(super) enum TableOp {
     DeleteProperty(String),
 }
 
+/// The notice of a row just sent to the trash (H11.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TrashNotice {
+    pub(super) database: String,
+    pub(super) row: String,
+    pub(super) title: String,
+}
+
+impl TrashNotice {
+    pub(super) fn text(&self) -> String {
+        format!("Fila «{}» enviada a la papelera.", self.title)
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct TableHistory {
     undo: Vec<TableOp>,
@@ -58,6 +77,11 @@ impl TableHistory {
     pub(super) fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
+
+    /// The change Cmd+Z would undo now.
+    pub(super) fn last(&self) -> Option<&TableOp> {
+        self.undo.last()
+    }
 }
 
 /// Which way an operation is applied.
@@ -70,6 +94,7 @@ enum Way {
 impl SilexApp {
     /// Records a change made in the open table.
     pub(super) fn record_table(&mut self, op: TableOp) {
+        self.trash_notice = None;
         if let Some(state) = self.database.as_mut() {
             state.history.record(op);
         }
@@ -91,6 +116,7 @@ impl SilexApp {
         // Pending names and cells are saved (and recorded) first.
         let saved = self.save_table_edits();
         self.report(saved);
+        self.trash_notice = None;
         let Some(state) = self.database.as_mut() else {
             return;
         };
@@ -150,6 +176,11 @@ impl SilexApp {
                 self.reload_pages()?;
                 if let Some(state) = self.database.as_mut() {
                     state.values = self.db.database_values(&state.id)?;
+                    // A row back from the trash goes to its place, not to
+                    // the end (H11.1).
+                    if !trash {
+                        state.apply_view();
+                    }
                 }
             }
             TableOp::AddProperty(property) | TableOp::DeleteProperty(property) => {
@@ -165,9 +196,24 @@ impl SilexApp {
         Ok(())
     }
 
+    /// The notice of a row just sent to the trash, while «Deshacer» would
+    /// still bring it back: its database is open and its trashing is the
+    /// last change. Otherwise it is dropped.
+    pub(super) fn current_trash_notice(&mut self) -> Option<TrashNotice> {
+        let notice = self.trash_notice.as_ref()?;
+        let current = self.database.as_ref().is_some_and(|d| {
+            d.id == notice.database
+                && d.history.last() == Some(&TableOp::TrashRow(notice.row.clone()))
+        });
+        if !current {
+            self.trash_notice = None;
+        }
+        self.trash_notice.clone()
+    }
+
     /// Whether Cmd+Z is for the table: a database is open and no text is
-    /// being typed (nothing has the keyboard, or a cell does, not as a text
-    /// field). Text fields keep their own undo.
+    /// being typed (nothing has the keyboard, or a cell, a row's «⋯» or a
+    /// card does, not as a text field). Text fields keep their own undo.
     pub(super) fn table_has_focus(&self, ctx: &egui::Context) -> bool {
         let Some(state) = &self.database else {
             return false;
@@ -175,6 +221,9 @@ impl SilexApp {
         let Some(focused) = ctx.memory(|m| m.focused()) else {
             return true;
         };
+        if state.handle_focus == Some(focused) {
+            return true;
+        }
         let Some((index, column)) = state.cursor else {
             return false;
         };

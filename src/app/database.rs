@@ -80,6 +80,9 @@ pub(super) struct DatabaseState {
     pub(super) view_delete: Option<String>,
     /// What can be undone in this table (H6.4).
     pub(super) history: TableHistory,
+    /// The row's «⋯» or the card that had the keyboard focus last frame:
+    /// with the focus there, Cmd+Z is for the table (H11.1).
+    pub(super) handle_focus: Option<egui::Id>,
 }
 
 impl DatabaseState {
@@ -170,6 +173,21 @@ pub(super) fn row_name_id(row_id: &str) -> egui::Id {
 }
 
 /// The header button of a property (opens its menu).
+/// A row's «⋯» button (H11.1).
+pub(super) fn row_menu_id(row_id: &str) -> egui::Id {
+    egui::Id::unique(("silex-row-menu", row_id))
+}
+
+/// Supr or Retroceso, taken (H11.1): with the focus on a row (its «⋯», a
+/// cell not being typed in, a card) they send it to the trash. Not while a
+/// menu or a picker is open: the keys are theirs.
+pub(super) fn take_delete_key(ctx: &egui::Context) -> bool {
+    use egui::{Key, Modifiers as M};
+    !egui::Popup::is_any_open(ctx)
+        && (take_exact_key(ctx, Key::Delete, M::NONE)
+            || take_exact_key(ctx, Key::Backspace, M::NONE))
+}
+
 pub(super) fn property_header_id(property: &str) -> egui::Id {
     egui::Id::unique(("silex-property", property))
 }
@@ -241,6 +259,7 @@ impl SilexApp {
             view_rename: None,
             view_delete: None,
             history: TableHistory::default(),
+            handle_focus: None,
         });
         // The view last open in this session, else the first.
         let last = self.last_views.get(id).cloned();
@@ -445,6 +464,7 @@ impl SilexApp {
         if !state.is_board() {
             table_keys(ui.ctx(), &mut state);
         }
+        state.handle_focus = None;
         let (actions, cells) = self.draw_table(ui, &mut state);
         let database = state.id.clone();
         let editing_name = state
@@ -483,8 +503,19 @@ impl SilexApp {
                 }
             }
             TableAction::Row(RowAction::Trash(id)) => {
+                let title = self
+                    .find_page(&id)
+                    .map(|p| display_title(&p.title).to_owned())
+                    .unwrap_or_default();
                 self.apply(RowAction::Trash(id.clone()))?;
-                self.record_table(TableOp::TrashRow(id));
+                self.record_table(TableOp::TrashRow(id.clone()));
+                // Its own notice, with «Deshacer», instead of the usual one.
+                self.notice = None;
+                self.trash_notice = Some(TrashNotice {
+                    database: database.to_owned(),
+                    row: id,
+                    title,
+                });
             }
             TableAction::Row(other) => self.apply(other)?,
             TableAction::AddProperty(kind, name) => {
@@ -881,6 +912,7 @@ impl SilexApp {
             cursor,
             editing,
             option_filter,
+            handle_focus,
             ..
         } = state;
         *cursor = None;
@@ -894,7 +926,9 @@ impl SilexApp {
             let name_id = row_name_id(&row.id);
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(columns.width, ROW_HEIGHT), egui::Sense::hover());
+            let menu_id = row_menu_id(&row.id);
             let focused = ui.memory(|m| m.has_focus(name_id));
+            let menu_focused = ui.memory(|m| m.has_focus(menu_id));
             if focused {
                 *cursor = Some((index, 0));
             }
@@ -903,7 +937,8 @@ impl SilexApp {
                     .as_ref()
                     .is_some_and(|(id, c)| *id == row.id && *c == column)
             };
-            if ui.rect_contains_pointer(rect) || focused {
+            let hot = ui.rect_contains_pointer(rect) || focused || menu_focused;
+            if hot {
                 ui.painter().rect_filled(rect, 0.0, p.subtle);
             }
             ui.painter()
@@ -981,6 +1016,39 @@ impl SilexApp {
                 property_cell(ui, &cell, editing, option_filter, cells);
                 if ui.memory(|m| m.has_focus(cell.id())) {
                     *cursor = Some((index, column));
+                    if take_delete_key(ui.ctx()) {
+                        actions.push(TableAction::Row(RowAction::Trash(row.id.clone())));
+                    }
+                }
+            }
+
+            // «⋯» in the last column, under the header's «+»: the row's
+            // actions, the same menu as a right-click on the name (H11.1).
+            // A table wider than its area keeps it at the right edge in
+            // sight, so it is never scrolled away.
+            let right = rect.right().min(ui.clip_rect().right());
+            let at = egui::Rect::from_center_size(
+                egui::pos2(right - ADD_COLUMN_WIDTH / 2.0, rect.center().y),
+                egui::Vec2::splat(icons::BUTTON),
+            );
+            let menu = icons::more_button(
+                ui,
+                at,
+                menu_id,
+                hot,
+                p.subtle,
+                &format!("Acciones de «{}»", display_title(&row.title)),
+            );
+            egui::Popup::menu(&menu).show(|ui| {
+                if let Some(chosen) = self.page_menu(ui, &row.id) {
+                    actions.push(TableAction::Row(chosen));
+                    ui.close();
+                }
+            });
+            if menu.has_focus() {
+                *handle_focus = Some(menu_id);
+                if take_delete_key(ui.ctx()) {
+                    actions.push(TableAction::Row(RowAction::Trash(row.id.clone())));
                 }
             }
             if focus.as_ref().is_some_and(|(id, _)| *id == row.id) {

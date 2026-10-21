@@ -328,6 +328,43 @@ impl SilexApp {
         }
     }
 
+    /// A row just sent to the trash from its table or board, with
+    /// «Deshacer» (the same step as Cmd+Z) and «Cerrar aviso» (H11.1).
+    pub(super) fn trash_notice_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(notice) = self.current_trash_notice() else {
+            return;
+        };
+        let (mut undo, mut close) = (false, false);
+        Self::banner(ui, icons::TRASH, &notice.text(), |ui| {
+            // Left to right, so Tab visits them in the order they are seen.
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                right_aligned(ui, egui::Id::unique("silex-trash-notice"), |ui| {
+                    let shortcut = ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
+                        egui::Modifiers::COMMAND,
+                        egui::Key::Z,
+                    ));
+                    undo = ui
+                        .button("Deshacer")
+                        .on_hover_text(format!("Devolver la fila a su sitio   {shortcut}"))
+                        .accessible_name("Deshacer el envío a la papelera")
+                        .clicked();
+                    close = ui
+                        .add(
+                            egui::Button::new(icons::icon(icons::CLOSE)).frame_when_inactive(false),
+                        )
+                        .on_hover_text("Cerrar aviso")
+                        .accessible_name("Cerrar aviso")
+                        .clicked();
+                });
+            });
+        });
+        if undo {
+            self.undo_table();
+        } else if close {
+            self.trash_notice = None;
+        }
+    }
+
     /// Intercepts window close: save first; if that fails, keep the window
     /// open and let the user retry or explicitly discard.
     pub(super) fn handle_close_request(&mut self, ctx: &egui::Context) {

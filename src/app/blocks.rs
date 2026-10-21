@@ -1268,6 +1268,7 @@ impl SilexApp {
             return;
         }
         self.notice_bar(ui);
+        self.trash_notice_bar(ui);
         self.export_bar(ui);
 
         // A database shows its table instead of blocks (ADR 0006). The

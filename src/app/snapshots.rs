@@ -775,6 +775,178 @@ fn database_select_menu() -> anyhow::Result<()> {
     )
 }
 
+// ---- H11.1: sending rows to the trash in sight ----
+
+/// The trash notice with «Deshacer», if it is shown.
+fn undo_notice(harness: &Harness<'_, SilexApp>) -> Option<String> {
+    harness
+        .root()
+        .children_recursive()
+        .filter_map(|node| {
+            let node = node.accesskit_node();
+            node.label().or_else(|| node.value())
+        })
+        .find(|text| text.contains("enviada a la papelera"))
+}
+
+#[test]
+fn a_rows_menu_button_and_the_delete_key_send_it_to_the_trash() -> anyhow::Result<()> {
+    use eframe::egui::{Key, Modifiers};
+    let (app, _, rows) = database_app()?;
+    let mut harness = a11y_harness(app);
+    // «⋯» ends the row: Tab reaches it after the last cell, though it is
+    // only seen on hover.
+    harness.get_by_label("Nombre, fila 1").focus();
+    harness.run();
+    assert_visited_in_order(
+        &tab_names(&mut harness, 8),
+        &[
+            "Abrir «Rayuela»",
+            "Autor, Rayuela: Julio Cortázar",
+            "Terminado, Rayuela: 2026-09-14",
+            "Acciones de «Rayuela»",
+            "Nombre, fila 2",
+        ],
+    );
+    harness.key_press(eframe::egui::Key::Escape);
+    harness.run();
+
+    // «⋯» opens the row's menu, the same as a right-click on its name.
+    click_button(&mut harness, "Acciones de «Pedro Páramo»");
+    assert_accessible(&harness, "row menu");
+    menu_item(&harness, "Enviar a la papelera")
+        .expect("«Enviar a la papelera»")
+        .click();
+    harness.run();
+    assert_eq!(shown_rows(&harness), ["Rayuela", "Ficciones"]);
+    assert!(
+        harness.state().db.get_page(&rows[1])?.is_none(),
+        "in the trash"
+    );
+    assert_eq!(
+        undo_notice(&harness).as_deref(),
+        Some("Fila «Pedro Páramo» enviada a la papelera.")
+    );
+    assert_accessible(&harness, "trash notice");
+    // «Deshacer» brings it back where it was, and the notice goes.
+    click_button(&mut harness, "Deshacer el envío a la papelera");
+    assert_eq!(
+        shown_rows(&harness),
+        ["Rayuela", "Pedro Páramo", "Ficciones"]
+    );
+    assert!(undo_notice(&harness).is_none());
+
+    // Delete with the focus on «⋯»; Cmd+Z brings it back.
+    harness.get_by_label("Acciones de «Rayuela»").focus();
+    harness.run();
+    harness.key_press(Key::Delete);
+    harness.run();
+    assert_eq!(shown_rows(&harness), ["Pedro Páramo", "Ficciones"]);
+    assert!(undo_notice(&harness).is_some());
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    harness.run();
+    assert_eq!(
+        shown_rows(&harness),
+        ["Rayuela", "Pedro Páramo", "Ficciones"]
+    );
+    assert!(undo_notice(&harness).is_none(), "undone: nothing to offer");
+
+    // Backspace with the focus on a cell that is not being typed in.
+    harness.get_by_label("Leído, Ficciones").focus();
+    harness.run();
+    harness.key_press(Key::Backspace);
+    harness.run();
+    assert_eq!(shown_rows(&harness), ["Rayuela", "Pedro Páramo"]);
+    // Another change to the table: «Deshacer» would undo that one instead.
+    harness.get_by_label("Leído, Pedro Páramo").click();
+    harness.run();
+    assert!(undo_notice(&harness).is_none());
+
+    // In a name, Backspace deletes text, not the row.
+    let name = harness.get_by_label("Nombre, fila 1");
+    name.focus();
+    harness.run();
+    harness.key_press(Key::End);
+    harness.key_press(Key::Backspace);
+    harness.run();
+    assert_eq!(shown_rows(&harness), ["Rayuel", "Pedro Páramo"]);
+    Ok(())
+}
+
+#[test]
+fn a_card_goes_to_the_trash_with_the_delete_key_or_its_menu_button() -> anyhow::Result<()> {
+    use eframe::egui::Key;
+    let (app, rows) = board_app()?;
+    let mut harness = a11y_harness(app);
+    assert!(harness.query_by_label("Acciones de «Rayuela»").is_some());
+
+    harness
+        .get_by_label_contains("Tarjeta «Pedro Páramo»")
+        .focus();
+    harness.run();
+    harness.key_press(Key::Delete);
+    harness.run();
+    assert!(
+        harness.state().db.get_page(&rows[1])?.is_none(),
+        "in the trash"
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Tarjeta «Pedro Páramo»")
+            .is_none()
+    );
+    assert!(undo_notice(&harness).is_some());
+    click_button(&mut harness, "Deshacer el envío a la papelera");
+    assert!(
+        harness
+            .query_by_label_contains("Tarjeta «Pedro Páramo»")
+            .is_some()
+    );
+
+    click_button(&mut harness, "Acciones de «Pedro Páramo»");
+    assert_accessible(&harness, "card menu from its button");
+    assert!(menu_item(&harness, "Leyendo").is_some(), "«Mover a»");
+    menu_item(&harness, "Enviar a la papelera")
+        .expect("«Enviar a la papelera»")
+        .click();
+    harness.run();
+    assert!(harness.state().db.get_page(&rows[1])?.is_none());
+    Ok(())
+}
+
+/// A row under the pointer shows its «⋯»; the trash notice offers «Deshacer».
+#[test]
+fn database_row_trashed() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_row_trashed_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            click_button(harness, "Acciones de «Pedro Páramo»");
+            if let Some(item) = menu_item(harness, "Enviar a la papelera") {
+                item.click();
+            }
+            harness.run();
+            harness.get_by_label("Acciones de «Rayuela»").hover();
+        },
+    )
+}
+
+#[test]
+fn database_row_trashed_dark() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_row_trashed_dark",
+        eframe::egui::Theme::Dark,
+        |harness| {
+            click_button(harness, "Acciones de «Pedro Páramo»");
+            if let Some(item) = menu_item(harness, "Enviar a la papelera") {
+                item.click();
+            }
+            harness.run();
+            harness.get_by_label("Acciones de «Rayuela»").hover();
+        },
+    )
+}
+
 /// Like [`snapshot_with`], with the database «Lecturas» open.
 fn database_snapshot(
     name: &str,
