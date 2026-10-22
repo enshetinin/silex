@@ -725,13 +725,18 @@ fn a_database_exports_its_view_or_everything_to_csv() -> anyhow::Result<()> {
                 .state_mut()
                 .export_database_csv_to(&ctx, &dir, all)?;
             assert!(harness.state().csv_export.is_some(), "on the worker");
+            // `step`, not `run`: while the worker writes, the app keeps
+            // repainting (the spinner, and the worker's wake-up from its
+            // thread), so it never settles.
             let start = std::time::Instant::now();
             while harness.state().csv_export.is_some()
                 && start.elapsed() < std::time::Duration::from_secs(30)
             {
                 std::thread::sleep(std::time::Duration::from_millis(5));
-                harness.run();
+                harness.step();
             }
+            assert!(harness.state().csv_export.is_none(), "finished in 30 s");
+            harness.run();
             let path = harness.state().last_export.clone().expect("exported");
             anyhow::Ok((path.clone(), std::fs::read_to_string(path)?))
         };
