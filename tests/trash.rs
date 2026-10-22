@@ -210,6 +210,7 @@ fn deleting_a_trash_item_removes_its_branch_and_everything_on_it() -> anyhow::Re
             indent: 0,
             attachment: None,
             link: Some(islandia.clone()),
+            marks: Vec::new(),
         };
         let text = Block {
             id: uuid::Uuid::new_v4().to_string(),

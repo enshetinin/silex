@@ -1553,6 +1553,7 @@ impl SilexApp {
                                 indent: 0,
                                 attachment: None,
                                 link: None,
+                                marks: Vec::new(),
                             };
                             self.pending_focus = Some((block.id.clone(), 0));
                             self.blocks.push(block);

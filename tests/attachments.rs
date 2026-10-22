@@ -41,6 +41,7 @@ fn block(page: &str, kind: BlockKind, content: &str, attachment: Option<String>)
         indent: 0,
         attachment,
         link: None,
+        marks: Vec::new(),
     }
 }
 

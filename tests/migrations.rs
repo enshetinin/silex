@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 9;
+const LATEST: i64 = 10;
 
 struct TempDir(PathBuf);
 
@@ -631,6 +631,7 @@ mod v6 {
             indent: 0,
             attachment: Some(attachment.id),
             link: None,
+            marks: Vec::new(),
         });
         let title = db.get_page(page)?.map(|p| p.title).unwrap_or_default();
         db.save_document(page, &title, &blocks)?;
@@ -762,6 +763,7 @@ mod v7 {
             indent: 0,
             attachment: None,
             link: Some(to.into()),
+            marks: Vec::new(),
         }
     }
 
@@ -1003,7 +1005,7 @@ mod v9 {
     const SCHEMA_V8: &str = include_str!("../src/db/migrations/0008_page_versions.sql");
 
     /// A database exactly as Silex v8 left it (v7 content plus a version).
-    fn write_v8_database(path: &Path) -> anyhow::Result<()> {
+    pub(super) fn write_v8_database(path: &Path) -> anyhow::Result<()> {
         write_v7_database(path)?;
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA_V8)?;
@@ -1099,6 +1101,129 @@ mod v9 {
         assert_eq!(db.page_versions("p1")?.len(), 1);
         assert!(db.list_templates()?.is_empty());
         db.save_as_template("p1")?;
+        Ok(())
+    }
+}
+
+mod v10 {
+    use super::v9::write_v8_database;
+    use super::*;
+    use silex_desktop::marks::{Mark, MarkKind};
+
+    const SCHEMA_V9: &str = include_str!("../src/db/migrations/0009_templates.sql");
+
+    /// A database exactly as Silex v9 left it (v8 content plus a template).
+    fn write_v9_database(path: &Path) -> anyhow::Result<()> {
+        write_v8_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V9)?;
+        conn.execute_batch(
+            "UPDATE pages SET template_at = '2026-10-20T00:00:00.000Z' WHERE id = 'p3';
+             PRAGMA user_version = 9;",
+        )?;
+        Ok(())
+    }
+
+    /// Bold over the first word of `p2`'s first block, saved and read back.
+    fn format_first_block(db: &mut Database) -> anyhow::Result<()> {
+        let mut blocks = db.list_blocks("p2")?;
+        assert!(blocks.iter().all(|b| b.marks.is_empty()));
+        blocks[0].marks = vec![Mark::new(0, 6, MarkKind::Bold)];
+        let title = db.get_page("p2")?.expect("p2").title;
+        db.save_document("p2", &title, &blocks)?;
+        assert_eq!(
+            db.list_blocks("p2")?[0].marks,
+            vec![Mark::new(0, 6, MarkKind::Bold)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn v9_database_gets_marks_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v9_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(has_column(&tmp.db(), "blocks", "marks")?);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before, "no rebuild");
+        // Everything is where it was, without formatting.
+        let blocks = db.list_blocks("p2")?;
+        assert_eq!(blocks[0].content, "Harina de centeno 🌾");
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert_eq!(db.page_versions("p1")?.len(), 1);
+        assert_eq!(db.list_favorites()?.len(), 1);
+        assert!(db.is_template("p3")?);
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v9 copy first"
+        );
+        format_first_block(&mut db)?;
+        // Formatting does not touch the search index.
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        let nulls: i64 =
+            conn.query_row("SELECT COUNT(*) FROM blocks WHERE marks IS NULL", [], |r| {
+                r.get(0)
+            })?;
+        assert_eq!(nulls, rowids_before.len() as i64 - 1);
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v10() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        format_first_block(&mut db)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v9_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v9_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        // 0010 is a single ALTER: it fails if another tool already added
+        // a `marks` column. The error says which upgrade failed, and the
+        // v9 database is left as it was, its own column included.
+        Connection::open(tmp.db())?
+            .execute_batch("ALTER TABLE blocks ADD COLUMN marks INTEGER DEFAULT 7;")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 10"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 9);
+        let foreign: i64 =
+            conn.query_row("SELECT COUNT(*) FROM blocks WHERE marks = 7", [], |r| {
+                r.get(0)
+            })?;
+        assert_eq!(foreign, rowids_before.len() as i64);
+        drop(conn);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        Ok(())
+    }
+
+    #[test]
+    fn v9_backup_restores_into_v10() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v9_database(&old_db)?;
+        let v9_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        let page = db.create_page("Se pierde al restaurar", None)?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v9_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.get_page(&page)?.is_none());
+        assert!(db.is_template("p3")?);
+        format_first_block(&mut db)?;
         Ok(())
     }
 }

@@ -19,6 +19,7 @@ fn block(id: &str) -> Block {
         indent: 0,
         attachment: None,
         link: None,
+        marks: Vec::new(),
     }
 }
 
@@ -1509,6 +1510,7 @@ fn sidebar_width_is_stable_across_frames() -> anyhow::Result<()> {
                 indent: 0,
                 attachment: None,
                 link: None,
+                marks: Vec::new(),
             });
             egui::Popup::open_id(&ctx, super::blocks::handle_menu_id("b"));
         }

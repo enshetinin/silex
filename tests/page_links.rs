@@ -14,6 +14,7 @@ fn block(page: &str, kind: BlockKind, content: &str, link: Option<&str>) -> Bloc
         indent: 0,
         attachment: None,
         link: link.map(str::to_owned),
+        marks: Vec::new(),
     }
 }
 

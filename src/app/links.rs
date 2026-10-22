@@ -567,6 +567,7 @@ impl SilexApp {
             indent,
             attachment: None,
             link: Some(page.id.clone()),
+            marks: Vec::new(),
         };
         self.pending_focus = Some((link.id.clone(), 0));
         self.blocks.insert(at.min(self.blocks.len()), link);
@@ -654,6 +655,7 @@ mod tests {
             indent: 0,
             attachment: None,
             link: link.map(str::to_owned),
+            marks: Vec::new(),
         };
         let mut targets = HashMap::new();
         targets.insert(

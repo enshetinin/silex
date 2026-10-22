@@ -11,6 +11,7 @@ use rusqlite::{Connection, MAIN_DB, OptionalExtension, params, types::Value};
 use uuid::Uuid;
 
 use crate::attachment::{Attachment, MAX_SIZE, NewAttachment};
+use crate::marks;
 use crate::model::{
     Block, BlockKind, DatabaseView, MAX_INDENT, NewBlock, Page, PageKind, TrashItem, ViewKind,
 };
@@ -33,6 +34,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (7, include_str!("db/migrations/0007_page_links.sql")),
     (8, include_str!("db/migrations/0008_page_versions.sql")),
     (9, include_str!("db/migrations/0009_templates.sql")),
+    (10, include_str!("db/migrations/0010_inline_marks.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -1232,7 +1234,7 @@ impl Database {
     pub fn list_blocks(&self, page_id: &str) -> Result<Vec<Block>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, page_id, kind, content, checked, position, indent, attachment_id,
-                    link_page_id
+                    link_page_id, marks
              FROM blocks WHERE page_id = ?1 ORDER BY position, rowid",
         )?;
         let rows = stmt.query_map([page_id], read_block)?;
@@ -1307,7 +1309,7 @@ impl Database {
         let stored: HashMap<String, Block> = {
             let mut stmt = tx.prepare(
                 "SELECT id, page_id, kind, content, checked, position, indent, attachment_id,
-                        link_page_id
+                        link_page_id, marks
                  FROM blocks WHERE page_id = ?1",
             )?;
             let rows = stmt.query_map([page_id], read_block)?;
@@ -1347,6 +1349,13 @@ impl Database {
                 }
                 None => block,
             };
+            // Formatting is stored clean (ADR 0015): in normal form, inside
+            // the text, and only on kinds that take it.
+            let marks = if block.kind.takes_marks() {
+                marks::sanitize(&block.marks, &block.content)
+            } else {
+                Vec::new()
+            };
             match stored.get(&block.id) {
                 // Unchanged rows are skipped so FTS is only touched when needed.
                 Some(old)
@@ -1356,12 +1365,13 @@ impl Database {
                         && old.indent == block.indent
                         && old.attachment == block.attachment
                         && old.link == block.link
+                        && old.marks == marks
                         && old.position == position => {}
                 Some(_) => {
                     changed = true;
                     tx.execute(
                         "UPDATE blocks SET kind = ?2, content = ?3, checked = ?4, position = ?5,
-                             indent = ?6, attachment_id = ?7, link_page_id = ?8,
+                             indent = ?6, attachment_id = ?7, link_page_id = ?8, marks = ?9,
                              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                          WHERE id = ?1",
                         params![
@@ -1372,7 +1382,8 @@ impl Database {
                             position,
                             block.indent,
                             block.attachment,
-                            block.link
+                            block.link,
+                            marks::to_json(&marks)
                         ],
                     )
                     .with_context(|| format!("No se pudo guardar el bloque {}", block.id))?;
@@ -1382,8 +1393,8 @@ impl Database {
                     changed = true;
                     tx.execute(
                         "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent,
-                                             attachment_id, link_page_id)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                             attachment_id, link_page_id, marks)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                         params![
                             block.id,
                             page_id,
@@ -1393,7 +1404,8 @@ impl Database {
                             position,
                             block.indent,
                             block.attachment,
-                            block.link
+                            block.link,
+                            marks::to_json(&marks)
                         ],
                     )
                     .with_context(|| format!("No se pudo guardar el bloque {}", block.id))?;
@@ -1434,7 +1446,7 @@ impl Database {
         let blocks = {
             let mut stmt = tx.prepare(
                 "SELECT id, page_id, kind, content, checked, position, indent, attachment_id,
-                        link_page_id
+                        link_page_id, marks
                  FROM blocks WHERE page_id = ?1 ORDER BY position, id",
             )?;
             let rows = stmt.query_map([page_id], read_block)?;
@@ -2372,8 +2384,9 @@ pub struct LinkTarget {
 }
 
 /// Maps a `blocks` row (id, page_id, kind, content, checked, position,
-/// indent, attachment_id, link_page_id).
-/// An unknown kind is a conversion error, not a panic.
+/// indent, attachment_id, link_page_id, marks).
+/// An unknown kind is a conversion error, not a panic. Formatting that
+/// does not fit the text is dropped, never the text (ADR 0015).
 fn read_block(r: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
     let kind: String = r.get(2)?;
     let kind = BlockKind::parse(&kind).ok_or_else(|| {
@@ -2383,7 +2396,7 @@ fn read_block(r: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
             format!("tipo de bloque desconocido: {kind}").into(),
         )
     })?;
-    Ok(Block {
+    let mut block = Block {
         id: r.get(0)?,
         page_id: r.get(1)?,
         kind,
@@ -2393,7 +2406,19 @@ fn read_block(r: &rusqlite::Row<'_>) -> rusqlite::Result<Block> {
         indent: r.get(6)?,
         attachment: r.get(7)?,
         link: r.get(8)?,
-    })
+        marks: Vec::new(),
+    };
+    let stored: Option<String> = r.get(9)?;
+    if let Some(json) = stored.filter(|_| block.kind.takes_marks()) {
+        match marks::from_json(&json, block.content.chars().count()) {
+            Ok(marks) => block.marks = marks,
+            Err(err) => eprintln!(
+                "Silex: se ignora el formato dañado del bloque {}: {err}",
+                block.id
+            ),
+        }
+    }
+    Ok(block)
 }
 
 /// Saves `blocks` and `title` as a version of `page` (ADR 0009) and thins
@@ -2421,6 +2446,7 @@ fn save_version(
         None => tx.query_row(&format!("SELECT {NOW}"), [], |r| r.get(0))?,
     };
     let json = versions::blocks_to_json(blocks);
+    let new_format = versions::format_of(blocks);
     let last: Option<(String, i64, String, bool)> = tx
         .query_row(
             "SELECT title, format, blocks,
@@ -2432,7 +2458,7 @@ fn save_version(
         )
         .optional()?;
     if let Some((last_title, format, last_json, recent)) = last {
-        let same = last_title == title && format == versions::FORMAT && last_json == json;
+        let same = last_title == title && format == new_format && last_json == json;
         if same || (recent && !force) {
             return Ok(false);
         }
@@ -2440,7 +2466,7 @@ fn save_version(
     tx.execute(
         "INSERT INTO page_versions (page_id, created_at, title, format, blocks, size)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![page, now, title, versions::FORMAT, json, json.len() as i64],
+        params![page, now, title, new_format, json, json.len() as i64],
     )?;
     let dated: Vec<(i64, f64)> = tx
         .prepare("SELECT id, julianday(created_at) FROM page_versions WHERE page_id = ?1")?
@@ -2672,23 +2698,24 @@ fn copy_blocks(tx: &Connection, from: &str, to: &str, today: Option<&str>) -> Re
     let blocks: Vec<Block> = tx
         .prepare(
             "SELECT id, page_id, kind, content, checked, position, indent, attachment_id,
-                    link_page_id
+                    link_page_id, marks
              FROM blocks WHERE page_id = ?1 ORDER BY position, id",
         )?
         .query_map([from], read_block)?
         .collect::<rusqlite::Result<_>>()?;
     let mut insert = tx.prepare(
         "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent,
-                             attachment_id, link_page_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                             attachment_id, link_page_id, marks)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )?;
     for (position, block) in blocks.iter().enumerate() {
-        // A link's text is its page's title: never a date to fill.
-        let content = match today {
+        // A link's text is its page's title: never a date to fill. The
+        // formatting moves with the date so it stays on the same words.
+        let (content, marks) = match today {
             Some(today) if block.link.is_none() => {
-                crate::templates::fill_date(&block.content, today)
+                crate::templates::fill_date_marked(&block.content, &block.marks, today)
             }
-            _ => block.content.clone(),
+            _ => (block.content.clone(), block.marks.clone()),
         };
         insert.execute(params![
             Uuid::new_v4().to_string(),
@@ -2699,7 +2726,8 @@ fn copy_blocks(tx: &Connection, from: &str, to: &str, today: Option<&str>) -> Re
             position as i64,
             block.indent,
             block.attachment,
-            block.link
+            block.link,
+            marks::to_json(&marks)
         ])?;
     }
     Ok(())

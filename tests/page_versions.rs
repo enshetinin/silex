@@ -18,6 +18,7 @@ fn block(page: &str, content: &str) -> Block {
         indent: 0,
         attachment: None,
         link: None,
+        marks: Vec::new(),
     }
 }
 
@@ -259,7 +260,7 @@ fn an_unreadable_version_says_so_and_the_others_still_read() -> anyhow::Result<(
     // A newer Silex wrote a format this one does not know.
     rusqlite::Connection::open(&path.0)?.execute(
         "INSERT INTO page_versions (page_id, title, format, blocks, size)
-         VALUES (?1, 'Diario', 2, '{}', 2)",
+         VALUES (?1, 'Diario', 3, '{}', 2)",
         [&page],
     )?;
     let db = Database::open(&path.0)?;

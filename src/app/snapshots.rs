@@ -2208,6 +2208,7 @@ fn attachments_app() -> anyhow::Result<SilexApp> {
         indent: 0,
         attachment: None,
         link: None,
+        marks: Vec::new(),
     }];
     // A real image (a soft gradient), so its preview shows (H7.2).
     let (w, h) = (480u32, 260u32);
@@ -2239,6 +2240,7 @@ fn attachments_app() -> anyhow::Result<SilexApp> {
             indent: 0,
             attachment: Some(attachment.id),
             link: None,
+            marks: Vec::new(),
         });
     }
     db.save_document(&page, "Viaje a Lisboa", &blocks)?;
@@ -2391,6 +2393,7 @@ fn drag_app() -> anyhow::Result<SilexApp> {
             indent: 0,
             attachment: None,
             link: None,
+            marks: Vec::new(),
         })
         .collect();
     db.save_document(&page, "Arrastrar", &blocks)?;
@@ -2863,6 +2866,7 @@ fn links_app() -> anyhow::Result<SilexApp> {
         indent: 0,
         attachment: None,
         link: link.map(str::to_owned),
+        marks: Vec::new(),
     };
     let blocks = [
         block("p", BlockKind::Paragraph, "Hoy revisé el diseño:", None),
@@ -2930,6 +2934,7 @@ fn backlinks_app() -> anyhow::Result<(SilexApp, String)> {
         indent: 0,
         attachment: None,
         link: Some(recetas.clone()),
+        marks: Vec::new(),
     };
     for (page, title) in [
         (&diario, "Diario"),

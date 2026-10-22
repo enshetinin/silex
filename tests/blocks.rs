@@ -11,6 +11,7 @@ fn block(kind: BlockKind, indent: u8) -> Block {
         indent,
         attachment: None,
         link: None,
+        marks: Vec::new(),
     }
 }
 

@@ -8,8 +8,11 @@ use serde_json::{Map, Value, json};
 
 use crate::model::{Block, BlockKind, MAX_INDENT};
 
-/// Format of `page_versions.blocks` written by this version of Silex.
-pub const FORMAT: i64 = 1;
+/// Newest format of `page_versions.blocks` this version of Silex reads:
+/// 1 is plain blocks, 2 adds inline formatting (`marks`, ADR 0015). A
+/// version is written as 1 when none of its blocks has formatting, so
+/// pages without it keep the same versions as before.
+pub const FORMAT: i64 = 2;
 /// At most one version per page in this many minutes of editing.
 pub const MIN_GAP_MINUTES: i64 = 10;
 /// Every version younger than this (in days) is kept.
@@ -92,9 +95,19 @@ fn days_from_civil((year, month, day): (i64, u32, u32)) -> i64 {
 /// damaged data): one unreadable version never hides the others.
 pub type VersionBlocks = Result<Vec<Block>, String>;
 
-/// The blocks as stored in a version (format 1): a JSON list with `id`,
-/// `kind`, `content`, `checked`, `indent` and, when they have one,
-/// `attachment` and `link`. Positions are the list order.
+/// The format [`blocks_to_json`] writes for `blocks`: 2 if any of them
+/// has inline formatting, 1 otherwise.
+pub fn format_of(blocks: &[Block]) -> i64 {
+    if blocks.iter().any(|b| !b.marks.is_empty()) {
+        2
+    } else {
+        1
+    }
+}
+
+/// The blocks as stored in a version: a JSON list with `id`, `kind`,
+/// `content`, `checked`, `indent` and, when they have one, `attachment`,
+/// `link` and `marks` (format 2). Positions are the list order.
 pub fn blocks_to_json(blocks: &[Block]) -> String {
     let list: Vec<Value> = blocks
         .iter()
@@ -113,6 +126,9 @@ pub fn blocks_to_json(blocks: &[Block]) -> String {
                 if let Some(link) = &b.link {
                     map.insert("link".into(), json!(link));
                 }
+                if !b.marks.is_empty() {
+                    map.insert("marks".into(), crate::marks::to_value(&b.marks));
+                }
             }
             item
         })
@@ -123,9 +139,10 @@ pub fn blocks_to_json(blocks: &[Block]) -> String {
 /// Reads a version's blocks (of `page_id`). Unknown fields are ignored;
 /// an unknown format or kind, a missing id or a file block without its
 /// file make the version unreadable, with a message for the user.
+/// Formatting that does not fit a block's text is dropped, never the text.
 pub fn blocks_from_json(format: i64, json: &str, page_id: &str) -> VersionBlocks {
     const UNREADABLE: &str = "Esta versión no se puede leer";
-    if format != FORMAT {
+    if !(1..=FORMAT).contains(&format) {
         return Err(format!(
             "{UNREADABLE}: es de una versión más reciente de Silex"
         ));
@@ -151,16 +168,23 @@ pub fn blocks_from_json(format: i64, json: &str, page_id: &str) -> VersionBlocks
         if kind == BlockKind::File && attachment.is_none() {
             return Err(damaged());
         }
+        let content = text("content").unwrap_or_default();
+        let marks = map
+            .get("marks")
+            .filter(|_| kind.takes_marks())
+            .and_then(|marks| crate::marks::from_value(marks, content.chars().count()).ok())
+            .unwrap_or_default();
         blocks.push(Block {
             id,
             page_id: page_id.to_owned(),
             kind,
-            content: text("content").unwrap_or_default(),
+            content,
             checked: map.get("checked").and_then(Value::as_bool).unwrap_or(false),
             position: position as i64,
             indent: indent(map),
             attachment,
             link: text("link").filter(|_| kind == BlockKind::PageLink),
+            marks,
         });
     }
     Ok(blocks)
@@ -226,6 +250,7 @@ mod tests {
             indent: 0,
             attachment: None,
             link: None,
+            marks: Vec::new(),
         }
     }
 
@@ -249,15 +274,47 @@ mod tests {
             })
             .collect();
         let json = blocks_to_json(&blocks);
-        assert_eq!(blocks_from_json(FORMAT, &json, "p"), Ok(blocks));
+        assert_eq!(format_of(&blocks), 1);
+        assert!(!json.contains("marks"));
+        assert_eq!(blocks_from_json(1, &json, "p"), Ok(blocks));
         assert_eq!(blocks_from_json(FORMAT, "[]", "p"), Ok(vec![]));
+    }
+
+    #[test]
+    fn formatting_makes_a_format_2_version_and_comes_back() {
+        use crate::marks::{Mark, MarkKind};
+        let mut bold = block("a", BlockKind::Paragraph);
+        bold.marks = vec![
+            Mark::new(0, 5, MarkKind::Bold),
+            Mark::new(6, 9, MarkKind::Link("https://ejemplo.com".into())),
+        ];
+        let plain = Block {
+            position: 1,
+            ..block("b", BlockKind::Quote)
+        };
+        let blocks = vec![bold, plain];
+        assert_eq!(format_of(&blocks), 2);
+        let json = blocks_to_json(&blocks);
+        assert_eq!(blocks_from_json(2, &json, "p"), Ok(blocks));
+        // Damaged formatting is dropped; the block and its text stay.
+        let read = blocks_from_json(
+            2,
+            r#"[{"id":"a","kind":"paragraph","content":"hola","marks":[{"start":0,"end":99,"type":"bold"}]},
+                {"id":"b","kind":"code","content":"x","marks":[{"start":0,"end":1,"type":"bold"}]}]"#,
+            "p",
+        )
+        .expect("readable");
+        assert_eq!(read[0].content, "hola");
+        assert!(read[0].marks.is_empty());
+        assert!(read[1].marks.is_empty(), "code takes no formatting");
     }
 
     #[test]
     fn unreadable_versions_say_why_and_never_panic() {
         let err =
             |format: i64, json: &str| blocks_from_json(format, json, "p").expect_err("unreadable");
-        assert!(err(2, "[]").contains("más reciente"));
+        assert!(err(3, "[]").contains("más reciente"));
+        assert!(err(0, "[]").contains("más reciente"));
         assert!(err(FORMAT, r#"[{"id":"a","kind":"mapa"}]"#).contains("más reciente"));
         for damaged in [
             "no es json",

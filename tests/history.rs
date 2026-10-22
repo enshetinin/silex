@@ -105,6 +105,7 @@ fn first_difference_finds_the_changed_block() {
         indent: 0,
         attachment: None,
         link: None,
+        marks: Vec::new(),
     };
     let a = vec![b("1", "x"), b("2", "y")];
     assert_eq!(first_difference(&a, &a), None);

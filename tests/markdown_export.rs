@@ -14,6 +14,7 @@ fn b(kind: BlockKind, indent: u8, content: &str) -> Block {
         indent,
         attachment: None,
         link: None,
+        marks: Vec::new(),
     }
 }
 

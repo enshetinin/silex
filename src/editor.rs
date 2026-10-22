@@ -48,6 +48,7 @@ fn new_block_like(source: &Block, kind: BlockKind, id: String, content: String) 
         indent: source.indent,
         attachment: None,
         link: None,
+        marks: Vec::new(),
     }
 }
 

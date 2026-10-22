@@ -353,6 +353,7 @@ pub(super) fn history_fixture() -> Result<(SilexApp, String)> {
         indent: 0,
         attachment: None,
         link: None,
+        marks: Vec::new(),
     };
     let first = vec![
         block("h", BlockKind::Heading1, "Sopas"),

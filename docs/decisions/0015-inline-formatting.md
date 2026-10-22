@@ -60,6 +60,7 @@ Requisitos:
 ### Encaje con lo que ya existe
 - **Búsqueda FTS5 y buscar en la página:** sin cambios, sobre el texto plano. El resaltado de coincidencias (H11.7) sigue usando el `Galley`, que tiene el mismo texto.
 - **Historial de versiones** (ADR 0009): formato 2, con `marks` en cada bloque. Se siguen leyendo las versiones de formato 1 (sin marcas). Restaurar devuelve el formato.
+  - *Actualización (H12.1a):* una versión sin ningún bloque con formato se sigue guardando como formato 1, idéntica a las de antes; así, actualizar no crea una versión nueva de cada página solo por el cambio de formato.
 - **Plantillas, duplicar página o bloques, mover a otra página:** copian las marcas con el bloque.
 - **Exportación Markdown:** `**negrita**`, `*cursiva*`, `` `código` ``, `~~tachado~~` y `[texto](url)`, cerrando y abriendo las marcas en el orden correcto cuando se solapan, y escapando el texto como hoy. Los espacios al borde de un tramo se dejan fuera de las marcas, porque CommonMark no reconoce `** así**`.
 - **Importación Markdown:** el énfasis, el código en línea, el tachado y los enlaces web pasan a ser marcas en lugar de texto literal; las imágenes y el HTML siguen como texto. Las páginas importadas antes **no se reescriben**: su `**texto**` literal sigue siendo texto (se puede volver a importar).

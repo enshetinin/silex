@@ -1,0 +1,12 @@
+-- Schema version 10: inline formatting (docs/decisions/0015-inline-formatting.md).
+-- Applied transactionally by Rust, after a verified copy of the v9 file.
+--
+-- `content` stays the plain text (search, export and the FTS index read
+-- it); `marks` is a JSON list of ranges over it, in characters, written
+-- and read by `src/marks.rs`. NULL means no formatting. Rust validates the
+-- list when reading: if it does not fit the text, the block keeps its
+-- text without formatting.
+--
+-- Only a new column: nothing is rebuilt, and the FTS trigger only reacts
+-- to `UPDATE OF content`, so formatting changes never reindex.
+ALTER TABLE blocks ADD COLUMN marks TEXT CHECK (marks IS NULL OR json_valid(marks));

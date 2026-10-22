@@ -580,6 +580,7 @@ impl SilexApp {
                         indent: 0,
                         attachment: Some(attachment.id.clone()),
                         link: None,
+                        marks: Vec::new(),
                     });
                     if self.selected.as_deref() == Some(page) {
                         self.files

@@ -112,6 +112,7 @@ mod writing {
             indent: 0,
             attachment: None,
             link: None,
+            marks: Vec::new(),
         }]
     }
 
