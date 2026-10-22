@@ -32,6 +32,7 @@
 ## Versión 4 — ajustes (`0004_settings.sql`)
 - `settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`: preferencias clave-valor (`theme` = `system`/`light`/`dark`, `zoom_percent` entre 50 y 200). Una preferencia nueva no necesita migración.
 - Rust valida cada valor al leer (`settings::Settings::from_pairs`): una clave desconocida o un valor inválido se ignoran y se usa el valor por defecto; nunca impiden arrancar.
+- Otras claves, que `Settings::from_pairs` ignora: `open_tabs` (ADR 0011) y `last_view:<id de la base>` (H11.6), con el id de la última vista abierta en esa base. Esta se borra con la base al borrarla para siempre (ADR 0013); si apunta a una vista ya borrada, la base se abre en la primera.
 - Los ajustes viven en la base, así que entran en las copias de seguridad: restaurar una copia restaura también sus ajustes.
 
 ## Versión 5 — bases de datos (`0005_databases.sql`, ADR 0006)

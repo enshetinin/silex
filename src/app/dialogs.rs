@@ -316,6 +316,8 @@ impl SilexApp {
         let previous = self.selected.take();
         self.title.clear();
         self.blocks.clear();
+        // The copy has its own last views (H11.6).
+        self.last_views.clear();
         self.reload_pages()?;
         let reopen = previous
             .filter(|id| self.pages.iter().any(|p| &p.id == id))

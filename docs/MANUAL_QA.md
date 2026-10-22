@@ -330,3 +330,9 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - Exporta dos veces: el segundo es «Título (2).csv», el primero no cambia.
 - Cmd+K → «csv» o «excel» lista las dos exportaciones; en una página normal no aparecen.
 - Excel con región española y doble clic en el archivo: anota si lo pone todo en una columna (límite conocido).
+
+## 37. Última vista de cada base (H11.6)
+- En una base con dos vistas, abre la segunda. En otra base, deja la primera. Cierra la app y ábrela: cada base se abre en la vista que tenía.
+- Borra la vista abierta, cierra y abre: la base se abre en la que queda.
+- Envía la base a la papelera y restáurala: vuelve a abrirse en su última vista.
+- Restaura una copia de seguridad anterior: las bases se abren en la vista que tenían en esa copia.

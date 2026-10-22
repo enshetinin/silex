@@ -87,8 +87,9 @@ pub struct SilexApp {
     database: Option<DatabaseState>,
     /// The open page's properties, when it is a row of a database.
     row_page: Option<RowPage>,
-    /// The view last open in each database (database id → view id), so it
-    /// opens again on that view; for this session only.
+    /// The view last open in each database (database id → view id), as
+    /// stored in the file (H11.6): read when a database opens, written when
+    /// its view changes, so the same view is never written twice.
     last_views: std::collections::HashMap<String, String>,
     /// The keyboard shortcuts window (from the command palette).
     shortcuts_dialog: bool,

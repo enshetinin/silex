@@ -279,8 +279,15 @@ impl SilexApp {
             select_anchor: None,
             bulk: BulkValue::default(),
         });
-        // The view last open in this session, else the first.
-        let last = self.last_views.get(id).cloned();
+        // The view last open (also in an earlier session, H11.6), else the
+        // first. If it cannot be read, the first: not worth an error.
+        let last = match self.last_views.get(id) {
+            Some(view) => Some(view.clone()),
+            None => self.db.last_view(id).ok().flatten(),
+        };
+        if let Some(view) = &last {
+            self.last_views.insert(id.to_owned(), view.clone());
+        }
         if let Some(state) = self.database.as_mut() {
             state.view = last
                 .and_then(|last| state.views.iter().position(|v| v.id == last))

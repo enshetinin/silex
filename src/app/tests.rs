@@ -2391,6 +2391,61 @@ fn each_view_keeps_its_own_rules() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// H11.6: after restarting, each database opens on the view last open
+/// there; if that view was deleted meanwhile, on the first.
+#[test]
+fn each_database_reopens_on_its_last_view_after_restarting() -> anyhow::Result<()> {
+    use silex_desktop::model::ViewKind;
+    // Declared before the apps: removed after their files are closed.
+    let tmp = TempFolder::new("silex-app-last-view")?;
+    let path = tmp.0.join("silex.sqlite3");
+    let start = |path: &std::path::Path| -> anyhow::Result<SilexApp> {
+        let mut app = SilexApp::new(Database::open(path)?)?;
+        app.startup_backup_pending = false;
+        Ok(app)
+    };
+    let ctx = egui::Context::default();
+    let (lecturas, recetas) = {
+        let mut app = start(&path)?;
+        let lecturas = app.db.create_database("Lecturas", None)?;
+        let recetas = app.db.create_database("Recetas", None)?;
+        app.reload_pages()?;
+        app.open_page(recetas.clone())?;
+        app.add_view(ViewKind::Board)?;
+        app.add_view(ViewKind::Table)?;
+        app.switch_view(0)?;
+        app.open_page(lecturas.clone())?;
+        app.add_view(ViewKind::Board)?;
+        assert_eq!(open_view(&app), "Tablero");
+        app_frame(&mut app, &ctx, vec![]);
+        (lecturas, recetas)
+    };
+
+    let mut app = start(&path)?;
+    assert_eq!(app.selected.as_deref(), Some(lecturas.as_str()), "its tab");
+    assert_eq!(open_view(&app), "Tablero", "the last view, not the first");
+    app.open_page(recetas.clone())?;
+    assert_eq!(open_view(&app), "Tabla", "went back to the first there");
+    app.switch_view(2)?;
+    assert_eq!(open_view(&app), "Tabla 2");
+    app_frame(&mut app, &ctx, vec![]);
+    drop(app);
+
+    // «Tabla 2» goes while the app is closed: the first view instead.
+    {
+        let mut db = Database::open(&path)?;
+        let gone = db.database_views(&recetas)?[2].id.clone();
+        db.delete_view(&gone)?;
+    }
+    let mut app = start(&path)?;
+    app.open_page(recetas)?;
+    assert_eq!(open_view(&app), "Tabla");
+    app.open_page(lecturas)?;
+    assert_eq!(open_view(&app), "Tablero");
+    assert!(app.notice.is_none(), "{:?}", app.notice);
+    Ok(())
+}
+
 // ---- H6.4: undo in the table ----
 
 #[test]

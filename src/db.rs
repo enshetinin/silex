@@ -271,6 +271,32 @@ impl Database {
         Ok(())
     }
 
+    /// The view of `database_id` last open (H11.6), if one was stored. It
+    /// may have been deleted since: the caller falls back to the first.
+    pub fn last_view(&self, database_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [last_view_key(database_id)],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Remembers `view_id` as the open view of `database_id`, to open it
+    /// there at the next start. The view must be one of that database's.
+    pub fn set_last_view(&self, database_id: &str, view_id: &str) -> Result<()> {
+        let affected = self.conn.execute(
+            "INSERT INTO settings (key, value)
+             SELECT ?1, id FROM db_views WHERE id = ?2 AND database_id = ?3
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![last_view_key(database_id), view_id, database_id],
+        )?;
+        ensure!(affected == 1, "La vista no es de esta base de datos");
+        Ok(())
+    }
+
     /// Stores every preference in one transaction.
     pub fn save_settings(&mut self, settings: &Settings) -> Result<()> {
         let tx = self.conn.transaction()?;
@@ -1860,6 +1886,7 @@ impl Database {
         let mut deleted = 0;
         for page in &branch {
             deleted += tx.execute("DELETE FROM pages WHERE id = ?1", [page])?;
+            tx.execute("DELETE FROM settings WHERE key = ?1", [last_view_key(page)])?;
         }
         tx.commit()?;
         Ok(deleted)
@@ -1869,6 +1896,12 @@ impl Database {
     /// [`Database::purge_trash_item`]). Returns how many pages went.
     pub fn empty_trash(&mut self) -> Result<usize> {
         let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM settings WHERE key IN (
+                 SELECT ?1 || id FROM pages WHERE deleted_at IS NOT NULL
+             )",
+            [LAST_VIEW_PREFIX],
+        )?;
         let deleted = tx.execute("DELETE FROM pages WHERE deleted_at IS NOT NULL", [])?;
         tx.commit()?;
         Ok(deleted)
@@ -2255,6 +2288,14 @@ const COMPACTING: &str = "compacting";
 const SYNCED_WARNING: &str = "synced_warning_dismissed";
 /// `settings` key of the open tabs (ADR 0011).
 const OPEN_TABS: &str = "open_tabs";
+/// Start of the `settings` key of a database's last open view (H11.6),
+/// followed by the database's id.
+const LAST_VIEW_PREFIX: &str = "last_view:";
+
+fn last_view_key(database_id: &str) -> String {
+    format!("{LAST_VIEW_PREFIX}{database_id}")
+}
+
 /// `settings` key set once the example templates were created (ADR 0010).
 const EXAMPLE_TEMPLATES: &str = "example_templates";
 
