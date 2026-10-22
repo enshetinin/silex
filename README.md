@@ -10,6 +10,15 @@ Un espacio de trabajo local para escribir y organizar notas, al estilo de Notion
 
 La lista completa está en [CHANGELOG.md](CHANGELOG.md).
 
+> [!WARNING]
+> **Advertencia de seguridad — Aplicación sin firma digital**
+>
+> Silex todavía no dispone de certificados de firma digital. Por este motivo, **macOS y Windows pueden mostrar advertencias de seguridad al instalar o abrir la aplicación**, indicando que el desarrollador no está identificado o que el software no es de confianza.
+>
+> Estas advertencias aparecen porque la aplicación no está firmada digitalmente, **no porque se haya detectado software malicioso**.
+>
+> Descarga Silex únicamente desde las [versiones oficiales de GitHub](https://github.com/enshetinin/silex/releases). Más abajo encontrarás las instrucciones para continuar con la instalación en cada sistema operativo.
+
 ## Instalar
 
 Descarga el paquete de tu sistema en [Versiones](https://github.com/enshetinin/silex/releases). Los paquetes aún **no están firmados**, así que el sistema avisa la primera vez:
