@@ -501,6 +501,10 @@ fn settings_menu_changes_and_stores_the_theme_and_size() -> anyhow::Result<()> {
     assert!((harness.ctx.zoom_factor() - 1.25).abs() < 1e-6);
     let stored = harness.state().db.load_settings()?;
     assert_eq!(stored.theme, silex_desktop::settings::ThemeMode::Dark);
+    // ADR 0014: the version and «Buscar actualizaciones» in the same menu.
+    let version = format!("Silex {}", silex_desktop::about::VERSION);
+    assert!(harness.query_by_label(&version).is_some(), "{version}");
+    assert!(menu_item(&harness, "Buscar actualizaciones…").is_some());
     assert_eq!(stored.zoom_percent, 125);
     Ok(())
 }

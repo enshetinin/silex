@@ -4582,3 +4582,23 @@ fn cmd_t_opens_a_recent_page_in_a_new_tab() -> anyhow::Result<()> {
     assert_eq!(app.tabs.len(), tabs + 1, "in a new tab");
     Ok(())
 }
+
+// ---- H9.4: «Buscar actualizaciones» (ADR 0014) ----
+
+#[test]
+fn check_updates_only_asks_the_system_to_open_the_releases_page() -> anyhow::Result<()> {
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    let ctx = egui::Context::default();
+    app_frame(&mut app, &ctx, vec![]);
+    app.run_command(&ctx, silex_desktop::palette::Command::CheckUpdates)?;
+    let commands = app_frame_commands(&mut app, &ctx, vec![]);
+    let urls: Vec<String> = commands
+        .iter()
+        .filter_map(|c| match c {
+            egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(urls, ["https://github.com/enshetinin/silex/releases"]);
+    Ok(())
+}

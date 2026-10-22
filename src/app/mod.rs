@@ -205,6 +205,12 @@ pub struct SilexApp {
 }
 
 /// "Cmd" on macOS, "Ctrl" elsewhere (egui's COMMAND modifier).
+/// «Buscar actualizaciones» (ADR 0014): the page of versions, in the
+/// system browser. The app itself connects to nothing.
+fn open_releases_page(ctx: &egui::Context) {
+    ctx.open_url(egui::OpenUrl::new_tab(silex_desktop::about::RELEASES_URL));
+}
+
 fn cmd_label(ctx: &egui::Context) -> &'static str {
     if ctx.os() == egui::os::OperatingSystem::Mac {
         "Cmd"
