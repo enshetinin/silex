@@ -717,6 +717,29 @@ impl SilexApp {
         Ok(())
     }
 
+    /// Saves several cells in one transaction (H11.2) and shows them:
+    /// (row, property, value). If one is rejected, none changes.
+    pub(super) fn store_cells(
+        &mut self,
+        cells: Vec<(String, String, Option<CellValue>)>,
+    ) -> Result<()> {
+        let refs: Vec<(&str, &str, Option<&CellValue>)> = cells
+            .iter()
+            .map(|(row, property, value)| (row.as_str(), property.as_str(), value.as_ref()))
+            .collect();
+        self.db.set_values(&refs)?;
+        if let Some(state) = self.database.as_mut() {
+            for (row, property, value) in cells {
+                let row_cells = state.values.entry(row).or_default();
+                match value.filter(|v| !v.is_empty()) {
+                    Some(value) => row_cells.insert(property, value),
+                    None => row_cells.remove(&property),
+                };
+            }
+        }
+        Ok(())
+    }
+
     /// Creates an option named `name` in a select property (next color in
     /// turn) and puts it in the cell of `row`.
     pub(super) fn create_option(&mut self, row: &str, property: &str, name: &str) -> Result<()> {

@@ -209,21 +209,147 @@ pub fn slash_query(content: &str, cursor: usize) -> Option<&str> {
     (cursor == word_len + 1 && word_len <= MAX_SLASH_QUERY).then_some(word)
 }
 
-/// Lowercase without Spanish accents, so "codigo" finds "Código" and
-/// "pequeno" finds "pequeño" (slash menu and command palette).
+/// Lowercase without accents, so "codigo" finds "Código" and "pequeno"
+/// finds "pequeño" (slash menu, command palette, filters and find in the
+/// page). See [`fold_char`].
 pub fn fold(text: &str) -> String {
-    text.chars()
-        .flat_map(char::to_lowercase)
-        .map(|c| match c {
-            'á' | 'à' | 'ä' => 'a',
-            'é' | 'è' | 'ë' => 'e',
-            'í' | 'ì' | 'ï' => 'i',
-            'ó' | 'ò' | 'ö' => 'o',
-            'ú' | 'ù' | 'ü' => 'u',
-            'ñ' => 'n',
-            other => other,
+    text.chars().flat_map(fold_char).collect()
+}
+
+/// One character lowercased and without its accent: the precomposed Latin
+/// letters lose theirs, and a combining accent (U+0300–U+036F, as in
+/// "e\u{301}") folds to nothing. Most characters fold to one; a few
+/// lowercase to more (`İ` → `i̇` → `i`), none to more than three.
+pub fn fold_char(c: char) -> impl Iterator<Item = char> {
+    c.to_lowercase().filter_map(|c| match c {
+        '\u{300}'..='\u{36f}' => None,
+        'á' | 'à' | 'ä' | 'â' | 'ã' | 'å' => Some('a'),
+        'é' | 'è' | 'ë' | 'ê' => Some('e'),
+        'í' | 'ì' | 'ï' | 'î' => Some('i'),
+        'ó' | 'ò' | 'ö' | 'ô' | 'õ' => Some('o'),
+        'ú' | 'ù' | 'ü' | 'û' => Some('u'),
+        'ý' | 'ÿ' => Some('y'),
+        'ñ' => Some('n'),
+        'ç' => Some('c'),
+        other => Some(other),
+    })
+}
+
+/// One match of a search in the page (H11.7): the block (an index into
+/// the page's blocks) and its characters `start..end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Match {
+    pub block: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Where `query` appears in `text`, ignoring case and accents ([`fold`]),
+/// as character ranges, left to right and not overlapping. A match takes
+/// in the combining accents right after it, so replacing "e" in
+/// "e\u{301}" leaves no accent behind. A query that folds to nothing
+/// (empty, or only combining accents) finds nothing; spaces count.
+pub fn find_in_text(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    let needle: Vec<char> = fold(query).chars().collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    // The folded text, each folded char with the text char it came from.
+    let chars: Vec<char> = text.chars().collect();
+    let mut folded = Vec::with_capacity(chars.len());
+    let mut origin = Vec::with_capacity(chars.len());
+    for (i, &c) in chars.iter().enumerate() {
+        for f in fold_char(c) {
+            folded.push(f);
+            origin.push(i);
+        }
+    }
+    let combining = |c: char| ('\u{300}'..='\u{36f}').contains(&c);
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at + needle.len() <= folded.len() {
+        if folded[at..at + needle.len()] != needle[..] {
+            at += 1;
+            continue;
+        }
+        let start = origin[at];
+        let mut end = origin[at + needle.len() - 1] + 1;
+        while chars.get(end).is_some_and(|&c| combining(c)) {
+            end += 1;
+        }
+        // A match that starts inside a char folded to several (`İ`) and
+        // overlaps the previous one is left out.
+        if found
+            .last()
+            .is_none_or(|r: &std::ops::Range<usize>| r.end <= start)
+        {
+            found.push(start..end);
+        }
+        // Go on after the text char where this one ends.
+        at += needle.len();
+        while at < folded.len() && origin[at] < end {
+            at += 1;
+        }
+    }
+    found
+}
+
+/// Every match of `query` in the text blocks of a page, in page order
+/// (files and page links have no text to search).
+pub fn find_in_blocks(blocks: &[Block], query: &str) -> Vec<Match> {
+    blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.kind.is_text())
+        .flat_map(|(block, b)| {
+            find_in_text(&b.content, query)
+                .into_iter()
+                .map(move |r| Match {
+                    block,
+                    start: r.start,
+                    end: r.end,
+                })
         })
         .collect()
+}
+
+/// Replaces `matches` (from [`find_in_blocks`] on these blocks) with
+/// `replacement`. Matches that no longer fit their block are skipped.
+/// Returns how many were replaced.
+pub fn replace_matches(blocks: &mut [Block], matches: &[Match], replacement: &str) -> usize {
+    let mut sorted: Vec<&Match> = matches.iter().collect();
+    // From the end, so the earlier positions stay valid.
+    sorted.sort_by_key(|m| std::cmp::Reverse((m.block, m.start)));
+    let mut replaced = 0;
+    let mut last: Option<(usize, usize)> = None;
+    for m in sorted {
+        let Some(block) = blocks.get_mut(m.block) else {
+            continue;
+        };
+        let len = char_len(&block.content);
+        let overlaps = last.is_some_and(|(b, start)| b == m.block && m.end > start);
+        if m.start >= m.end || m.end > len || overlaps || !block.kind.is_text() {
+            continue;
+        }
+        let from = byte_index(&block.content, m.start);
+        let to = byte_index(&block.content, m.end);
+        block.content.replace_range(from..to, replacement);
+        last = Some((m.block, m.start));
+        replaced += 1;
+    }
+    replaced
+}
+
+/// The match to show first when the search starts or its text changes:
+/// the first at or after the caret (block, char), else the first.
+pub fn match_from(matches: &[Match], caret: Option<(usize, usize)>) -> usize {
+    let Some((block, char)) = caret else {
+        return 0;
+    };
+    matches
+        .iter()
+        .position(|m| (m.block, m.end) >= (block, char))
+        .unwrap_or(0)
 }
 
 /// Extra words each type answers to in the slash menu.

@@ -52,6 +52,10 @@ pub struct Palette {
     pub sidebar_text: Color32,
     pub sidebar_muted: Color32,
     pub code_bg: Color32,
+    /// Behind each match of find in the page (H11.7).
+    pub find_match: Color32,
+    /// Behind the match shown («3 de 12»).
+    pub find_current: Color32,
 }
 
 const fn hex(rgb: u32) -> Color32 {
@@ -82,6 +86,8 @@ pub const LIGHT: Palette = Palette {
     sidebar_text: hex(0x3F3F46),
     sidebar_muted: hex(0x5F5F68),
     code_bg: hex(0xF4F4F5),
+    find_match: hex(0xFBF1C7),
+    find_current: hex(0xF5C451),
 };
 
 pub const DARK: Palette = Palette {
@@ -108,6 +114,8 @@ pub const DARK: Palette = Palette {
     sidebar_text: hex(0xC9C9CE),
     sidebar_muted: hex(0x8E8E95),
     code_bg: hex(0x1F1F22),
+    find_match: hex(0x4A3E18),
+    find_current: hex(0x7A5512),
 };
 
 /// Background and text of a select option's tag (H6.2), in the order of
@@ -396,6 +404,8 @@ mod tests {
             ("text / pressed", p.text, p.pressed, TEXT),
             ("text / accent_soft", p.text, p.accent_soft, TEXT),
             ("text / code_bg", p.text, p.code_bg, TEXT),
+            ("text / find_match", p.text, p.find_match, TEXT),
+            ("text / find_current", p.text, p.find_current, TEXT),
             ("text_muted / bg", p.text_muted, p.bg, TEXT),
             ("text_muted / surface", p.text_muted, p.surface, TEXT),
             ("text_muted / subtle", p.text_muted, p.subtle, TEXT),

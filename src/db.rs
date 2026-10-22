@@ -271,6 +271,56 @@ impl Database {
         Ok(())
     }
 
+    /// The pages opened recently as last stored
+    /// ([`crate::recent::Recent::to_json`]), if any (H11.8). Kept in
+    /// `settings`, which ignores the key.
+    pub fn recent_pages(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [RECENT_PAGES],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Remembers the pages opened recently, for the next start.
+    pub fn save_recent_pages(&self, json: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![RECENT_PAGES, json],
+        )?;
+        Ok(())
+    }
+
+    /// The view of `database_id` last open (H11.6), if one was stored. It
+    /// may have been deleted since: the caller falls back to the first.
+    pub fn last_view(&self, database_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [last_view_key(database_id)],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Remembers `view_id` as the open view of `database_id`, to open it
+    /// there at the next start. The view must be one of that database's.
+    pub fn set_last_view(&self, database_id: &str, view_id: &str) -> Result<()> {
+        let affected = self.conn.execute(
+            "INSERT INTO settings (key, value)
+             SELECT ?1, id FROM db_views WHERE id = ?2 AND database_id = ?3
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![last_view_key(database_id), view_id, database_id],
+        )?;
+        ensure!(affected == 1, "La vista no es de esta base de datos");
+        Ok(())
+    }
+
     /// Stores every preference in one transaction.
     pub fn save_settings(&mut self, settings: &Settings) -> Result<()> {
         let tx = self.conn.transaction()?;
@@ -547,6 +597,33 @@ impl Database {
         copy_blocks(&tx, template_id, &id, Some(today))?;
         tx.commit()?;
         Ok(id)
+    }
+
+    /// Duplicates a live page (H11.4) in one transaction: «Título (copia)»
+    /// right below it, with new blocks (same files and links, the files
+    /// not copied), the values of a row, and the properties, options and
+    /// views of a database (its views pointing at the copy's properties).
+    /// With `children`, its subpages (or a database's rows) come along,
+    /// all the way down. Not a template's; no favorite, no history.
+    /// Returns the copy's id.
+    pub fn duplicate_page(&mut self, id: &str, children: bool) -> Result<String> {
+        let tx = self.conn.transaction()?;
+        let copy = duplicate_in(&tx, id, children)?;
+        tx.commit()?;
+        Ok(copy)
+    }
+
+    /// Duplicates several live pages (the rows chosen in a table, H11.4)
+    /// in one transaction, each right below itself, with its subpages. If
+    /// one cannot be copied, none is. Returns the copies' ids, in order.
+    pub fn duplicate_pages(&mut self, ids: &[String]) -> Result<Vec<String>> {
+        let tx = self.conn.transaction()?;
+        let copies = ids
+            .iter()
+            .map(|id| duplicate_in(&tx, id, true))
+            .collect::<Result<_>>()?;
+        tx.commit()?;
+        Ok(copies)
     }
 
     /// Creates the example templates (ADR 0010) the first time; never
@@ -1081,75 +1158,18 @@ impl Database {
         value: Option<&CellValue>,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        let (database, kind): (String, String) = tx
-            .query_row(
-                "SELECT database_id, kind FROM db_properties WHERE id = ?1 AND deleted_at IS NULL",
-                [property_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .context("La propiedad no existe o está borrada")?;
-        let kind = PropertyKind::parse(&kind)
-            .with_context(|| format!("tipo de propiedad desconocido: {kind}"))?;
-        let is_row: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND parent_id = ?2 AND deleted_at IS NULL)",
-            params![row_id, database],
-            |r| r.get(0),
-        )?;
-        ensure!(
-            is_row,
-            "La fila no existe, está en la papelera o es de otra base de datos"
-        );
-        if let Some(value) = value {
-            ensure!(
-                value.kind() == kind,
-                "Un valor de tipo {} no cabe en una propiedad de tipo {}",
-                value.kind().label(),
-                kind.label()
-            );
-        }
-        match value.filter(|v| !v.is_empty()) {
-            None => {
-                tx.execute(
-                    "DELETE FROM db_values WHERE page_id = ?1 AND property_id = ?2",
-                    params![row_id, property_id],
-                )?;
-            }
-            Some(value) => {
-                let (mut text, mut number, mut flag, mut date, mut option) =
-                    (None, None, None, None, None);
-                match value {
-                    CellValue::Text(t) => text = Some(t.as_str()),
-                    CellValue::Number(n) => {
-                        ensure!(n.is_finite(), "El número no es válido");
-                        number = Some(*n);
-                    }
-                    CellValue::Checkbox(on) => flag = Some(i64::from(*on)),
-                    CellValue::Date(d) => date = Some(d.to_string()),
-                    CellValue::Select(id) => {
-                        let belongs: bool = tx.query_row(
-                            "SELECT EXISTS (SELECT 1 FROM db_select_options WHERE id = ?1 AND property_id = ?2)",
-                            params![id, property_id],
-                            |r| r.get(0),
-                        )?;
-                        ensure!(belongs, "La opción no es de esta propiedad");
-                        option = Some(id.as_str());
-                    }
-                }
-                tx.execute(
-                    "INSERT INTO db_values
-                         (page_id, property_id, text_value, number_value, bool_value, date_value, option_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                     ON CONFLICT (page_id, property_id) DO UPDATE SET
-                         text_value = excluded.text_value,
-                         number_value = excluded.number_value,
-                         bool_value = excluded.bool_value,
-                         date_value = excluded.date_value,
-                         option_id = excluded.option_id,
-                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-                    params![row_id, property_id, text, number, flag, date, option],
-                )?;
-            }
+        write_value(&tx, row_id, property_id, value)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Sets several cells in one transaction (H11.2), each as
+    /// [`Database::set_value`] would: (row, property, value). If one of
+    /// them is rejected, none changes.
+    pub fn set_values(&mut self, cells: &[(&str, &str, Option<&CellValue>)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for (row_id, property_id, value) in cells {
+            write_value(&tx, row_id, property_id, *value)?;
         }
         tx.commit()?;
         Ok(())
@@ -1310,9 +1330,18 @@ impl Database {
                             r.get(0)
                         })
                         .optional()?;
-                    linked = Block {
-                        content: title.unwrap_or_else(|| block.content.clone()),
-                        ..block.clone()
+                    // A page deleted for good (ADR 0013) leaves the link
+                    // pointing nowhere, even if the open document (or its
+                    // undo) still holds the old id.
+                    linked = match title {
+                        Some(title) => Block {
+                            content: title,
+                            ..block.clone()
+                        },
+                        None => Block {
+                            link: None,
+                            ..block.clone()
+                        },
                     };
                     &linked
                 }
@@ -1741,6 +1770,14 @@ impl Database {
     /// restoring brings back exactly what was trashed together. Returns the
     /// number of pages trashed (0 if the page was not live).
     pub fn trash_page(&self, id: &str) -> Result<usize> {
+        self.trash_pages(&[id.to_owned()])
+    }
+
+    /// Sends several pages (with their live subpages) to the trash in one
+    /// transaction (H11.2). Each stays its own trash entry and can be
+    /// restored alone; [`Database::restore_pages`] brings them back
+    /// together. Returns the number of pages trashed.
+    pub fn trash_pages(&self, ids: &[String]) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;
         // Strictly later than any existing deleted_at (millisecond resolution),
         // so two trash operations never merge into one branch.
@@ -1752,16 +1789,19 @@ impl Database {
             [],
             |r| r.get(0),
         )?;
-        let trashed = tx.execute(
-            "WITH RECURSIVE branch(id) AS (
-                 SELECT id FROM pages WHERE id = ?1 AND deleted_at IS NULL
-                 UNION
-                 SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
-                 WHERE p.deleted_at IS NULL
-             )
-             UPDATE pages SET deleted_at = ?2 WHERE id IN (SELECT id FROM branch)",
-            params![id, stamp],
-        )?;
+        let mut trashed = 0;
+        for id in ids {
+            trashed += tx.execute(
+                "WITH RECURSIVE branch(id) AS (
+                     SELECT id FROM pages WHERE id = ?1 AND deleted_at IS NULL
+                     UNION
+                     SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
+                     WHERE p.deleted_at IS NULL
+                 )
+                 UPDATE pages SET deleted_at = ?2 WHERE id IN (SELECT id FROM branch)",
+                params![id, stamp],
+            )?;
+        }
         tx.commit()?;
         Ok(trashed)
     }
@@ -1812,6 +1852,32 @@ impl Database {
     /// If its parent is no longer live, the page comes back at the root.
     pub fn restore_page(&mut self, id: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
+        restore_branch(&tx, id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Restores several trashed pages in one transaction (H11.2), each as
+    /// [`Database::restore_page`] would. If one is not in the trash, none
+    /// comes back.
+    pub fn restore_pages(&mut self, ids: &[String]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for id in ids {
+            restore_branch(&tx, id)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Deletes a trash entry for good (H11.3, ADR 0013): the page and what
+    /// was trashed with it, in one transaction. Its blocks, versions, values
+    /// and (a database's) properties and views go by the foreign keys, and
+    /// the search index by its triggers; links to it point nowhere; its
+    /// files stay until «Liberar espacio». Pages trashed earlier on their
+    /// own stay in the trash. Only the head of an entry can be deleted, and
+    /// never a live page. Returns how many pages went.
+    pub fn purge_trash_item(&mut self, id: &str) -> Result<usize> {
+        let tx = self.conn.transaction()?;
         let (parent, stamp): (Option<String>, String) = tx
             .query_row(
                 "SELECT parent_id, deleted_at FROM pages WHERE id = ?1 AND deleted_at IS NOT NULL",
@@ -1820,35 +1886,49 @@ impl Database {
             )
             .optional()?
             .context("La página no está en la papelera")?;
-        tx.execute(
-            "WITH RECURSIVE branch(id) AS (
-                 SELECT ?1
-                 UNION
-                 SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
-                 WHERE p.deleted_at = ?2
-             )
-             UPDATE pages SET deleted_at = NULL WHERE id IN (SELECT id FROM branch)",
-            params![id, stamp],
+        let inside: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND deleted_at = ?2)",
+            params![parent, stamp],
+            |r| r.get(0),
         )?;
-        let parent_is_live = match &parent {
-            Some(parent) => tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND deleted_at IS NULL)",
-                [parent],
-                |r| r.get(0),
-            )?,
-            None => true,
-        };
-        if !parent_is_live {
-            tx.execute(
-                "UPDATE pages SET parent_id = NULL,
-                     sort_order = (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages
-                                   WHERE parent_id IS NULL AND id <> ?1)
-                 WHERE id = ?1",
-                [id],
-            )?;
+        ensure!(
+            !inside,
+            "Esta página se envió a la papelera con la de arriba: se borra con ella"
+        );
+        let branch: Vec<String> = tx
+            .prepare(
+                "WITH RECURSIVE branch(id) AS (
+                     SELECT ?1
+                     UNION
+                     SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
+                     WHERE p.deleted_at = ?2
+                 )
+                 SELECT id FROM branch",
+            )?
+            .query_map(params![id, stamp], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut deleted = 0;
+        for page in &branch {
+            deleted += tx.execute("DELETE FROM pages WHERE id = ?1", [page])?;
+            tx.execute("DELETE FROM settings WHERE key = ?1", [last_view_key(page)])?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(deleted)
+    }
+
+    /// Deletes every page in the trash for good, in one transaction (see
+    /// [`Database::purge_trash_item`]). Returns how many pages went.
+    pub fn empty_trash(&mut self) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM settings WHERE key IN (
+                 SELECT ?1 || id FROM pages WHERE deleted_at IS NOT NULL
+             )",
+            [LAST_VIEW_PREFIX],
+        )?;
+        let deleted = tx.execute("DELETE FROM pages WHERE deleted_at IS NOT NULL", [])?;
+        tx.commit()?;
+        Ok(deleted)
     }
 
     pub fn trash_count(&self) -> Result<usize> {
@@ -2068,6 +2148,127 @@ fn read_cell(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Option<CellVa
     ))
 }
 
+/// Writes one cell inside `tx` (see [`Database::set_value`] for the rules).
+fn write_value(
+    tx: &Connection,
+    row_id: &str,
+    property_id: &str,
+    value: Option<&CellValue>,
+) -> Result<()> {
+    let (database, kind): (String, String) = tx
+        .query_row(
+            "SELECT database_id, kind FROM db_properties WHERE id = ?1 AND deleted_at IS NULL",
+            [property_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .context("La propiedad no existe o está borrada")?;
+    let kind = PropertyKind::parse(&kind)
+        .with_context(|| format!("tipo de propiedad desconocido: {kind}"))?;
+    let is_row: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND parent_id = ?2 AND deleted_at IS NULL)",
+        params![row_id, database],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        is_row,
+        "La fila no existe, está en la papelera o es de otra base de datos"
+    );
+    if let Some(value) = value {
+        ensure!(
+            value.kind() == kind,
+            "Un valor de tipo {} no cabe en una propiedad de tipo {}",
+            value.kind().label(),
+            kind.label()
+        );
+    }
+    match value.filter(|v| !v.is_empty()) {
+        None => {
+            tx.execute(
+                "DELETE FROM db_values WHERE page_id = ?1 AND property_id = ?2",
+                params![row_id, property_id],
+            )?;
+        }
+        Some(value) => {
+            let (mut text, mut number, mut flag, mut date, mut option) =
+                (None, None, None, None, None);
+            match value {
+                CellValue::Text(t) => text = Some(t.as_str()),
+                CellValue::Number(n) => {
+                    ensure!(n.is_finite(), "El número no es válido");
+                    number = Some(*n);
+                }
+                CellValue::Checkbox(on) => flag = Some(i64::from(*on)),
+                CellValue::Date(d) => date = Some(d.to_string()),
+                CellValue::Select(id) => {
+                    let belongs: bool = tx.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM db_select_options WHERE id = ?1 AND property_id = ?2)",
+                        params![id, property_id],
+                        |r| r.get(0),
+                    )?;
+                    ensure!(belongs, "La opción no es de esta propiedad");
+                    option = Some(id.as_str());
+                }
+            }
+            tx.execute(
+                "INSERT INTO db_values
+                     (page_id, property_id, text_value, number_value, bool_value, date_value, option_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (page_id, property_id) DO UPDATE SET
+                     text_value = excluded.text_value,
+                     number_value = excluded.number_value,
+                     bool_value = excluded.bool_value,
+                     date_value = excluded.date_value,
+                     option_id = excluded.option_id,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                params![row_id, property_id, text, number, flag, date, option],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Restores one trashed page and the subpages trashed with it, inside `tx`
+/// (see [`Database::restore_page`]).
+fn restore_branch(tx: &Connection, id: &str) -> Result<()> {
+    let (parent, stamp): (Option<String>, String) = tx
+        .query_row(
+            "SELECT parent_id, deleted_at FROM pages WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .context("La página no está en la papelera")?;
+    tx.execute(
+        "WITH RECURSIVE branch(id) AS (
+             SELECT ?1
+             UNION
+             SELECT p.id FROM pages p JOIN branch b ON p.parent_id = b.id
+             WHERE p.deleted_at = ?2
+         )
+         UPDATE pages SET deleted_at = NULL WHERE id IN (SELECT id FROM branch)",
+        params![id, stamp],
+    )?;
+    let parent_is_live = match &parent {
+        Some(parent) => tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND deleted_at IS NULL)",
+            [parent],
+            |r| r.get(0),
+        )?,
+        None => true,
+    };
+    if !parent_is_live {
+        tx.execute(
+            "UPDATE pages SET parent_id = NULL,
+                 sort_order = (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages
+                               WHERE parent_id IS NULL AND id <> ?1)
+             WHERE id = ?1",
+            [id],
+        )?;
+    }
+    Ok(())
+}
+
 /// Kind of a live page; `None` if it is missing or in the trash.
 fn page_kind(conn: &Connection, id: &str) -> Result<Option<PageKind>> {
     let kind: Option<String> = conn
@@ -2111,6 +2312,16 @@ const COMPACTING: &str = "compacting";
 const SYNCED_WARNING: &str = "synced_warning_dismissed";
 /// `settings` key of the open tabs (ADR 0011).
 const OPEN_TABS: &str = "open_tabs";
+/// `settings` key of the pages opened recently (H11.8).
+const RECENT_PAGES: &str = "recent_pages";
+/// Start of the `settings` key of a database's last open view (H11.6),
+/// followed by the database's id.
+const LAST_VIEW_PREFIX: &str = "last_view:";
+
+fn last_view_key(database_id: &str) -> String {
+    format!("{LAST_VIEW_PREFIX}{database_id}")
+}
+
 /// `settings` key set once the example templates were created (ADR 0010).
 const EXAMPLE_TEMPLATES: &str = "example_templates";
 
@@ -2252,6 +2463,206 @@ fn is_template(conn: &Connection, id: &str) -> Result<bool> {
         [id],
         |r| r.get(0),
     )?)
+}
+
+/// Duplicates `id` in `tx` (see [`Database::duplicate_page`]).
+fn duplicate_in(tx: &Connection, id: &str, children: bool) -> Result<String> {
+    let (parent, title): (Option<String>, String) = tx
+        .query_row(
+            "SELECT parent_id, title FROM pages WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .context("La página no existe o está en la papelera")?;
+    ensure!(
+        !is_template(tx, id)?,
+        "Una plantilla no se duplica: usa «Nueva página desde plantilla»"
+    );
+    let shown = if title.trim().is_empty() {
+        "Sin título"
+    } else {
+        title.as_str()
+    };
+    let mut ids = HashMap::new();
+    let copy = copy_page_tree(
+        tx,
+        id,
+        parent.as_deref(),
+        &format!("{shown} (copia)"),
+        children,
+        &mut ids,
+    )?;
+    // Right below the original among its live siblings.
+    let mut siblings: Vec<String> = tx
+        .prepare(
+            "SELECT id FROM pages WHERE parent_id IS ?1 AND deleted_at IS NULL
+                 AND template_at IS NULL AND id <> ?2
+             ORDER BY sort_order, created_at, id",
+        )?
+        .query_map(params![parent, copy], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let at = siblings
+        .iter()
+        .position(|s| s == id)
+        .context("La página no aparece entre sus hermanas")?;
+    siblings.insert(at + 1, copy.clone());
+    for (position, sibling) in siblings.iter().enumerate() {
+        tx.execute(
+            "UPDATE pages SET sort_order = ?2 WHERE id = ?1",
+            params![sibling, position as i64],
+        )?;
+    }
+    Ok(copy)
+}
+
+/// A row's value as stored: property id, then text, number, flag, date
+/// and option (only the one of its kind is set).
+type StoredValue = (
+    String,
+    Option<String>,
+    Option<f64>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+);
+
+/// Copies the page `from` (and, with `children`, its live subpages) under
+/// `parent`, named `title` (its subpages keep theirs). `ids` maps the ids
+/// of copied properties and options to the new ones, for the views and
+/// values of the pages copied after them. Returns the new page's id.
+fn copy_page_tree(
+    tx: &Connection,
+    from: &str,
+    parent: Option<&str>,
+    title: &str,
+    children: bool,
+    ids: &mut HashMap<String, String>,
+) -> Result<String> {
+    let (kind, sort_order): (String, i64) = tx.query_row(
+        "SELECT kind, sort_order FROM pages WHERE id = ?1",
+        [from],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let id = Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO pages (id, title, parent_id, kind, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, title, parent, kind, sort_order],
+    )?;
+    copy_blocks(tx, from, &id, None)?;
+    if kind == PageKind::Database.as_str() {
+        copy_schema(tx, from, &id, ids)?;
+    }
+    // A row's values, for the copy's properties if they were copied too.
+    let values: Vec<StoredValue> = tx
+        .prepare(
+            "SELECT property_id, text_value, number_value, bool_value, date_value, option_id
+             FROM db_values WHERE page_id = ?1",
+        )?
+        .query_map([from], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mapped = |old: &String| ids.get(old).cloned().unwrap_or_else(|| old.clone());
+    for (property, text, number, flag, date, option) in &values {
+        tx.execute(
+            "INSERT INTO db_values
+                 (page_id, property_id, text_value, number_value, bool_value, date_value, option_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id,
+                mapped(property),
+                text,
+                number,
+                flag,
+                date,
+                option.as_ref().map(mapped)
+            ],
+        )?;
+    }
+    if children {
+        let subpages: Vec<(String, String)> = tx
+            .prepare(
+                "SELECT id, title FROM pages WHERE parent_id = ?1 AND deleted_at IS NULL
+                 ORDER BY sort_order, created_at, id",
+            )?
+            .query_map([from], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (child, title) in subpages {
+            copy_page_tree(tx, &child, Some(&id), &title, true, ids)?;
+        }
+    }
+    Ok(id)
+}
+
+/// Copies a database's properties (also deleted ones, which can still be
+/// restored), options and views to the database `to`, noting the new ids
+/// in `ids`. Views point at the new properties and options: their config
+/// names them by id, and ids are unique, so each old id is replaced.
+fn copy_schema(
+    tx: &Connection,
+    from: &str,
+    to: &str,
+    ids: &mut HashMap<String, String>,
+) -> Result<()> {
+    let properties: Vec<(String, String, String, i64, Option<String>)> = tx
+        .prepare(
+            "SELECT id, name, kind, position, deleted_at FROM db_properties
+             WHERE database_id = ?1 ORDER BY position, id",
+        )?
+        .query_map([from], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (old, name, kind, position, deleted) in properties {
+        let new = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO db_properties (id, database_id, name, kind, position, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![new, to, name, kind, position, deleted],
+        )?;
+        let options: Vec<(String, String, String, i64)> = tx
+            .prepare(
+                "SELECT id, name, color, position FROM db_select_options WHERE property_id = ?1",
+            )?
+            .query_map([&old], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (old_option, name, color, position) in options {
+            let new_option = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO db_select_options (id, property_id, name, color, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![new_option, new, name, color, position],
+            )?;
+            ids.insert(old_option, new_option);
+        }
+        ids.insert(old, new);
+    }
+    let views: Vec<(String, String, i64, String)> = tx
+        .prepare(
+            "SELECT name, kind, position, config FROM db_views WHERE database_id = ?1
+             ORDER BY position, id",
+        )?
+        .query_map([from], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (name, kind, position, mut config) in views {
+        for (old, new) in ids.iter() {
+            config = config.replace(old.as_str(), new);
+        }
+        tx.execute(
+            "INSERT INTO db_views (id, database_id, name, kind, position, config)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![Uuid::new_v4().to_string(), to, name, kind, position, config],
+        )?;
+    }
+    Ok(())
 }
 
 /// Copies the blocks of `from` to the new page `to` (new ids, same files

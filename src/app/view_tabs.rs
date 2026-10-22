@@ -265,19 +265,27 @@ impl SilexApp {
             .unwrap_or(was)
             .min(state.views.len().saturating_sub(1));
         state.pinned.clear();
+        state.clear_selection();
         state.apply_view();
-        self.remember_view();
-        Ok(())
+        self.remember_view()
     }
 
     /// Notes the open view of the open database, to show it again when the
-    /// database is opened later in this session.
-    fn remember_view(&mut self) {
-        if let Some(state) = &self.database
-            && let Some(view) = state.views.get(state.view)
-        {
-            self.last_views.insert(state.id.clone(), view.id.clone());
+    /// database is opened later, also after restarting (H11.6). Only a
+    /// change is written; if writing fails, the view is still remembered
+    /// for this session and the error is returned to be shown.
+    fn remember_view(&mut self) -> Result<()> {
+        let Some(state) = &self.database else {
+            return Ok(());
+        };
+        let Some(view) = state.views.get(state.view) else {
+            return Ok(());
+        };
+        if self.last_views.get(&state.id) == Some(&view.id) {
+            return Ok(());
         }
+        self.last_views.insert(state.id.clone(), view.id.clone());
+        self.db.set_last_view(&state.id, &view.id)
     }
 
     pub(super) fn switch_view(&mut self, index: usize) -> Result<()> {
@@ -288,11 +296,11 @@ impl SilexApp {
         {
             state.view = index;
             state.pinned.clear();
+            state.clear_selection();
             state.editing = None;
             state.apply_view();
         }
-        self.remember_view();
-        Ok(())
+        self.remember_view()
     }
 
     /// A new, empty view at the end, shown at once. A board groups by the

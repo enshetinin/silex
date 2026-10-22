@@ -107,16 +107,32 @@ fn impossible_links_are_refused() -> anyhow::Result<()> {
     let mut db = Database::open_in_memory()?;
     let (diario, _, _) = linked(&mut db)?;
     let before = db.list_blocks(&diario)?;
-    for blocks in [
-        // A page that does not exist (foreign key).
-        vec![block(&diario, BlockKind::PageLink, "x", Some("no-existe"))],
-        // A text block with a link.
-        vec![block(&diario, BlockKind::Paragraph, "x", Some(&diario))],
-    ] {
-        assert!(db.save_document(&diario, "Diario", &blocks).is_err());
-        assert_eq!(db.list_blocks(&diario)?, before, "nothing changed");
-    }
+    // A text block with a link.
+    let blocks = [block(&diario, BlockKind::Paragraph, "x", Some(&diario))];
+    assert!(db.save_document(&diario, "Diario", &blocks).is_err());
+    assert_eq!(db.list_blocks(&diario)?, before, "nothing changed");
     assert!(db.add_block(&diario, BlockKind::PageLink).is_err());
+    Ok(())
+}
+
+/// Since pages can be deleted for good (ADR 0013), a link to a page that
+/// no longer exists is saved pointing nowhere, not refused: the open
+/// document (or its undo) may still hold the old id.
+#[test]
+fn a_link_to_a_page_that_is_gone_saves_pointing_nowhere() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let (diario, _, _) = linked(&mut db)?;
+    let gone = block(&diario, BlockKind::PageLink, "Perdida", Some("no-existe"));
+    db.save_document(&diario, "Diario", std::slice::from_ref(&gone))?;
+    let stored = db.list_blocks(&diario)?;
+    assert_eq!(
+        (
+            stored[0].kind,
+            stored[0].link.clone(),
+            stored[0].content.as_str()
+        ),
+        (BlockKind::PageLink, None, "Perdida")
+    );
     Ok(())
 }
 

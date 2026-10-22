@@ -34,6 +34,18 @@ independientes de egui. Diseña tests para Enter, Backspace, Tab, listas,
 checkbox, undo/redo, pegado y documentos grandes. Limítate al primer slice.
 ```
 
+## Implementar una historia del roadmap (Hitos 11–15)
+```text
+Lee CLAUDE.md, docs/PRD.md, docs/ARCHITECTURE.md y docs/ROADMAP.md.
+Vamos a hacer la historia H11.1 (cámbiala por la que toque). Comprueba en el código
+qué existe ya; no te fíes solo del roadmap. En modo plan: alcance, exclusiones,
+archivos afectados, si necesita migración o ADR, y criterios de aceptación
+verificables a partir de la nota de la historia. No escribas código hasta que apruebe el plan.
+Después: tests primero, implementación, cargo fmt/clippy/test/check, capturas si cambia
+algo visible, y anota en docs/ROADMAP.md solo lo verificado, con lo que queda pendiente.
+Si la historia lleva «ADR», escribe primero el ADR en docs/decisions/ y para.
+```
+
 ## Revisión adversarial
 ```text
 Revisa el diff como un revisor exigente. Busca pérdida de datos, SQL incorrecto,

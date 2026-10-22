@@ -15,6 +15,36 @@ use super::{icons, theme};
 pub(super) struct TrashDialog {
     pub(super) items: Vec<TrashItem>,
     pub(super) error: Option<String>,
+    /// What waits for «Borrar para siempre» to be confirmed (H11.3).
+    pub(super) confirm: Option<Purge>,
+}
+
+/// Deleting for good from the trash (ADR 0013): one entry, or all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Purge {
+    /// The entry's page id, its title and how many pages went with it.
+    Item(String, String, usize),
+    /// Every entry: how many pages in all.
+    All(usize),
+}
+
+impl Purge {
+    /// What the confirmation says goes.
+    fn what(&self) -> String {
+        match self {
+            Purge::Item(_, title, 0) => format!("«{title}» se borrará para siempre."),
+            Purge::Item(_, title, 1) => {
+                format!("«{title}» y 1 subpágina o fila se borrarán para siempre.")
+            }
+            Purge::Item(_, title, n) => {
+                format!("«{title}» y {n} subpáginas o filas se borrarán para siempre.")
+            }
+            Purge::All(1) => "Se borrará para siempre 1 página.".to_owned(),
+            Purge::All(n) => {
+                format!("Se borrarán para siempre {n} páginas (con sus subpáginas y filas).")
+            }
+        }
+    }
 }
 
 /// Backup picker; restoring needs an explicit second click on a selected copy.
@@ -33,7 +63,13 @@ pub(super) enum CloseAction {
 impl SilexApp {
     pub(super) fn open_trash_dialog(&mut self) {
         match self.db.list_trash() {
-            Ok(items) => self.trash_dialog = Some(TrashDialog { items, error: None }),
+            Ok(items) => {
+                self.trash_dialog = Some(TrashDialog {
+                    items,
+                    error: None,
+                    confirm: None,
+                });
+            }
             Err(err) => self.notice = Some(format!("No se puede abrir la papelera: {err:#}")),
         }
     }
@@ -42,9 +78,39 @@ impl SilexApp {
         let Some(dialog) = self.trash_dialog.as_ref() else {
             return;
         };
+        let p = theme::current(ctx);
         let mut restore = None;
         let mut close = false;
+        let mut ask = None;
+        let mut confirmed = false;
+        let mut cancel = false;
         let response = egui::Modal::new(egui::Id::unique("silex_trash")).show(ctx, |ui| {
+            // Deleting for good asks first, in the same window (ADR 0013).
+            if let Some(purge) = &dialog.confirm {
+                ui.heading("¿Borrar para siempre?");
+                ui.add_space(theme::space::SM);
+                ui.label(purge.what());
+                ui.label(
+                    "No se puede deshacer. Las copias de seguridad anteriores aún lo conservan.",
+                );
+                ui.weak(
+                    "Los archivos adjuntos que queden sin uso se borran con «Liberar espacio».",
+                );
+                ui.add_space(theme::space::MD);
+                ui.horizontal(|ui| {
+                    confirmed = ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Borrar para siempre").color(p.on_accent),
+                            )
+                            .fill(p.danger),
+                        )
+                        .accessible_name("Confirmar: borrar para siempre")
+                        .clicked();
+                    cancel = ui.button("Cancelar").clicked();
+                });
+                return;
+            }
             ui.heading("Papelera");
             if dialog.items.is_empty() {
                 ui.label("La papelera está vacía.");
@@ -55,13 +121,25 @@ impl SilexApp {
                 .show(ui, |ui| {
                     for item in &dialog.items {
                         ui.horizontal(|ui| {
-                            ui.label(display_title(&item.page.title));
+                            let title = display_title(&item.page.title);
+                            ui.label(title);
                             if item.subpages > 0 {
                                 ui.weak(format!("+{} subpágina(s)", item.subpages));
                             }
                             ui.weak(describe_timestamp(&item.deleted_at));
                             if ui.button("Restaurar").clicked() {
                                 restore = Some(item.page.id.clone());
+                            }
+                            if ui
+                                .button(egui::RichText::new("Borrar para siempre").color(p.danger))
+                                .accessible_name(format!("Borrar «{title}» para siempre"))
+                                .clicked()
+                            {
+                                ask = Some(Purge::Item(
+                                    item.page.id.clone(),
+                                    title.to_owned(),
+                                    item.subpages,
+                                ));
                             }
                         });
                     }
@@ -70,8 +148,49 @@ impl SilexApp {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
             ui.add_space(8.0);
-            close = ui.button("Cerrar").clicked();
+            ui.horizontal(|ui| {
+                close = ui.button("Cerrar").clicked();
+                let pages = dialog.items.iter().map(|i| i.subpages + 1).sum();
+                if ui
+                    .add_enabled(
+                        !dialog.items.is_empty(),
+                        egui::Button::new(
+                            egui::RichText::new("Vaciar la papelera").color(p.danger),
+                        ),
+                    )
+                    .clicked()
+                {
+                    ask = Some(Purge::All(pages));
+                }
+            });
         });
+        let confirming = dialog.confirm.clone();
+        // Escape or a click outside: out of the confirmation, else closes.
+        if confirming.is_some() && (cancel || response.should_close()) {
+            if let Some(dialog) = self.trash_dialog.as_mut() {
+                dialog.confirm = None;
+            }
+            return;
+        }
+        if let Some(purge) = ask {
+            if let Some(dialog) = self.trash_dialog.as_mut() {
+                dialog.confirm = Some(purge);
+                dialog.error = None;
+            }
+            return;
+        }
+        if confirmed && let Some(purge) = confirming {
+            match self.purge_from_trash(&purge) {
+                Ok(()) => self.open_trash_dialog(),
+                Err(err) => {
+                    if let Some(dialog) = self.trash_dialog.as_mut() {
+                        dialog.confirm = None;
+                        dialog.error = Some(format!("{err:#}"));
+                    }
+                }
+            }
+            return;
+        }
         if close || (restore.is_none() && response.should_close()) {
             self.trash_dialog = None;
             return;
@@ -87,6 +206,25 @@ impl SilexApp {
                 }
             }
         }
+    }
+
+    /// Deletes for good what the trash confirmed (ADR 0013). The open page
+    /// is saved first; links to what went now point nowhere.
+    fn purge_from_trash(&mut self, purge: &Purge) -> Result<()> {
+        self.save_now()?;
+        let deleted = match purge {
+            Purge::Item(id, _, _) => self.db.purge_trash_item(id)?,
+            Purge::All(_) => self.db.empty_trash()?,
+        };
+        // «Deshacer» could not bring back a row that is gone.
+        self.trash_notice = None;
+        self.reload_pages()?;
+        self.load_links()?;
+        self.notice = Some(match deleted {
+            1 => "Se borró 1 página para siempre.".to_owned(),
+            n => format!("Se borraron {n} páginas para siempre."),
+        });
+        Ok(())
     }
 
     /// Keyboard shortcuts in a window (the sidebar shows them in a menu).
@@ -112,6 +250,13 @@ impl SilexApp {
         // A page with attachments being exported (H7.9).
         if let Some((_, title)) = &self.page_export {
             let text = format!("Exportando «{title}» y sus adjuntos…");
+            Self::banner(ui, icons::EXPORT, &text, |ui| {
+                ui.spinner();
+            });
+            return;
+        }
+        if let Some((_, title)) = &self.csv_export {
+            let text = format!("Exportando «{title}» a CSV…");
             Self::banner(ui, icons::EXPORT, &text, |ui| {
                 ui.spinner();
             });
@@ -171,6 +316,9 @@ impl SilexApp {
         let previous = self.selected.take();
         self.title.clear();
         self.blocks.clear();
+        // The copy has its own last views (H11.6) and recent pages (H11.8).
+        self.last_views.clear();
+        self.load_recent();
         self.reload_pages()?;
         let reopen = previous
             .filter(|id| self.pages.iter().any(|p| &p.id == id))
@@ -325,6 +473,43 @@ impl SilexApp {
         });
         if close {
             self.notice = None;
+        }
+    }
+
+    /// A row just sent to the trash from its table or board, with
+    /// «Deshacer» (the same step as Cmd+Z) and «Cerrar aviso» (H11.1).
+    pub(super) fn trash_notice_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(notice) = self.current_trash_notice() else {
+            return;
+        };
+        let (mut undo, mut close) = (false, false);
+        Self::banner(ui, icons::TRASH, &notice.text, |ui| {
+            // Left to right, so Tab visits them in the order they are seen.
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                right_aligned(ui, egui::Id::unique("silex-trash-notice"), |ui| {
+                    let shortcut = ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
+                        egui::Modifiers::COMMAND,
+                        egui::Key::Z,
+                    ));
+                    undo = ui
+                        .button("Deshacer")
+                        .on_hover_text(format!("Devolver a su sitio   {shortcut}"))
+                        .accessible_name("Deshacer el envío a la papelera")
+                        .clicked();
+                    close = ui
+                        .add(
+                            egui::Button::new(icons::icon(icons::CLOSE)).frame_when_inactive(false),
+                        )
+                        .on_hover_text("Cerrar aviso")
+                        .accessible_name("Cerrar aviso")
+                        .clicked();
+                });
+            });
+        });
+        if undo {
+            self.undo_table();
+        } else if close {
+            self.trash_notice = None;
         }
     }
 

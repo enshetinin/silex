@@ -150,6 +150,89 @@ fn block_handle_menu() -> anyhow::Result<()> {
     })
 }
 
+/// H11.7: the style guide after Cmd+Opción+F, «in» searched and «IN»
+/// typed as its replacement. The bar sits above the page, with
+/// «Reemplazar»; every match is painted, the one shown stronger (also in
+/// the code block, which has its own background).
+fn find_bar_harness(theme: egui::Theme) -> anyhow::Result<Harness<'static, SilexApp>> {
+    use eframe::egui::{Key, Modifiers};
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), demo_app()?);
+    harness.run();
+    harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::ALT, Key::F);
+    harness.run();
+    harness.get_by_label("Buscar en la página").type_text("in");
+    harness.run();
+    harness.get_by_label("Reemplazar por").focus();
+    harness.run();
+    harness.get_by_label("Reemplazar por").type_text("IN");
+    harness.run();
+    Ok(harness)
+}
+
+fn contents_of(harness: &Harness<'_, SilexApp>) -> Vec<String> {
+    harness
+        .state()
+        .blocks
+        .iter()
+        .map(|b| b.content.clone())
+        .collect()
+}
+
+/// Each control has a name and the counter is read out; «Reemplazar todo»
+/// from its button is one Cmd+Z; «×» closes the bar.
+#[test]
+fn the_find_bar_highlights_and_replaces() -> anyhow::Result<()> {
+    use eframe::egui::{Key, Modifiers};
+    let mut harness = find_bar_harness(egui::Theme::Light)?;
+    // «interfaz», «Principios», «install».
+    assert_eq!(
+        harness
+            .state()
+            .find
+            .as_ref()
+            .map(|f| f.counter())
+            .as_deref(),
+        Some("1 de 3")
+    );
+    assert!(
+        harness.query_by_label("1 de 3").is_some(),
+        "the counter is read out"
+    );
+    assert_accessible(&harness, "find bar");
+    if enabled() {
+        harness.snapshot("find_bar_light");
+    }
+    let before = contents_of(&harness);
+    click_button(&mut harness, "Reemplazar todo");
+    let after = contents_of(&harness);
+    assert!(
+        after.iter().any(|t| t == "theme::INstall(&ctx);"),
+        "{after:?}"
+    );
+    assert!(after.iter().any(|t| t.contains("PrINcipios")), "{after:?}");
+    assert!(harness.query_by_label("3 reemplazadas").is_some());
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    harness.run();
+    assert_eq!(contents_of(&harness), before, "one Cmd+Z undoes them all");
+    click_button(&mut harness, "Cerrar la búsqueda");
+    assert!(harness.state().find.is_none());
+    Ok(())
+}
+
+#[test]
+fn the_find_bar_dark() -> anyhow::Result<()> {
+    let mut harness = find_bar_harness(egui::Theme::Dark)?;
+    if enabled() {
+        harness.snapshot("find_bar_dark");
+    }
+    Ok(())
+}
+
 // ---- Accessibility: no rendering needed, so these always run (also in CI). ----
 
 /// The demo app in a harness, settled.
@@ -235,6 +318,18 @@ fn open_search(harness: &mut Harness<'_, SilexApp>, query: &str) {
     search_button(harness).click();
     harness.run();
     harness.event(egui::Event::Text(query.into()));
+    harness.run();
+}
+
+/// A button or cell clicked by its accessibility action, not the pointer:
+/// in the test window the table is wider than its room, and «Estado» is
+/// partly scrolled away.
+fn click_action(harness: &mut Harness<'_, SilexApp>, label: &str) {
+    harness
+        .get_all_by_label(label)
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .unwrap_or_else(|| panic!("control {label:?}"))
+        .click_accesskit();
     harness.run();
 }
 
@@ -667,6 +762,93 @@ fn database_rows_open_as_pages_and_every_control_has_a_name() -> anyhow::Result<
     Ok(())
 }
 
+/// H11.5: «Más acciones» offers both CSV exports; the view one leaves out
+/// what the view hides, the other writes everything. Written on the export
+/// thread with a notice while it runs.
+#[test]
+fn a_database_exports_its_view_or_everything_to_csv() -> anyhow::Result<()> {
+    let (app, _, _) = database_app()?;
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Más acciones de la página");
+    assert!(menu_item(&harness, "Exportar la vista a CSV").is_some());
+    assert!(menu_item(&harness, "Exportar toda la base a CSV").is_some());
+    assert_accessible(&harness, "database page menu");
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+
+    // The view hides «Autor» and shows only rows with a page count.
+    {
+        let state = harness.state_mut().database.as_mut().expect("database");
+        let autor = state
+            .properties
+            .iter()
+            .find(|p| p.name == "Autor")
+            .map(|p| p.id.clone())
+            .expect("Autor");
+        let paginas = state
+            .properties
+            .iter()
+            .find(|p| p.name == "Páginas")
+            .map(|p| p.id.clone())
+            .expect("Páginas");
+        let view = state.view;
+        let config = &mut state.views[view].config;
+        config.set_hidden(&autor, true);
+        config.filters.push(silex_desktop::view::Filter {
+            property: paginas,
+            op: silex_desktop::view::FilterOp::NotEmpty,
+            value: String::new(),
+        });
+    }
+    let dir = std::env::temp_dir().join(format!("silex-app-csv-{}", uuid::Uuid::new_v4()));
+    let result = (|| -> anyhow::Result<()> {
+        let ctx = harness.ctx.clone();
+        let export = |harness: &mut Harness<'_, SilexApp>, all: bool| {
+            harness
+                .state_mut()
+                .export_database_csv_to(&ctx, &dir, all)?;
+            assert!(harness.state().csv_export.is_some(), "on the worker");
+            // `step`, not `run`: while the worker writes, the app keeps
+            // repainting (the spinner, and the worker's wake-up from its
+            // thread), so it never settles.
+            let start = std::time::Instant::now();
+            while harness.state().csv_export.is_some()
+                && start.elapsed() < std::time::Duration::from_secs(30)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                harness.step();
+            }
+            assert!(harness.state().csv_export.is_none(), "finished in 30 s");
+            harness.run();
+            let path = harness.state().last_export.clone().expect("exported");
+            anyhow::Ok((path.clone(), std::fs::read_to_string(path)?))
+        };
+        let (path, view) = export(&mut harness, false)?;
+        assert_eq!(path, dir.join("Lecturas.csv"));
+        assert_eq!(
+            view,
+            "\u{feff}Nombre,Páginas,Leído,Estado,Terminado\r\n\
+             Rayuela,736,true,Terminado,2026-09-14\r\n\
+             Pedro Páramo,124,false,,\r\n"
+        );
+        let (path, all) = export(&mut harness, true)?;
+        assert_eq!(path, dir.join("Lecturas (2).csv"), "never overwrites");
+        let lines: Vec<&str> = all.split("\r\n").collect();
+        assert_eq!(
+            lines[0],
+            "\u{feff}Nombre,Autor,Páginas,Leído,Estado,Terminado"
+        );
+        assert_eq!(lines[3], "Ficciones,Jorge Luis Borges,,false,Leyendo,");
+        assert!(
+            harness.query_by_label_contains("Exportado a").is_some(),
+            "the notice offers the folder"
+        );
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
 /// A menu item: a button whose label is `text` after its icon glyph.
 fn menu_item<'h>(
     harness: &'h Harness<'_, SilexApp>,
@@ -713,13 +895,13 @@ fn table_cells_and_property_menus_have_names() -> anyhow::Result<()> {
             .is_some_and(|t| t == egui::accesskit::Toggled::True)
     );
 
-    click_button(&mut harness, "Estado, Selección");
+    click_action(&mut harness, "Estado, Selección");
     assert_accessible(&harness, "property menu");
     assert!(menu_item(&harness, "Mover a la izquierda").is_some());
     egui::Popup::close_all(&harness.ctx);
     harness.run();
 
-    click_button(&mut harness, "Estado, Ficciones: Leyendo");
+    click_action(&mut harness, "Estado, Ficciones: Leyendo");
     assert_accessible(&harness, "select menu");
     assert_steady(&mut harness, "Opción de Estado, Ficciones");
     assert!(harness.query_by_label("Terminado").is_some());
@@ -771,7 +953,639 @@ fn database_select_menu() -> anyhow::Result<()> {
     database_snapshot(
         "database_select_menu_light",
         eframe::egui::Theme::Light,
-        |harness| click_button(harness, "Estado, Rayuela: Terminado"),
+        |harness| click_action(harness, "Estado, Rayuela: Terminado"),
+    )
+}
+
+// ---- H11.1: sending rows to the trash in sight ----
+
+/// The trash notice with «Deshacer», if it is shown.
+fn undo_notice(harness: &Harness<'_, SilexApp>) -> Option<String> {
+    text_containing(harness, "a la papelera.")
+}
+
+/// The first name or text on screen that contains `part` (a label's text
+/// is its value, not its name).
+fn text_containing(harness: &Harness<'_, SilexApp>, part: &str) -> Option<String> {
+    harness
+        .root()
+        .children_recursive()
+        .filter_map(|node| {
+            let node = node.accesskit_node();
+            node.label().or_else(|| node.value())
+        })
+        .find(|text| text.contains(part))
+}
+
+#[test]
+fn a_rows_menu_button_and_the_delete_key_send_it_to_the_trash() -> anyhow::Result<()> {
+    use eframe::egui::{Key, Modifiers};
+    let (app, _, rows) = database_app()?;
+    let mut harness = a11y_harness(app);
+    // «⋯» ends the row: Tab reaches it after the last cell, though it is
+    // only seen on hover.
+    harness.get_by_label("Nombre, fila 1").focus();
+    harness.run();
+    assert_visited_in_order(
+        &tab_names(&mut harness, 9),
+        &[
+            "Abrir «Rayuela»",
+            "Autor, Rayuela: Julio Cortázar",
+            "Terminado, Rayuela: 2026-09-14",
+            "Acciones de «Rayuela»",
+            "Seleccionar «Pedro Páramo»",
+            "Nombre, fila 2",
+        ],
+    );
+    harness.key_press(eframe::egui::Key::Escape);
+    harness.run();
+
+    // «⋯» opens the row's menu, the same as a right-click on its name.
+    click_button(&mut harness, "Acciones de «Pedro Páramo»");
+    assert_accessible(&harness, "row menu");
+    menu_item(&harness, "Enviar a la papelera")
+        .expect("«Enviar a la papelera»")
+        .click();
+    harness.run();
+    assert_eq!(shown_rows(&harness), ["Rayuela", "Ficciones"]);
+    assert!(
+        harness.state().db.get_page(&rows[1])?.is_none(),
+        "in the trash"
+    );
+    assert_eq!(
+        undo_notice(&harness).as_deref(),
+        Some("Fila «Pedro Páramo» enviada a la papelera.")
+    );
+    assert_accessible(&harness, "trash notice");
+    // «Deshacer» brings it back where it was, and the notice goes.
+    click_button(&mut harness, "Deshacer el envío a la papelera");
+    assert_eq!(
+        shown_rows(&harness),
+        ["Rayuela", "Pedro Páramo", "Ficciones"]
+    );
+    assert!(undo_notice(&harness).is_none());
+
+    // Delete with the focus on «⋯»; Cmd+Z brings it back.
+    harness.get_by_label("Acciones de «Rayuela»").focus();
+    harness.run();
+    harness.key_press(Key::Delete);
+    harness.run();
+    assert_eq!(shown_rows(&harness), ["Pedro Páramo", "Ficciones"]);
+    assert!(undo_notice(&harness).is_some());
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    harness.run();
+    assert_eq!(
+        shown_rows(&harness),
+        ["Rayuela", "Pedro Páramo", "Ficciones"]
+    );
+    assert!(undo_notice(&harness).is_none(), "undone: nothing to offer");
+
+    // Backspace with the focus on a cell that is not being typed in.
+    harness.get_by_label("Leído, Ficciones").focus();
+    harness.run();
+    harness.key_press(Key::Backspace);
+    harness.run();
+    assert_eq!(shown_rows(&harness), ["Rayuela", "Pedro Páramo"]);
+    // Another change to the table: «Deshacer» would undo that one instead.
+    harness.get_by_label("Leído, Pedro Páramo").click();
+    harness.run();
+    assert!(undo_notice(&harness).is_none());
+
+    // In a name, Backspace deletes text, not the row.
+    let name = harness.get_by_label("Nombre, fila 1");
+    name.focus();
+    harness.run();
+    harness.key_press(Key::End);
+    harness.key_press(Key::Backspace);
+    harness.run();
+    assert_eq!(shown_rows(&harness), ["Rayuel", "Pedro Páramo"]);
+    Ok(())
+}
+
+#[test]
+fn a_card_goes_to_the_trash_with_the_delete_key_or_its_menu_button() -> anyhow::Result<()> {
+    use eframe::egui::Key;
+    let (app, rows) = board_app()?;
+    let mut harness = a11y_harness(app);
+    assert!(harness.query_by_label("Acciones de «Rayuela»").is_some());
+
+    harness
+        .get_by_label_contains("Tarjeta «Pedro Páramo»")
+        .focus();
+    harness.run();
+    harness.key_press(Key::Delete);
+    harness.run();
+    assert!(
+        harness.state().db.get_page(&rows[1])?.is_none(),
+        "in the trash"
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Tarjeta «Pedro Páramo»")
+            .is_none()
+    );
+    assert!(undo_notice(&harness).is_some());
+    click_button(&mut harness, "Deshacer el envío a la papelera");
+    assert!(
+        harness
+            .query_by_label_contains("Tarjeta «Pedro Páramo»")
+            .is_some()
+    );
+
+    click_button(&mut harness, "Acciones de «Pedro Páramo»");
+    assert_accessible(&harness, "card menu from its button");
+    assert!(menu_item(&harness, "Leyendo").is_some(), "«Mover a»");
+    menu_item(&harness, "Enviar a la papelera")
+        .expect("«Enviar a la papelera»")
+        .click();
+    harness.run();
+    assert!(harness.state().db.get_page(&rows[1])?.is_none());
+    Ok(())
+}
+
+// ---- H11.2: several rows at once ----
+
+/// The rows chosen in the open table, by title, in the view's order.
+fn chosen_rows(harness: &Harness<'_, SilexApp>) -> Vec<String> {
+    harness
+        .state()
+        .database
+        .as_ref()
+        .map(|d| {
+            d.order
+                .iter()
+                .map(|&i| &d.rows[i])
+                .filter(|r| d.selection.contains(&r.id))
+                .map(|r| r.title.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The stored value of «Leído» in each row, in order.
+fn leido(harness: &Harness<'_, SilexApp>, rows: &[String]) -> anyhow::Result<Vec<bool>> {
+    use silex_desktop::property::CellValue;
+    let state = harness.state();
+    let base = &state.database.as_ref().expect("open").id;
+    let property = state
+        .db
+        .database_properties(base)?
+        .into_iter()
+        .find(|p| p.name == "Leído")
+        .expect("Leído")
+        .id;
+    let values = state.db.database_values(base)?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            values.get(row).and_then(|c| c.get(&property)) == Some(&CellValue::Checkbox(true))
+        })
+        .collect())
+}
+
+#[test]
+fn rows_are_chosen_by_their_boxes_and_acted_on_together() -> anyhow::Result<()> {
+    use eframe::egui::{Key, Modifiers};
+    let (app, _, rows) = database_app()?;
+    let mut harness = a11y_harness(app);
+    assert!(text_containing(&harness, "seleccionad").is_none());
+
+    // One box, then Shift+click on another: the range between them.
+    harness.get_by_label("Seleccionar «Rayuela»").click();
+    harness.run();
+    assert_eq!(chosen_rows(&harness), ["Rayuela"]);
+    assert_eq!(
+        text_containing(&harness, "seleccionad").as_deref(),
+        Some("1 fila seleccionada")
+    );
+    harness
+        .get_by_label("Seleccionar «Ficciones»")
+        .click_modifiers(Modifiers::SHIFT);
+    harness.run();
+    assert_eq!(
+        chosen_rows(&harness),
+        ["Rayuela", "Pedro Páramo", "Ficciones"]
+    );
+    assert_eq!(
+        text_containing(&harness, "seleccionad").as_deref(),
+        Some("3 filas seleccionadas")
+    );
+    assert_accessible(&harness, "selection bar");
+    // A box clicked again leaves the selection.
+    harness.get_by_label("Seleccionar «Pedro Páramo»").click();
+    harness.run();
+    assert_eq!(chosen_rows(&harness), ["Rayuela", "Ficciones"]);
+
+    // «Poner valor…» → «Leído» → «Marcar»: both, one step of Cmd+Z.
+    click_button(&mut harness, "Poner valor…");
+    assert_accessible(&harness, "set value menu");
+    menu_item(&harness, "Leído").expect("«Leído»").click();
+    harness.run();
+    menu_item(&harness, "Marcar").expect("«Marcar»").click();
+    harness.run();
+    assert_eq!(leido(&harness, &rows)?, [true, false, true]);
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    harness.run();
+    assert_eq!(leido(&harness, &rows)?, [true, false, false], "as before");
+    assert_eq!(
+        chosen_rows(&harness),
+        ["Rayuela", "Ficciones"],
+        "still chosen"
+    );
+
+    // A number typed for all of them.
+    click_button(&mut harness, "Poner valor…");
+    menu_item(&harness, "Páginas").expect("«Páginas»").click();
+    harness.run();
+    harness.get_by_label("Valor de «Páginas»").focus();
+    harness.run();
+    harness.event(egui::Event::Text("200".into()));
+    harness.run();
+    click_button(&mut harness, "Aplicar");
+    {
+        use silex_desktop::property::CellValue;
+        let state = harness.state();
+        let d = state.database.as_ref().expect("open");
+        let paginas = &d
+            .properties
+            .iter()
+            .find(|p| p.name == "Páginas")
+            .expect("prop")
+            .id;
+        for row in [&rows[0], &rows[2]] {
+            assert_eq!(
+                d.values.get(row).and_then(|c| c.get(paginas)),
+                Some(&CellValue::Number(200.0))
+            );
+        }
+    }
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+
+    // To the trash together; «Deshacer» brings both back, in their places.
+    click_button(&mut harness, "Enviar a la papelera");
+    assert_eq!(shown_rows(&harness), ["Pedro Páramo"]);
+    assert!(chosen_rows(&harness).is_empty());
+    assert_eq!(
+        undo_notice(&harness).as_deref(),
+        Some("2 filas enviadas a la papelera.")
+    );
+    click_button(&mut harness, "Deshacer el envío a la papelera");
+    assert_eq!(
+        shown_rows(&harness),
+        ["Rayuela", "Pedro Páramo", "Ficciones"]
+    );
+
+    // The header's box: every row in sight, and again: none.
+    harness
+        .get_by_label("Seleccionar todas las filas visibles")
+        .click();
+    harness.run();
+    assert_eq!(chosen_rows(&harness).len(), 3);
+    harness
+        .get_by_label("Seleccionar todas las filas visibles")
+        .click();
+    harness.run();
+    assert!(chosen_rows(&harness).is_empty());
+
+    // Escape empties the selection, and so does «×».
+    harness.get_by_label("Seleccionar «Rayuela»").click();
+    harness.run();
+    harness.key_press(Key::Escape);
+    harness.run();
+    assert!(chosen_rows(&harness).is_empty());
+    harness.get_by_label("Seleccionar «Rayuela»").click();
+    harness.run();
+    click_button(&mut harness, "Quitar la selección");
+    assert!(chosen_rows(&harness).is_empty());
+    Ok(())
+}
+
+#[test]
+fn the_selection_empties_when_the_view_or_its_filters_change() -> anyhow::Result<()> {
+    let (app, _, _) = database_app()?;
+    let mut harness = a11y_harness(app);
+    harness.get_by_label("Seleccionar «Rayuela»").click();
+    harness.run();
+    // A filter (or sort, or hidden column) changes the view.
+    if let Some(state) = harness.state_mut().database.as_mut() {
+        state.view_changed();
+    }
+    harness.run();
+    assert!(chosen_rows(&harness).is_empty());
+
+    harness.get_by_label("Seleccionar «Rayuela»").click();
+    harness.run();
+    add_table_view(&mut harness);
+    assert!(chosen_rows(&harness).is_empty());
+    harness.get_by_label("Seleccionar «Rayuela»").click();
+    harness.run();
+    click_button(&mut harness, "Vista «Tabla»");
+    assert!(chosen_rows(&harness).is_empty());
+    Ok(())
+}
+
+#[test]
+fn database_selection() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_selection_light",
+        eframe::egui::Theme::Light,
+        select_two,
+    )
+}
+
+#[test]
+fn database_selection_dark() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_selection_dark",
+        eframe::egui::Theme::Dark,
+        select_two,
+    )
+}
+
+fn select_two(harness: &mut Harness<'_, SilexApp>) {
+    harness.get_by_label("Seleccionar «Rayuela»").click();
+    harness.run();
+    harness.get_by_label("Seleccionar «Ficciones»").click();
+    harness.run();
+    click_button(harness, "Poner valor…");
+}
+
+// ---- H11.4: duplicating ----
+
+/// The sidebar row of `title`, right-clicked: its page menu.
+fn sidebar_menu(harness: &mut Harness<'_, SilexApp>, title: &str) {
+    harness
+        .get_all_by_label(title)
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .unwrap_or_else(|| panic!("sidebar row {title:?}"))
+        .click_secondary();
+    harness.run();
+}
+
+/// The live pages right below the page `id`.
+fn children_of(harness: &Harness<'_, SilexApp>, id: &str) -> Vec<String> {
+    harness
+        .state()
+        .pages
+        .iter()
+        .filter(|p| p.parent_id.as_deref() == Some(id))
+        .map(|p| p.title.clone())
+        .collect()
+}
+
+#[test]
+fn a_page_with_subpages_asks_before_it_is_duplicated() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    sidebar_menu(&mut harness, "Proyecto Silex");
+    menu_item(&harness, "Duplicar").expect("«Duplicar»").click();
+    harness.run();
+    assert_accessible(&harness, "duplicate dialog");
+    assert!(text_containing(&harness, "Tiene 2 subpáginas.").is_some());
+    // «Cancelar»: nothing.
+    click_button(&mut harness, "Cancelar");
+    let count = harness.state().pages.len();
+
+    sidebar_menu(&mut harness, "Proyecto Silex");
+    menu_item(&harness, "Duplicar").expect("«Duplicar»").click();
+    harness.run();
+    click_button(&mut harness, "Solo esta página");
+    let copy = harness.state().selected.clone().expect("the copy opens");
+    assert_eq!(harness.state().title, "Proyecto Silex (copia)");
+    assert!(children_of(&harness, &copy).is_empty());
+    assert_eq!(harness.state().pages.len(), count + 1);
+
+    sidebar_menu(&mut harness, "Proyecto Silex");
+    menu_item(&harness, "Duplicar").expect("«Duplicar»").click();
+    harness.run();
+    click_button(&mut harness, "Con las subpáginas");
+    let copy = harness.state().selected.clone().expect("the copy opens");
+    assert_eq!(
+        children_of(&harness, &copy),
+        ["Diseño de la interfaz", "Guía de estilo"]
+    );
+    // A page without subpages is copied at once, also from the palette.
+    let recetas = harness
+        .state()
+        .pages
+        .iter()
+        .find(|p| p.title == "Recetas")
+        .map(|p| p.id.clone())
+        .expect("Recetas");
+    harness.state_mut().open_page(recetas)?;
+    harness.run();
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .run_command(&ctx, silex_desktop::palette::Command::DuplicatePage)?;
+    harness.run();
+    assert!(harness.state().duplicate_dialog.is_none(), "nothing to ask");
+    assert_eq!(harness.state().title, "Recetas (copia)");
+    Ok(())
+}
+
+#[test]
+fn rows_are_duplicated_below_themselves_and_cmd_z_takes_them_back() -> anyhow::Result<()> {
+    use eframe::egui::{Key, Modifiers};
+    use silex_desktop::property::CellValue;
+    let (app, _, _) = database_app()?;
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Acciones de «Rayuela»");
+    menu_item(&harness, "Duplicar").expect("«Duplicar»").click();
+    harness.run();
+    assert_eq!(
+        shown_rows(&harness),
+        ["Rayuela", "Rayuela (copia)", "Pedro Páramo", "Ficciones"]
+    );
+    {
+        let state = harness.state();
+        let d = state.database.as_ref().expect("open");
+        let copy = &d.rows[d.order[1]].id;
+        let autor = &d
+            .properties
+            .iter()
+            .find(|p| p.name == "Autor")
+            .expect("Autor")
+            .id;
+        assert_eq!(
+            d.values.get(copy).and_then(|c| c.get(autor)),
+            Some(&CellValue::Text("Julio Cortázar".into()))
+        );
+    }
+    assert!(harness.state().database.is_some(), "the table stays open");
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    harness.run();
+    assert_eq!(
+        shown_rows(&harness),
+        ["Rayuela", "Pedro Páramo", "Ficciones"]
+    );
+
+    // The chosen rows, together: one step of Cmd+Z.
+    harness.get_by_label("Seleccionar «Rayuela»").click();
+    harness.run();
+    harness.get_by_label("Seleccionar «Ficciones»").click();
+    harness.run();
+    click_button(&mut harness, "Duplicar");
+    assert_eq!(
+        shown_rows(&harness),
+        [
+            "Rayuela",
+            "Rayuela (copia)",
+            "Pedro Páramo",
+            "Ficciones",
+            "Ficciones (copia)"
+        ]
+    );
+    assert!(chosen_rows(&harness).is_empty());
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    harness.run();
+    assert_eq!(
+        shown_rows(&harness),
+        ["Rayuela", "Pedro Páramo", "Ficciones"]
+    );
+    Ok(())
+}
+
+#[test]
+fn duplicate_dialog() -> anyhow::Result<()> {
+    snapshot_with(
+        "duplicate_dialog_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            sidebar_menu(harness, "Proyecto Silex");
+            if let Some(item) = menu_item(harness, "Duplicar") {
+                item.click();
+            }
+            harness.run();
+            harness.event(egui::Event::PointerMoved(egui::pos2(1000.0, 700.0)));
+        },
+    )
+}
+
+// ---- H11.3, ADR 0013: deleting for good from the trash ----
+
+/// The demo app with «Recetas» and «Proyecto Silex» (with its two
+/// subpages and «Guía de estilo») in the trash, and the trash open.
+fn trash_app() -> anyhow::Result<SilexApp> {
+    let mut app = demo_app()?;
+    let id = |app: &SilexApp, title: &str| {
+        app.pages
+            .iter()
+            .find(|p| p.title == title)
+            .map(|p| p.id.clone())
+            .expect("page")
+    };
+    let recetas = id(&app, "Recetas");
+    let proyecto = id(&app, "Proyecto Silex");
+    app.db.trash_page(&recetas)?;
+    app.db.trash_page(&proyecto)?;
+    app.reload_pages()?;
+    app.open_page(id(&app, "Notas de lectura"))?;
+    app.open_trash_dialog();
+    Ok(app)
+}
+
+#[test]
+fn trash_items_are_deleted_for_good_only_after_confirming() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(trash_app()?);
+    assert_accessible(&harness, "trash");
+    click_button(&mut harness, "Borrar «Recetas» para siempre");
+    assert_accessible(&harness, "confirm one");
+    assert_eq!(
+        text_containing(&harness, "se borrará").as_deref(),
+        Some("«Recetas» se borrará para siempre.")
+    );
+    // «Cancelar» goes back to the list: nothing is deleted.
+    click_button(&mut harness, "Cancelar");
+    assert_eq!(harness.state().db.list_trash()?.len(), 2);
+    assert!(
+        harness
+            .query_by_label("Borrar «Recetas» para siempre")
+            .is_some()
+    );
+
+    click_button(&mut harness, "Borrar «Recetas» para siempre");
+    click_button(&mut harness, "Confirmar: borrar para siempre");
+    let trash = harness.state().db.list_trash()?;
+    assert_eq!(trash.len(), 1);
+    assert_eq!(trash[0].page.title, "Proyecto Silex");
+    assert!(
+        harness
+            .query_by_label("Borrar «Recetas» para siempre")
+            .is_none()
+    );
+
+    // «Vaciar la papelera» counts the pages that go with each entry.
+    click_button(&mut harness, "Vaciar la papelera");
+    assert_eq!(
+        text_containing(&harness, "Se borrar").as_deref(),
+        Some("Se borrarán para siempre 4 páginas (con sus subpáginas y filas).")
+    );
+    click_button(&mut harness, "Confirmar: borrar para siempre");
+    assert!(harness.state().db.list_trash()?.is_empty());
+    assert_eq!(harness.state().trash_count, 0);
+    assert!(text_containing(&harness, "La papelera está vacía.").is_some());
+    // An empty trash has nothing to empty.
+    let empty = harness
+        .get_all_by_label("Vaciar la papelera")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Button)
+        .expect("button");
+    assert!(empty.accesskit_node().is_disabled());
+    Ok(())
+}
+
+#[test]
+fn trash_confirm() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), trash_app()?);
+    harness.run();
+    click_button(&mut harness, "Vaciar la papelera");
+    // The pointer out of the way: where the button was is not steady.
+    harness.event(egui::Event::PointerMoved(egui::pos2(1000.0, 700.0)));
+    harness.run();
+    harness.snapshot("trash_confirm_light");
+    Ok(())
+}
+
+/// A row under the pointer shows its «⋯»; the trash notice offers «Deshacer».
+#[test]
+fn database_row_trashed() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_row_trashed_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            click_button(harness, "Acciones de «Pedro Páramo»");
+            if let Some(item) = menu_item(harness, "Enviar a la papelera") {
+                item.click();
+            }
+            harness.run();
+            harness.get_by_label("Acciones de «Rayuela»").hover();
+        },
+    )
+}
+
+#[test]
+fn database_row_trashed_dark() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_row_trashed_dark",
+        eframe::egui::Theme::Dark,
+        |harness| {
+            click_button(harness, "Acciones de «Pedro Páramo»");
+            if let Some(item) = menu_item(harness, "Enviar a la papelera") {
+                item.click();
+            }
+            harness.run();
+            harness.get_by_label("Acciones de «Rayuela»").hover();
+        },
     )
 }
 
@@ -832,7 +1646,7 @@ fn options_are_managed_from_the_property_menu() -> anyhow::Result<()> {
     use silex_desktop::property::OptionColor;
     let (app, base, rows) = database_app()?;
     let mut harness = a11y_harness(app);
-    click_button(&mut harness, "Estado, Selección");
+    click_action(&mut harness, "Estado, Selección");
     assert_accessible(&harness, "options in the property menu");
     assert_steady(&mut harness, "Color de «Leyendo»: Azul");
 
@@ -925,7 +1739,7 @@ fn database_property_menu() -> anyhow::Result<()> {
         "database_property_menu_light",
         eframe::egui::Theme::Light,
         |harness| {
-            click_button(harness, "Estado, Selección");
+            click_action(harness, "Estado, Selección");
             click_button(harness, "Color de «Leyendo»: Azul");
         },
     )

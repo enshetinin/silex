@@ -69,6 +69,64 @@ impl SilexApp {
         Ok(())
     }
 
+    /// Exports the open database as CSV (H11.5): what its view shows, or
+    /// every row and column with `all`.
+    pub(super) fn export_database_csv(&mut self, ctx: &egui::Context, all: bool) -> Result<()> {
+        let dir = silex_desktop::export::export_root()?;
+        self.export_database_csv_to(ctx, &dir, all)
+    }
+
+    /// [`Self::export_database_csv`] into `dir`. The text is made here from
+    /// the table on screen (names typed and not saved yet included); the
+    /// file is written on the `silex-export` thread.
+    pub(super) fn export_database_csv_to(
+        &mut self,
+        ctx: &egui::Context,
+        dir: &std::path::Path,
+        all: bool,
+    ) -> Result<()> {
+        use silex_desktop::csv::{CsvScope, database_to_csv};
+        if self.csv_export.is_some() {
+            self.notice = Some("Ya se está exportando una base a CSV.".into());
+            return Ok(());
+        }
+        // A save error is shown by the status bar; export what the user sees anyway.
+        let _ = self.save_now();
+        let Some(state) = &self.database else {
+            anyhow::bail!("La página abierta no es una base de datos");
+        };
+        let fallback = silex_desktop::view::ViewConfig::default();
+        let scope = if all {
+            CsvScope::All
+        } else {
+            CsvScope::View(state.config().unwrap_or(&fallback))
+        };
+        let csv = database_to_csv(&state.properties, &state.rows, &state.values, scope);
+        let title = display_title(&self.title).to_owned();
+        let repaint = ctx.clone();
+        let job = silex_desktop::export::CsvExportJob::spawn_csv(
+            dir.to_path_buf(),
+            title.clone(),
+            csv,
+            move || repaint.request_repaint(),
+        )?;
+        self.csv_export = Some((job, title));
+        self.last_export = None;
+        Ok(())
+    }
+
+    /// Collects the CSV export from its worker, when it is done.
+    pub(super) fn tick_csv_export(&mut self) {
+        let Some(result) = self.csv_export.as_ref().and_then(|(job, _)| job.poll()) else {
+            return;
+        };
+        self.csv_export = None;
+        match result {
+            Ok(path) => self.last_export = Some(path),
+            Err(err) => self.notice = Some(format!("No se pudo exportar a CSV: {err:#}")),
+        }
+    }
+
     pub(super) fn describe_last_backup(&self) -> String {
         let Some(path) = self.db.path() else {
             return "Copias no disponibles (base en memoria)".into();

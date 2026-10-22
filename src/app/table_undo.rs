@@ -5,8 +5,14 @@
 //! and starts empty each time the database is opened.
 //!
 //! Undoable: cell values, row names, adding a row (undone by sending it to
-//! the trash), sending a row to the trash, adding and deleting properties.
+//! the trash), sending a row to the trash, adding and deleting properties,
+//! and the actions on several rows at once (H11.2), each as one step.
 //! Not undoable here: renaming or moving properties, options and views.
+//!
+//! Rows sent to the trash from the table or the board (menu, «⋯», Supr,
+//! the selection bar) show a notice with «Deshacer» (H11.1). It is the same step as Cmd+Z,
+//! so the notice leaves as soon as another change is recorded or anything
+//! is undone: its button never undoes something else.
 use anyhow::Result;
 use silex_desktop::property::CellValue;
 
@@ -32,6 +38,30 @@ pub(super) enum TableOp {
     TrashRow(String),
     AddProperty(String),
     DeleteProperty(String),
+    /// Several rows sent to the trash together (H11.2).
+    TrashRows(Vec<String>),
+    /// Several rows added together: the copies of the chosen rows (H11.4).
+    AddRows(Vec<String>),
+    /// A value put in several cells at once (H11.2).
+    Cells(Vec<CellChange>),
+}
+
+/// One cell changed by an action on several rows (H11.2).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct CellChange {
+    pub(super) row: String,
+    pub(super) property: String,
+    pub(super) before: Option<CellValue>,
+    pub(super) after: Option<CellValue>,
+}
+
+/// The notice of rows just sent to the trash (H11.1): what it says, and
+/// the step «Deshacer» undoes.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct TrashNotice {
+    pub(super) database: String,
+    pub(super) op: TableOp,
+    pub(super) text: String,
 }
 
 #[derive(Debug, Default)]
@@ -58,6 +88,11 @@ impl TableHistory {
     pub(super) fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
+
+    /// The change Cmd+Z would undo now.
+    pub(super) fn last(&self) -> Option<&TableOp> {
+        self.undo.last()
+    }
 }
 
 /// Which way an operation is applied.
@@ -70,6 +105,7 @@ enum Way {
 impl SilexApp {
     /// Records a change made in the open table.
     pub(super) fn record_table(&mut self, op: TableOp) {
+        self.trash_notice = None;
         if let Some(state) = self.database.as_mut() {
             state.history.record(op);
         }
@@ -91,6 +127,7 @@ impl SilexApp {
         // Pending names and cells are saved (and recorded) first.
         let saved = self.save_table_edits();
         self.report(saved);
+        self.trash_notice = None;
         let Some(state) = self.database.as_mut() else {
             return;
         };
@@ -150,7 +187,39 @@ impl SilexApp {
                 self.reload_pages()?;
                 if let Some(state) = self.database.as_mut() {
                     state.values = self.db.database_values(&state.id)?;
+                    // A row back from the trash goes to its place, not to
+                    // the end (H11.1).
+                    if !trash {
+                        state.apply_view();
+                    }
                 }
+            }
+            TableOp::TrashRows(rows) | TableOp::AddRows(rows) => {
+                // Undoing new rows sends them to the trash; redoing brings
+                // them back.
+                let restore = matches!(op, TableOp::TrashRows(_)) == undo;
+                if restore {
+                    self.db.restore_pages(rows)?;
+                } else {
+                    self.db.trash_pages(rows)?;
+                }
+                self.reload_pages()?;
+                if let Some(state) = self.database.as_mut() {
+                    state.values = self.db.database_values(&state.id)?;
+                    if restore {
+                        state.apply_view();
+                    }
+                }
+            }
+            TableOp::Cells(changes) => {
+                let cells = changes
+                    .iter()
+                    .map(|c| {
+                        let value = if undo { &c.before } else { &c.after };
+                        (c.row.clone(), c.property.clone(), value.clone())
+                    })
+                    .collect();
+                self.store_cells(cells)?;
             }
             TableOp::AddProperty(property) | TableOp::DeleteProperty(property) => {
                 let delete = matches!(op, TableOp::AddProperty(_)) == undo;
@@ -165,9 +234,24 @@ impl SilexApp {
         Ok(())
     }
 
+    /// The notice of a row just sent to the trash, while «Deshacer» would
+    /// still bring it back: its database is open and its trashing is the
+    /// last change. Otherwise it is dropped.
+    pub(super) fn current_trash_notice(&mut self) -> Option<TrashNotice> {
+        let notice = self.trash_notice.as_ref()?;
+        let current = self
+            .database
+            .as_ref()
+            .is_some_and(|d| d.id == notice.database && d.history.last() == Some(&notice.op));
+        if !current {
+            self.trash_notice = None;
+        }
+        self.trash_notice.clone()
+    }
+
     /// Whether Cmd+Z is for the table: a database is open and no text is
-    /// being typed (nothing has the keyboard, or a cell does, not as a text
-    /// field). Text fields keep their own undo.
+    /// being typed (nothing has the keyboard, or a cell, a row's «⋯» or a
+    /// card does, not as a text field). Text fields keep their own undo.
     pub(super) fn table_has_focus(&self, ctx: &egui::Context) -> bool {
         let Some(state) = &self.database else {
             return false;
@@ -175,6 +259,9 @@ impl SilexApp {
         let Some(focused) = ctx.memory(|m| m.focused()) else {
             return true;
         };
+        if state.handle_focus == Some(focused) {
+            return true;
+        }
         let Some((index, column)) = state.cursor else {
             return false;
         };

@@ -146,6 +146,13 @@ fn write_attachments(
 
 /// Writes ready Markdown (a page or a database) like [`export_page`].
 pub fn export_markdown(dir: &Path, title: &str, markdown: &str) -> Result<PathBuf> {
+    export_text(dir, title, "md", markdown)
+}
+
+/// Writes `contents` into `dir` (created if needed) as `title.extension`,
+/// with a name safe on every system that never overwrites an existing
+/// file. Returns the file path.
+pub fn export_text(dir: &Path, title: &str, extension: &str, contents: &str) -> Result<PathBuf> {
     fs::create_dir_all(dir)
         .with_context(|| format!("No se puede crear la carpeta {}", dir.display()))?;
     remove_stale_temporaries(dir, STALE_AFTER);
@@ -154,9 +161,9 @@ pub fn export_markdown(dir: &Path, title: &str, markdown: &str) -> Result<PathBu
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().to_lowercase())
         .collect();
-    let name = safe_path::unique_file_name(title, "md", &mut taken);
+    let name = safe_path::unique_file_name(title, extension, &mut taken);
     let path = safe_path::join_inside(dir, &[&name])?;
-    write_atomic(&path, markdown.as_bytes())?;
+    write_atomic(&path, contents.as_bytes())?;
     Ok(path)
 }
 
@@ -449,6 +456,10 @@ pub type WorkspaceExportJob = ExportJob<WorkspaceExport>;
 /// attachments can be up to 20 MB each.
 pub type PageExportJob = ExportJob<PathBuf>;
 
+/// A database written as CSV on a worker thread (H11.5). The text is made
+/// from what the window holds; only writing it waits on the disk.
+pub type CsvExportJob = ExportJob<PathBuf>;
+
 impl<T: Send + 'static> ExportJob<T> {
     /// Opens `db_path` on a new thread and runs `work` with it; `on_done`
     /// runs when the result is ready (to wake the UI).
@@ -457,11 +468,22 @@ impl<T: Send + 'static> ExportJob<T> {
         work: impl FnOnce(&Database) -> Result<T> + Send + 'static,
         on_done: impl FnOnce() + Send + 'static,
     ) -> Result<Self> {
+        Self::run(
+            move || Database::open(&db_path).and_then(|db| work(&db)),
+            on_done,
+        )
+    }
+
+    /// Runs `work` on a new thread; `on_done` runs when the result is ready.
+    fn run(
+        work: impl FnOnce() -> Result<T> + Send + 'static,
+        on_done: impl FnOnce() + Send + 'static,
+    ) -> Result<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("silex-export".into())
             .spawn(move || {
-                let result = Database::open(&db_path).and_then(|db| work(&db));
+                let result = work();
                 let _ = tx.send(result);
                 on_done();
             })
@@ -506,5 +528,17 @@ impl PageExportJob {
             move |db| export_page_with_files(db, &dir, &title, &blocks),
             on_done,
         )
+    }
+}
+
+impl CsvExportJob {
+    /// Writes `csv` as `title.csv` into `dir`, like [`export_text`].
+    pub fn spawn_csv(
+        dir: PathBuf,
+        title: String,
+        csv: String,
+        on_done: impl FnOnce() + Send + 'static,
+    ) -> Result<Self> {
+        Self::run(move || export_text(&dir, &title, "csv", &csv), on_done)
     }
 }

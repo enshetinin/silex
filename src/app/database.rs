@@ -80,6 +80,15 @@ pub(super) struct DatabaseState {
     pub(super) view_delete: Option<String>,
     /// What can be undone in this table (H6.4).
     pub(super) history: TableHistory,
+    /// The row's «⋯» or the card that had the keyboard focus last frame:
+    /// with the focus there, Cmd+Z is for the table (H11.1).
+    pub(super) handle_focus: Option<egui::Id>,
+    /// The rows chosen with their boxes (H11.2).
+    pub(super) selection: HashSet<String>,
+    /// The row whose box was clicked last: Shift+click chooses from it.
+    pub(super) select_anchor: Option<String>,
+    /// What «Poner valor…» shows.
+    pub(super) bulk: BulkValue,
 }
 
 impl DatabaseState {
@@ -113,6 +122,7 @@ impl DatabaseState {
             .collect();
         self.order = order;
         self.columns = columns;
+        self.prune_selection();
     }
 
     /// After the rows were read again (added, renamed, trashed): the rows
@@ -137,11 +147,13 @@ impl DatabaseState {
             !shown.contains(i) && (self.pinned.contains(id) || !known.contains(id))
         }));
         self.order = order;
+        self.prune_selection();
     }
 
     /// After a change to the view's settings: apply it and save it soon.
     pub(super) fn view_changed(&mut self) {
         self.pinned.clear();
+        self.clear_selection();
         self.apply_view();
         self.view_dirty = true;
     }
@@ -170,6 +182,21 @@ pub(super) fn row_name_id(row_id: &str) -> egui::Id {
 }
 
 /// The header button of a property (opens its menu).
+/// A row's «⋯» button (H11.1).
+pub(super) fn row_menu_id(row_id: &str) -> egui::Id {
+    egui::Id::unique(("silex-row-menu", row_id))
+}
+
+/// Supr or Retroceso, taken (H11.1): with the focus on a row (its «⋯», a
+/// cell not being typed in, a card) they send it to the trash. Not while a
+/// menu or a picker is open: the keys are theirs.
+pub(super) fn take_delete_key(ctx: &egui::Context) -> bool {
+    use egui::{Key, Modifiers as M};
+    !egui::Popup::is_any_open(ctx)
+        && (take_exact_key(ctx, Key::Delete, M::NONE)
+            || take_exact_key(ctx, Key::Backspace, M::NONE))
+}
+
 pub(super) fn property_header_id(property: &str) -> egui::Id {
     egui::Id::unique(("silex-property", property))
 }
@@ -200,6 +227,12 @@ pub(super) enum TableAction {
     /// A new option of a select property (a board's new column): its
     /// property and name.
     AddOption(String, String),
+    /// The chosen rows to the trash (H11.2).
+    TrashSelected,
+    /// A copy of each chosen row, right below it (H11.4).
+    DuplicateSelected,
+    /// A value (none: empty) in one property of the chosen rows.
+    SetSelected(String, Option<CellValue>),
     /// Views as tabs (H6.3b): by index in `views`, or by id.
     SwitchView(usize),
     AddView(ViewKind),
@@ -241,9 +274,20 @@ impl SilexApp {
             view_rename: None,
             view_delete: None,
             history: TableHistory::default(),
+            handle_focus: None,
+            selection: HashSet::new(),
+            select_anchor: None,
+            bulk: BulkValue::default(),
         });
-        // The view last open in this session, else the first.
-        let last = self.last_views.get(id).cloned();
+        // The view last open (also in an earlier session, H11.6), else the
+        // first. If it cannot be read, the first: not worth an error.
+        let last = match self.last_views.get(id) {
+            Some(view) => Some(view.clone()),
+            None => self.db.last_view(id).ok().flatten(),
+        };
+        if let Some(view) = &last {
+            self.last_views.insert(id.to_owned(), view.clone());
+        }
         if let Some(state) = self.database.as_mut() {
             state.view = last
                 .and_then(|last| state.views.iter().position(|v| v.id == last))
@@ -444,7 +488,9 @@ impl SilexApp {
         };
         if !state.is_board() {
             table_keys(ui.ctx(), &mut state);
+            selection_keys(ui.ctx(), &mut state);
         }
+        state.handle_focus = None;
         let (actions, cells) = self.draw_table(ui, &mut state);
         let database = state.id.clone();
         let editing_name = state
@@ -483,8 +529,19 @@ impl SilexApp {
                 }
             }
             TableAction::Row(RowAction::Trash(id)) => {
+                let title = self
+                    .find_page(&id)
+                    .map(|p| display_title(&p.title).to_owned())
+                    .unwrap_or_default();
                 self.apply(RowAction::Trash(id.clone()))?;
-                self.record_table(TableOp::TrashRow(id));
+                self.record_table(TableOp::TrashRow(id.clone()));
+                // Its own notice, with «Deshacer», instead of the usual one.
+                self.notice = None;
+                self.trash_notice = Some(TrashNotice {
+                    database: database.to_owned(),
+                    op: TableOp::TrashRow(id),
+                    text: format!("Fila «{title}» enviada a la papelera."),
+                });
             }
             TableAction::Row(other) => self.apply(other)?,
             TableAction::AddProperty(kind, name) => {
@@ -532,6 +589,9 @@ impl SilexApp {
                 self.db.delete_select_option(&id)?;
                 self.reload_properties()?;
             }
+            TableAction::TrashSelected => self.trash_selected(database)?,
+            TableAction::DuplicateSelected => self.duplicate_selected()?,
+            TableAction::SetSelected(property, value) => self.set_selected(&property, value)?,
             TableAction::SwitchView(index) => self.switch_view(index)?,
             TableAction::AddView(kind) => self.add_view(kind)?,
             TableAction::DuplicateView(index) => self.duplicate_view(index)?,
@@ -618,9 +678,14 @@ impl SilexApp {
             ui.spacing_mut().button_padding.x = CELL_PAD;
             selected_tab = view_tabs(ui, state, &mut actions);
             compact = ui.available_width() - theme::space::LG < full_width;
-            let used = toolbar_menus(ui, state, &mut actions, compact);
-            if !compact {
-                ui.ctx().data_mut(|d| d.insert_temp(full_width_id, used));
+            // While rows are chosen, the bar to act on them (H11.2).
+            if !state.selection.is_empty() && !state.is_board() {
+                selection_bar(ui, state, &mut actions);
+            } else {
+                let used = toolbar_menus(ui, state, &mut actions, compact);
+                if !compact {
+                    ui.ctx().data_mut(|d| d.insert_temp(full_width_id, used));
+                }
             }
         });
         if state.is_board() {
@@ -634,8 +699,17 @@ impl SilexApp {
             .map(|&i| column_width(state.properties[i].kind))
             .sum();
         let visible = ui.available_width();
-        let name_width = (visible - columns - ADD_COLUMN_WIDTH).max(NAME_MIN_WIDTH);
-        let width = name_width + columns + ADD_COLUMN_WIDTH;
+        let name_width =
+            (visible - SELECT_COLUMN_WIDTH - columns - ADD_COLUMN_WIDTH).max(NAME_MIN_WIDTH);
+        let width = SELECT_COLUMN_WIDTH + name_width + columns + ADD_COLUMN_WIDTH;
+        // A table wider than its room scrolls sideways in all but the last
+        // ADD_COLUMN_WIDTH: there the rows' «⋯» stay in sight, over no cell.
+        let overflow = width > visible + 0.5;
+        let view_width = if overflow {
+            visible - ADD_COLUMN_WIDTH
+        } else {
+            visible
+        };
 
         // Lines, header and rows touch: the lines are the only separation.
         let spacing = ui.spacing().item_spacing.y;
@@ -653,7 +727,10 @@ impl SilexApp {
             ui.allocate_exact_size(egui::vec2(visible, HEADER_HEIGHT), egui::Sense::hover());
         {
             let ui = &mut inside(ui, header, egui::Layout::top_down(egui::Align::Min));
-            ui.set_clip_rect(header.intersect(ui.clip_rect()));
+            ui.set_clip_rect(
+                egui::Rect::from_min_size(header.min, egui::vec2(view_width, HEADER_HEIGHT))
+                    .intersect(ui.clip_rect()),
+            );
             let left = header.left() - state.scroll.x;
             let rect = egui::Rect::from_min_size(
                 egui::pos2(left, header.top()),
@@ -675,6 +752,7 @@ impl SilexApp {
         let mut area = egui::ScrollArea::both()
             .id_salt(("silex-table", &state.id))
             .auto_shrink([false, true])
+            .max_width(view_width)
             .max_height(max_height);
         if let Some(index) = wanted {
             let top = index as f32 * ROW_HEIGHT;
@@ -690,7 +768,11 @@ impl SilexApp {
                 visible_scroll_bars(ui);
                 area.show_rows(ui, ROW_HEIGHT, state.order.len(), |ui, range| {
                     ui.set_min_width(width);
-                    let columns = Columns { name_width, width };
+                    let columns = Columns {
+                        name_width,
+                        width,
+                        overflow,
+                    };
                     self.table_rows(ui, state, range.clone(), columns, &mut actions, &mut cells);
                     range
                 })
@@ -742,7 +824,13 @@ impl SilexApp {
         actions: &mut Vec<TableAction>,
     ) {
         let p = theme::current(ui.ctx());
-        let name = egui::Rect::from_min_size(rect.min, egui::vec2(name_width, rect.height()));
+        let boxes =
+            egui::Rect::from_min_size(rect.min, egui::vec2(SELECT_COLUMN_WIDTH, rect.height()));
+        header_box(ui, boxes, state);
+        let name = egui::Rect::from_min_size(
+            egui::pos2(boxes.right(), rect.top()),
+            egui::vec2(name_width, rect.height()),
+        );
         header_label(ui, name, icons::TEXT_AA, "Nombre");
 
         let DatabaseState {
@@ -881,10 +969,15 @@ impl SilexApp {
             cursor,
             editing,
             option_filter,
+            handle_focus,
+            selection,
+            select_anchor,
             ..
         } = state;
         *cursor = None;
         let first = range.start;
+        // A box clicked this frame: its row's place and whether with Shift.
+        let mut clicked_box = None;
         for (offset, &row_index) in order[range].iter().enumerate() {
             // `index` is the row's place in the view; `row_index` in `rows`.
             let index = first + offset;
@@ -894,7 +987,9 @@ impl SilexApp {
             let name_id = row_name_id(&row.id);
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(columns.width, ROW_HEIGHT), egui::Sense::hover());
+            let menu_id = row_menu_id(&row.id);
             let focused = ui.memory(|m| m.has_focus(name_id));
+            let menu_focused = ui.memory(|m| m.has_focus(menu_id));
             if focused {
                 *cursor = Some((index, 0));
             }
@@ -903,14 +998,35 @@ impl SilexApp {
                     .as_ref()
                     .is_some_and(|(id, c)| *id == row.id && *c == column)
             };
-            if ui.rect_contains_pointer(rect) || focused {
+            let hot = ui.rect_contains_pointer(rect) || focused || menu_focused;
+            let chosen = selection.contains(&row.id);
+            if chosen {
+                ui.painter().rect_filled(rect, 0.0, p.accent_soft);
+            } else if hot {
                 ui.painter().rect_filled(rect, 0.0, p.subtle);
             }
             ui.painter()
                 .hline(rect.x_range(), rect.bottom() - 0.5, (1.0, p.border));
 
-            let name_rect =
-                egui::Rect::from_min_size(rect.min, egui::vec2(columns.name_width, rect.height()));
+            // The box in front (H11.2).
+            let boxes =
+                egui::Rect::from_min_size(rect.min, egui::vec2(SELECT_COLUMN_WIDTH, rect.height()));
+            let tick = select_box(
+                ui,
+                boxes,
+                select_id(&row.id),
+                chosen,
+                false,
+                hot || !selection.is_empty(),
+                &format!("Seleccionar «{}»", display_title(&row.title)),
+            );
+            if tick.clicked() {
+                clicked_box = Some((index, ui.input(|i| i.modifiers.shift)));
+            }
+            let name_rect = egui::Rect::from_min_size(
+                egui::pos2(boxes.right(), rect.top()),
+                egui::vec2(columns.name_width, rect.height()),
+            );
             {
                 // A frameless text field has no margin: the rect sets where
                 // the text starts.
@@ -981,11 +1097,73 @@ impl SilexApp {
                 property_cell(ui, &cell, editing, option_filter, cells);
                 if ui.memory(|m| m.has_focus(cell.id())) {
                     *cursor = Some((index, column));
+                    if take_delete_key(ui.ctx()) {
+                        actions.push(TableAction::Row(RowAction::Trash(row.id.clone())));
+                    }
+                }
+            }
+
+            // «⋯» in the last column, under the header's «+»: the row's
+            // actions, the same menu as a right-click on the name (H11.1).
+            // In a table wider than its room, it goes in the strip at the
+            // right of the scrolling rows, so it is never scrolled away and
+            // never covers a cell.
+            let clip = ui.clip_rect();
+            let mut strip_ui;
+            let (ui, column) = if columns.overflow {
+                let strip = egui::Rect::from_x_y_ranges(
+                    clip.right()..=clip.right() + ADD_COLUMN_WIDTH,
+                    rect.y_range(),
+                );
+                strip_ui = ui.new_child(egui::UiBuilder::new().max_rect(strip));
+                strip_ui.set_clip_rect(egui::Rect::from_x_y_ranges(
+                    clip.right()..=clip.right() + ADD_COLUMN_WIDTH,
+                    clip.y_range(),
+                ));
+                if chosen {
+                    strip_ui.painter().rect_filled(strip, 0.0, p.accent_soft);
+                } else if hot {
+                    strip_ui.painter().rect_filled(strip, 0.0, p.subtle);
+                }
+                strip_ui
+                    .painter()
+                    .hline(strip.x_range(), strip.bottom() - 0.5, (1.0, p.border));
+                (&mut strip_ui, strip)
+            } else {
+                let column = egui::Rect::from_x_y_ranges(
+                    rect.right() - ADD_COLUMN_WIDTH..=rect.right(),
+                    rect.y_range(),
+                );
+                (&mut *ui, column)
+            };
+            let at =
+                egui::Rect::from_center_size(column.center(), egui::Vec2::splat(icons::BUTTON));
+            let menu = icons::more_button(
+                ui,
+                at,
+                menu_id,
+                hot,
+                if chosen { p.accent_soft } else { p.subtle },
+                &format!("Acciones de «{}»", display_title(&row.title)),
+            );
+            egui::Popup::menu(&menu).show(|ui| {
+                if let Some(chosen) = self.page_menu(ui, &row.id) {
+                    actions.push(TableAction::Row(chosen));
+                    ui.close();
+                }
+            });
+            if menu.has_focus() {
+                *handle_focus = Some(menu_id);
+                if take_delete_key(ui.ctx()) {
+                    actions.push(TableAction::Row(RowAction::Trash(row.id.clone())));
                 }
             }
             if focus.as_ref().is_some_and(|(id, _)| *id == row.id) {
                 *focus = None;
             }
+        }
+        if let Some((index, shift)) = clicked_box {
+            click_box(rows, order, selection, select_anchor, index, shift);
         }
     }
 }
@@ -994,6 +1172,9 @@ impl SilexApp {
 #[derive(Clone, Copy)]
 struct Columns {
     name_width: f32,
+    /// The table is wider than its room: the «⋯» go in a strip at the
+    /// right of the scrolling rows.
+    overflow: bool,
     width: f32,
 }
 

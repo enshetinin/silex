@@ -32,6 +32,7 @@
 ## Versión 4 — ajustes (`0004_settings.sql`)
 - `settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`: preferencias clave-valor (`theme` = `system`/`light`/`dark`, `zoom_percent` entre 50 y 200). Una preferencia nueva no necesita migración.
 - Rust valida cada valor al leer (`settings::Settings::from_pairs`): una clave desconocida o un valor inválido se ignoran y se usa el valor por defecto; nunca impiden arrancar.
+- Otras claves, que `Settings::from_pairs` ignora: `open_tabs` (ADR 0011), `recent_pages` (H11.8, `{"pages": [ids]}`, la más reciente primero, como mucho 20) y `last_view:<id de la base>` (H11.6), con el id de la última vista abierta en esa base. Esta se borra con la base al borrarla para siempre (ADR 0013); si apunta a una vista ya borrada, la base se abre en la primera.
 - Los ajustes viven en la base, así que entran en las copias de seguridad: restaurar una copia restaura también sus ajustes.
 
 ## Versión 5 — bases de datos (`0005_databases.sql`, ADR 0006)
@@ -67,7 +68,7 @@
 - Probado: v6→v7 y v1→v7 conservando los `rowid` y los adjuntos, un fallo a mitad que deja la v6 intacta, y una copia v6 restaurada y actualizada.
 
 ## Versión 8 — historial de versiones (`0008_page_versions.sql`, ADR 0009)
-- `page_versions (id, page_id, created_at, title, format, blocks, size)`: una instantánea de una página. `blocks` es una lista JSON (`format` 1, de `src/versions.rs`) con `CHECK (json_valid(blocks))`, y `size` son sus bytes (`CHECK (size = octet_length(blocks))`). `page_id` con `ON DELETE CASCADE` (red de seguridad: las páginas no se borran físicamente) e índice `page_versions_page_idx (page_id, created_at)`. Solo se crea la tabla: no se reconstruye nada.
+- `page_versions (id, page_id, created_at, title, format, blocks, size)`: una instantánea de una página. `blocks` es una lista JSON (`format` 1, de `src/versions.rs`) con `CHECK (json_valid(blocks))`, y `size` son sus bytes (`CHECK (size = octet_length(blocks))`). `page_id` con `ON DELETE CASCADE` (desde el ADR 0013, la papelera puede borrar páginas para siempre y la cascada se lleva sus versiones) e índice `page_versions_page_idx (page_id, created_at)`. Solo se crea la tabla: no se reconstruye nada.
 - `save_document` guarda, en su misma transacción, cómo estaba la página **antes** del guardado si algo cambia (título o bloques), si su última versión tiene más de 10 minutos y si no es igual a ella. Una página sin bloques, o con todos vacíos (sin texto, archivo ni enlace), no se guarda como versión. Después poda las de esa página (`versions::to_prune`): todas las de 24 horas, la última de cada día (UTC) hasta 30 días y la última de cada semana (de lunes a domingo) después.
 - `save_version` guarda el estado actual sin esperar los 10 minutos (antes de restaurar, H7.8). `page_versions` las lista (la más reciente primero) y `version_blocks` lee una: un formato o tipo de bloque desconocido, o datos dañados, dan un mensaje para esa versión, nunca un error que oculte las demás.
 - Interfaz (H7.8, sin migración): `page_versions` da también la hora local (`strftime(…, 'localtime')`), y `local_today` el día de hoy en hora local. `restorable_blocks` prepara los bloques de una versión para guardarlos: un archivo que ya no está pasa a párrafo («[archivo que ya no está] nombre»), un enlace a una página que no existe pierde su página, y un id que ahora usa otra página recibe uno nuevo.
@@ -107,3 +108,13 @@
 4. Guardado al cerrar/no pérdida ante errores de disco.
 5. Rutas de backup consistentes en Windows, macOS, Linux.
 6. SQLite corrupta o disco lleno muestra error recuperable y no sobrescribe datos.
+
+## Borrar para siempre (H11.3, ADR 0013, sin migración)
+- `purge_trash_item(id)`: borra en una transacción la cabeza de un elemento de la papelera y lo que se envió con ella (mismo `deleted_at`). Rechaza páginas vivas y páginas de dentro de una rama. `empty_trash()` borra todas las páginas con `deleted_at`.
+- Las cascadas existentes hacen el resto: `blocks`, `page_versions`, `db_values` y, de una base, `db_properties`, `db_select_options` y `db_views`. Los disparadores `AFTER DELETE` mantienen `page_search` y `block_search`, también en las cascadas. `blocks.link_page_id` pasa a `NULL` («Página que ya no existe») y `pages.parent_id` de elementos sueltos, también.
+- `save_document` guarda como `NULL` un `link_page_id` que ya no existe, en lugar de fallar la clave foránea.
+- Los adjuntos quedan sin uso y los borra «Liberar espacio». Las copias de seguridad anteriores conservan lo borrado.
+
+## Duplicar (H11.4, sin migración)
+- `duplicate_page(id, con_hijos)` y `duplicate_pages(ids)` copian en una transacción: página con `kind` y bloques nuevos (mismos `attachment_id` y `link_page_id`), `db_values` de las filas y, de una base, `db_properties` (también las borradas, con su `deleted_at`), `db_select_options` y `db_views`. En `db_views.config` (JSON) se sustituye cada id viejo de propiedad u opción por el nuevo; los UUID no se repiten, así que el reemplazo de texto es seguro.
+- La copia va justo debajo del original: se renumera `sort_order` de las hermanas vivas. No se copian `favorite_at`, `template_at` ni `page_versions`.

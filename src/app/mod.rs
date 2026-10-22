@@ -18,7 +18,9 @@ mod database;
 mod date_picker;
 mod dialogs;
 mod document;
+mod duplicate;
 mod files;
+mod find;
 mod frame;
 pub mod icons;
 mod jobs;
@@ -28,6 +30,7 @@ mod palette;
 mod privacy;
 mod read_only;
 mod row_page;
+mod row_selection;
 mod search;
 mod side_panel;
 mod sidebar;
@@ -46,9 +49,10 @@ mod view_tabs;
 
 pub use self::startup::StartupError;
 use self::{
-    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, files::*, links::*,
-    page_history::*, privacy::*, read_only::*, row_page::*, search::*, side_panel::*, sidebar::*,
-    space::*, tab_bar::*, table_undo::*, templates::*, view_menus::*, view_tabs::*,
+    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, duplicate::*, files::*, find::*,
+    links::*, page_history::*, privacy::*, read_only::*, row_page::*, row_selection::*, search::*,
+    side_panel::*, sidebar::*, space::*, tab_bar::*, table_undo::*, templates::*, view_menus::*,
+    view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
@@ -75,6 +79,8 @@ pub struct SilexApp {
     expanded: HashSet<String>,
     trash_count: usize,
     trash_dialog: Option<TrashDialog>,
+    /// «Duplicar» asking about the subpages (H11.4).
+    duplicate_dialog: Option<DuplicateDialog>,
     favorites: Vec<Page>,
     /// The search window (Cmd+K), while open.
     search: Option<SearchWindow>,
@@ -82,8 +88,9 @@ pub struct SilexApp {
     database: Option<DatabaseState>,
     /// The open page's properties, when it is a row of a database.
     row_page: Option<RowPage>,
-    /// The view last open in each database (database id → view id), so it
-    /// opens again on that view; for this session only.
+    /// The view last open in each database (database id → view id), as
+    /// stored in the file (H11.6): read when a database opens, written when
+    /// its view changes, so the same view is never written twice.
     last_views: std::collections::HashMap<String, String>,
     /// The keyboard shortcuts window (from the command palette).
     shortcuts_dialog: bool,
@@ -110,6 +117,9 @@ pub struct SilexApp {
     /// Notices still to come from one drop (import and attach): the second
     /// is joined to the first instead of hiding it.
     notice_group: u8,
+    /// A row just sent to the trash from its table or board: its notice
+    /// offers «Deshacer» (H11.1).
+    trash_notice: Option<TrashNotice>,
     close_dialog: bool,
     /// Set once the user may leave: everything saved or changes discarded.
     allow_close: bool,
@@ -129,6 +139,11 @@ pub struct SilexApp {
     pending_key: Option<(EditorKey, String)>,
     /// Block to focus (and cursor position) on the next frame.
     pending_focus: Option<(String, usize)>,
+    /// With `pending_focus`, the other end of a selection in that block
+    /// (block id, char): the match chosen when the find bar closes.
+    pending_anchor: Option<(String, usize)>,
+    /// The find bar of the open page (H11.7).
+    find: Option<FindBar>,
     /// Multi-line paste taken this frame (block id, text), run after layout.
     pending_paste: Option<(String, String)>,
     /// Last exported file, offered with "Abrir carpeta".
@@ -140,6 +155,9 @@ pub struct SilexApp {
     /// A page with attachments being exported on a worker thread (H7.9),
     /// and its title for the notice.
     page_export: Option<(silex_desktop::export::PageExportJob, String)>,
+    /// A database being written as CSV on a worker thread (H11.5), and its
+    /// title for the notice.
+    csv_export: Option<(silex_desktop::export::CsvExportJob, String)>,
     /// Attachments of the open page and the work on files (ADR 0007).
     files: Files,
     /// «Espacio» and «Liberar espacio» (H7.4).
@@ -156,6 +174,11 @@ pub struct SilexApp {
     parked: std::collections::HashMap<String, Parked>,
     /// The tabs as last stored, to write them only when they change.
     saved_tabs: String,
+    /// Pages opened recently, listed by the search window with nothing
+    /// typed (H11.8).
+    recent: silex_desktop::recent::Recent,
+    /// `recent` as last stored, to write it only when it changes.
+    saved_recent: String,
     /// Scroll of the open page's blocks as of the last frame.
     editor_scroll: f32,
     /// Scroll to restore on the next frame (a tab shown again).
@@ -227,6 +250,7 @@ impl SilexApp {
             expanded: HashSet::new(),
             trash_count: 0,
             trash_dialog: None,
+            duplicate_dialog: None,
             favorites: Vec::new(),
             search: None,
             database: None,
@@ -246,6 +270,7 @@ impl SilexApp {
             save: SaveState::default(),
             notice: None,
             notice_group: 0,
+            trash_notice: None,
             close_dialog: false,
             allow_close: false,
             backup_job: None,
@@ -257,11 +282,14 @@ impl SilexApp {
             ime_composing: false,
             pending_key: None,
             pending_focus: None,
+            pending_anchor: None,
+            find: None,
             pending_paste: None,
             last_export: None,
             import_job: None,
             export_job: None,
             page_export: None,
+            csv_export: None,
             files: Files::default(),
             space: Space::default(),
             links: Links::default(),
@@ -270,6 +298,8 @@ impl SilexApp {
             tabs: silex_desktop::tabs::Tabs::default(),
             parked: std::collections::HashMap::new(),
             saved_tabs: String::new(),
+            recent: silex_desktop::recent::Recent::default(),
+            saved_recent: String::new(),
             editor_scroll: 0.0,
             pending_scroll: None,
             click_modifiers: egui::Modifiers::NONE,
@@ -291,6 +321,8 @@ impl SilexApp {
         app.favorites = app.db.list_favorites()?;
         app.templates.list = app.db.list_templates()?;
         app.rebuild_tree();
+        // Before a page opens, which is a visit (H11.8).
+        app.load_recent();
         // The tabs of last time (ADR 0011), those still live; else the
         // first page. A damaged value only loses the tabs.
         if let Some(json) = app.db.open_tabs().ok().flatten() {
@@ -379,6 +411,7 @@ impl SilexApp {
             self.slash = None;
             self.slash_dismissed = None;
             self.selection = None;
+            self.find = None;
             self.blocks = self.db.list_blocks(&id)?;
             self.load_attachments(&id)?;
             self.database = None;
@@ -395,8 +428,33 @@ impl SilexApp {
             self.load_links()?;
             self.rebuild_tree();
             self.refresh_side();
+            if let Some(id) = &self.selected {
+                self.recent.visit(id);
+            }
+            self.save_recent();
         }
         Ok(found)
+    }
+
+    /// Reads the pages opened recently (H11.8). A damaged value, or one
+    /// that cannot be read, only empties the list.
+    fn load_recent(&mut self) {
+        let json = self.db.recent_pages().ok().flatten().unwrap_or_default();
+        self.recent = silex_desktop::recent::Recent::from_json(&json);
+        self.saved_recent = self.recent.to_json();
+    }
+
+    /// Stores the pages opened recently if they changed. A failure is only
+    /// a notice: the list still works in this session.
+    fn save_recent(&mut self) {
+        let json = self.recent.to_json();
+        if json != self.saved_recent {
+            let result = self.db.save_recent_pages(&json);
+            if result.is_ok() {
+                self.saved_recent = json;
+            }
+            self.report(result);
+        }
     }
 
     /// Stores the tabs if they changed (to reopen them next time). A
@@ -597,6 +655,18 @@ impl SilexApp {
         if self.search.is_some() {
             return;
         }
+        // Find in the page (H11.7). The replace shortcut first:
+        // consume_shortcut would take Cmd+Opción+F as Cmd+F.
+        let find_dialog = self.links.picker.is_some()
+            || self.page_history.is_some()
+            || self.templates.picker.is_some();
+        if !find_dialog {
+            if pressed(replace_shortcut(ctx)) || pressed(Sc::new(M::COMMAND | M::ALT, Key::F)) {
+                self.open_find(ctx, true);
+            } else if pressed(Sc::new(M::COMMAND, Key::F)) {
+                self.open_find(ctx, false);
+            }
+        }
         // Tabs (ADR 0011), not while a dialog has the keyboard. Cmd+T is
         // a new tab: the search window, to choose its page.
         let dialog = self.links.picker.is_some()
@@ -638,7 +708,7 @@ impl SilexApp {
         // In a database's table (not typing in a field), Cmd+Z undoes the
         // table's changes (H6.4); elsewhere, the document's.
         let table = self.table_has_focus(ctx);
-        let document = table || self.document_has_focus(ctx);
+        let document = table || self.document_has_focus(ctx) || self.find_bar_has_focus(ctx);
         let redo = document
             && (pressed(Sc::new(M::COMMAND | M::SHIFT, Key::Z))
                 || pressed(Sc::new(M::COMMAND, Key::Y)));
@@ -800,6 +870,7 @@ impl SilexApp {
             && self.templates.picker.is_none()
         {
             self.take_pasted_image(&ctx);
+            self.find_keys(&ctx);
             self.take_editor_key(&ctx);
             self.apply_pending_focus(&ctx);
             self.handle_selection_keys(&ctx);
@@ -819,6 +890,7 @@ impl SilexApp {
         self.tick_free_space();
         self.tick_workspace_export();
         self.tick_page_export();
+        self.tick_csv_export();
         Self::drop_hint(&ctx);
         let now = Instant::now();
         if self.save.is_due(now) {
@@ -840,6 +912,7 @@ impl SilexApp {
         self.close_dialog(&ctx);
         self.restore_dialog(&ctx);
         self.trash_dialog(&ctx);
+        self.duplicate_dialog(&ctx);
         self.free_space_dialog(&ctx);
         self.link_picker(&ctx);
         self.link_restore_dialog(&ctx);

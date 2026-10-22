@@ -287,3 +287,70 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - En «Lecturas», Tab recorre las vistas, «Filtrar», «Ordenar», «Columnas» y «+ Propiedad» de izquierda a derecha; los nombres de las filas se anuncian como «Nombre, fila 1»…
 - Con Cmd+K, el campo se anuncia como «Buscar páginas o acciones».
 - Windows (Narrador) y Linux (Orca), si es posible: lo mismo, y anota lo que no se lea.
+
+## 32. Borrar filas a la vista (H11.1)
+- En «Lecturas», pasa el ratón por una fila: aparece «⋯» al final de la fila, bajo el «+» de la cabecera. Con muchas columnas (o la ventana estrecha), va en una franja fija a la derecha: no se desplaza ni tapa la última celda. Su menú es el mismo que el del clic derecho en el nombre. «Enviar a la papelera» quita la fila y muestra «Fila «…» enviada a la papelera.» con «Deshacer». Pulsa «Deshacer»: la fila vuelve a su sitio.
+- Con Tab, llega a «⋯» tras la última celda de la fila (se ve con el foco) y pulsa Supr: la fila va a la papelera. Cmd/Ctrl+Z la devuelve.
+- Enfoca una casilla o una celda sin escribir en ella (Esc tras editarla) y pulsa Retroceso: la fila va a la papelera. En el nombre de la fila, Retroceso solo borra letras.
+- Tras enviar una fila a la papelera, cambia otra celda: el aviso desaparece (su «Deshacer» ya no la devolvería).
+- Con un menú de celda abierto (selección o fecha), Supr y Retroceso no borran la fila.
+- En el tablero: pasa el ratón por una tarjeta y usa su «⋯» (incluye «Mover a»); enfoca una tarjeta con Tab y pulsa Supr. Arrastrar desde «⋯» no mueve la tarjeta.
+- Con VoiceOver, «⋯» se anuncia como «Acciones de «Título»» y el botón del aviso como «Deshacer el envío a la papelera».
+
+## 33. Varias filas a la vez (H11.2)
+- En «Lecturas», pasa el ratón por una fila: aparece su casilla delante del nombre. Márcala: la fila se resalta y la barra de herramientas pasa a «1 fila seleccionada», «Poner valor…», «Enviar a la papelera» y «×».
+- Mayús+clic en la casilla de otra fila: se eligen todas las de en medio. Un clic en una elegida la quita.
+- La casilla de la cabecera elige todas las filas visibles (con un filtro, solo las que se ven); se ve a medias si hay algunas; otro clic las quita todas.
+- «Poner valor…» → «Leído» → «Marcar»: todas las elegidas quedan marcadas. Cmd/Ctrl+Z las deja como estaban, de una vez. Prueba también una opción de «Estado», un número (y uno mal escrito: lo explica), una fecha con «Hoy» y «Vaciar».
+- «Enviar a la papelera»: se van todas y el aviso dice «N filas enviadas a la papelera.»; «Deshacer» las devuelve a su sitio. En la papelera aparecen como entradas separadas.
+- Esc (sin escribir en una celda) y «×» quitan la selección. Cambiar de vista, añadir un filtro o un orden, u ocultar una columna también.
+- Cierra y abre la app tras cada acción: los cambios siguen ahí.
+
+## 34. Borrar para siempre (H11.3)
+- Con una copia de la base (o la semilla), envía a la papelera una página con subpáginas, una base de datos y una página suelta. Abre «Papelera»: cada elemento tiene «Restaurar» y «Borrar para siempre», y abajo «Vaciar la papelera».
+- «Borrar para siempre» en la página con subpáginas: la confirmación dice cuántas subpáginas van con ella, que no se puede deshacer y que las copias anteriores lo conservan. «Cancelar» (o Esc) vuelve a la lista sin borrar nada.
+- Confírmalo: desaparece de la papelera, la búsqueda ya no la encuentra y un enlace a ella en otra página se ve como «Página que ya no existe». Edita esa otra página: se guarda sin errores.
+- «Vaciar la papelera»: la confirmación cuenta todas las páginas; tras confirmar, la papelera queda vacía y su número en la barra lateral, a 0.
+- «Copias y exportación» → «Liberar espacio»: los adjuntos de las páginas borradas aparecen como sin uso y se liberan.
+- Restaura una copia de seguridad anterior: lo borrado vuelve. Cierra y abre la app: lo borrado sigue borrado.
+
+## 35. Duplicar (H11.4)
+- Clic derecho en una página sin subpáginas → «Duplicar»: aparece «Título (copia)» justo debajo y se abre, con el mismo contenido, imágenes, archivos y enlaces. No es favorita aunque el original lo sea.
+- En una página con subpáginas, «Duplicar» pregunta: «Con las subpáginas» copia el árbol entero; «Solo esta página», solo ella; «Cancelar» (o Esc), nada.
+- Una base: «Con las filas» o «Solo la estructura». La copia tiene las mismas columnas, opciones, colores y vistas (con sus filtros, orden y agrupación funcionando); cambiar una opción en la copia no toca el original.
+- En la tabla, «⋯» de una fila → «Duplicar»: la copia queda justo debajo, con sus valores. Cmd/Ctrl+Z la quita.
+- Elige varias filas → «Duplicar» en la barra: cada copia debajo de su original; un Cmd/Ctrl+Z las quita todas.
+- Cmd+K → «Duplicar la página» hace lo mismo con la página abierta.
+- «Copias y exportación»: el espacio de adjuntos no crece al duplicar una página con archivos. Cierra y abre la app: las copias siguen ahí.
+
+## 36. Exportar una base a CSV (H11.5)
+- Abre una base con texto, número (con decimales y negativos), casilla, fecha y opción → «Más acciones» → «Exportar la vista a CSV». Aparece «Exportado a …/Título.csv»; «Abrir carpeta» la muestra.
+- Ábrelo en Numbers, LibreOffice y Excel (Datos → Desde texto/CSV): acentos y emojis bien, una columna por propiedad, fechas `AAAA-MM-DD`, casillas `true`/`false`, números con punto. Un texto con comas, comillas o saltos de línea queda en una sola celda.
+- En la vista, oculta una columna, filtra y ordena: «Exportar la vista a CSV» trae solo esas columnas y filas, en ese orden. «Exportar toda la base a CSV» trae todas, en el orden manual.
+- Exporta dos veces: el segundo es «Título (2).csv», el primero no cambia.
+- Cmd+K → «csv» o «excel» lista las dos exportaciones; en una página normal no aparecen.
+- Excel con región española y doble clic en el archivo: anota si lo pone todo en una columna (límite conocido).
+
+## 37. Última vista de cada base (H11.6)
+- En una base con dos vistas, abre la segunda. En otra base, deja la primera. Cierra la app y ábrela: cada base se abre en la vista que tenía.
+- Borra la vista abierta, cierra y abre: la base se abre en la que queda.
+- Envía la base a la papelera y restáurala: vuelve a abrirse en su última vista.
+- Restaura una copia de seguridad anterior: las bases se abren en la vista que tenían en esa copia.
+
+## 38. Buscar y reemplazar en la página (H11.7)
+- En una página larga, Cmd/Ctrl+F: aparece la barra sobre la página con el cursor en su campo. Escribe una palabra que salga varias veces: todas quedan resaltadas y la primera desde el cursor, más fuerte; dice «N de M».
+- Sin importar mayúsculas ni tildes: «arbol» encuentra «Árbol» y «ÁRBOL»; «cafe» encuentra «café». También en tareas hechas (tachadas) y en bloques de código.
+- Intro y ↓ van a la siguiente, Mayús+Intro y ↑ a la anterior, dando la vuelta; la página se desplaza hasta cada una.
+- Esc cierra: la coincidencia queda elegida en su bloque; escribe y se sustituye.
+- Cmd+Opción+F (Ctrl+H en Windows y Linux): aparece «Reemplazar por». Intro allí reemplaza una y pasa a la siguiente; «Reemplazar todo» las cambia todas y dice cuántas. Cmd/Ctrl+Z deshace cada acción de una vez. Cierra y abre la app: los cambios se guardaron.
+- Con un IME (japonés o chino), escribe en el campo de búsqueda y confirma con Intro: no salta a otra coincidencia ni reemplaza nada por error.
+- En una base de datos, Cmd/Ctrl+F no abre nada. Cambiar de página cierra la barra.
+- En oscuro, el resaltado se distingue y el texto se lee.
+
+## 39. Páginas recientes en el buscador (H11.8)
+- Abre varias páginas (desde la barra lateral, una pestaña, un enlace). Cmd/Ctrl+K sin escribir: «Recientes» arriba con las últimas (como mucho 8), la más reciente primero y sin la abierta, cada una con su ruta.
+- Cmd/Ctrl+K e Intro vuelve a la página anterior; ↓ e Intro abre la siguiente de la lista.
+- Envía una a la papelera: deja de salir; restáurala: vuelve. Una plantilla abierta no sale.
+- Escribe algo: «Recientes» desaparece; borra el texto: vuelve.
+- Cmd/Ctrl+T e Intro abre la reciente en una pestaña nueva.
+- Cierra y abre la app: la lista sigue igual.

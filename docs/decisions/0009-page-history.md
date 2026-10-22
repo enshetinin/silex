@@ -109,3 +109,5 @@ Así una página editada todos los días acumula unas 30 versiones al mes y 52 a
 3. «Liberar espacio» conserva los adjuntos que nombra alguna versión: restaurar nunca pierde un archivo.
 4. Las fechas de las versiones se muestran en hora local. Si leer la zona horaria necesita un crate, se justifica en H7.8.
 5. Filas de bases de datos: no se preguntó por separado; se aplica la propuesta (solo título y bloques, como las páginas). El historial de propiedades queda fuera de alcance.
+
+*Actualización (ADR 0013, 2026-10-21):* la papelera ya permite borrar para siempre, con confirmación. Las cascadas y el `SET NULL` dejan de ser solo una red de seguridad: se ejecutan al borrar.

@@ -11,9 +11,19 @@ pub enum Command {
     NewSubpage,
     NewRow,
     RenamePage,
+    /// A copy of the open page right below it (H11.4).
+    DuplicatePage,
+    /// The find bar of the open page (H11.7).
+    FindInPage,
+    /// The find bar with «Reemplazar» (H11.7).
+    ReplaceInPage,
     AddFavorite,
     RemoveFavorite,
     ExportPage,
+    /// The open database as CSV: what its view shows (H11.5).
+    ExportViewCsv,
+    /// The open database as CSV: every row and column (H11.5).
+    ExportDatabaseCsv,
     /// The file dialog, to attach files to the open page (H7.3).
     AttachFiles,
     /// The page picker, to link another page (H7.5).
@@ -56,6 +66,8 @@ pub struct PaletteContext {
     pub file_database: bool,
     pub backup_running: bool,
     pub export_running: bool,
+    /// A database is being written as CSV (H11.5).
+    pub csv_export_running: bool,
     pub settings: Settings,
 }
 
@@ -64,16 +76,21 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 26] = [
+    pub const ALL: [Command; 31] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
         Command::NewRow,
         Command::NewFromTemplate,
         Command::RenamePage,
+        Command::DuplicatePage,
+        Command::FindInPage,
+        Command::ReplaceInPage,
         Command::AddFavorite,
         Command::RemoveFavorite,
         Command::ExportPage,
+        Command::ExportViewCsv,
+        Command::ExportDatabaseCsv,
         Command::AttachFiles,
         Command::LinkPage,
         Command::PageHistory,
@@ -100,9 +117,14 @@ impl Command {
             Command::NewSubpage => "Nueva subpágina",
             Command::NewRow => "Nueva fila",
             Command::RenamePage => "Renombrar la página",
+            Command::DuplicatePage => "Duplicar la página",
+            Command::FindInPage => "Buscar en la página",
+            Command::ReplaceInPage => "Buscar y reemplazar en la página",
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
+            Command::ExportViewCsv => "Exportar la vista a CSV",
+            Command::ExportDatabaseCsv => "Exportar toda la base a CSV",
             Command::AttachFiles => "Adjuntar archivos…",
             Command::LinkPage => "Enlazar a una página…",
             Command::PageHistory => "Historial de versiones…",
@@ -132,9 +154,15 @@ impl Command {
             Command::NewSubpage => &["crear", "hija", "anidada", "child"],
             Command::NewRow => &["crear", "entrada", "registro", "row"],
             Command::RenamePage => &["titulo", "nombre", "cambiar", "rename"],
+            Command::DuplicatePage => &["copiar", "clonar", "copia", "duplicate", "copy"],
+            Command::FindInPage => &["encontrar", "texto", "palabra", "find"],
+            Command::ReplaceInPage => &["cambiar", "sustituir", "texto", "palabra", "replace"],
             Command::AddFavorite => &["estrella", "marcar", "favorite", "star"],
             Command::RemoveFavorite => &["estrella", "desmarcar", "favorite", "star"],
             Command::ExportPage => &["md", "descargar", "guardar", "export"],
+            Command::ExportViewCsv | Command::ExportDatabaseCsv => {
+                &["excel", "hoja", "calculo", "tabla", "descargar", "export"]
+            }
             Command::AttachFiles => &[
                 "subir",
                 "agregar",
@@ -178,12 +206,19 @@ impl Command {
             // Inside a database a child is a row: «Nueva fila» instead.
             Command::NewSubpage => cx.page_open && !cx.database_open && !cx.template_open,
             Command::NewRow => cx.database_open,
-            // A database shows its table, not blocks.
-            Command::AttachFiles | Command::LinkPage | Command::PageHistory => {
-                cx.page_open && !cx.database_open
+            Command::ExportViewCsv | Command::ExportDatabaseCsv => {
+                cx.database_open && !cx.csv_export_running
             }
+            // A database shows its table, not blocks.
+            Command::AttachFiles
+            | Command::LinkPage
+            | Command::PageHistory
+            | Command::FindInPage
+            | Command::ReplaceInPage => cx.page_open && !cx.database_open,
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
             Command::AddFavorite => cx.page_open && !cx.favorite && !cx.template_open,
+            // A template makes pages with «Nueva página desde plantilla».
+            Command::DuplicatePage => cx.page_open && !cx.template_open,
             Command::RemoveFavorite => cx.page_open && cx.favorite,
             // A page: not a database, a row of one, or a template.
             Command::SaveAsTemplate => {
@@ -277,6 +312,7 @@ mod tests {
             file_database: true,
             backup_running: false,
             export_running: false,
+            csv_export_running: false,
             settings: Settings::default(),
         }
     }
@@ -346,6 +382,33 @@ mod tests {
             matching_commands("nueva fila", &database),
             [Command::NewRow]
         );
+        // Find in the page (H11.7): a page has blocks, a database does not.
+        assert!(Command::FindInPage.available(&cx()));
+        assert!(Command::ReplaceInPage.available(&cx()));
+        assert!(!Command::FindInPage.available(&database));
+        assert!(!Command::ReplaceInPage.available(&database));
+        assert_eq!(
+            matching_commands("reemplazar", &cx()),
+            [Command::ReplaceInPage]
+        );
+        // CSV (H11.5): only for a database, and one export at a time.
+        assert!(Command::ExportViewCsv.available(&database));
+        assert!(Command::ExportDatabaseCsv.available(&database));
+        assert!(!Command::ExportViewCsv.available(&cx()));
+        assert_eq!(
+            matching_commands("csv", &database),
+            [Command::ExportViewCsv, Command::ExportDatabaseCsv]
+        );
+        assert_eq!(
+            matching_commands("excel", &database),
+            [Command::ExportViewCsv, Command::ExportDatabaseCsv]
+        );
+        let writing = PaletteContext {
+            csv_export_running: true,
+            ..database
+        };
+        assert!(!Command::ExportViewCsv.available(&writing));
+        assert!(!Command::ExportDatabaseCsv.available(&writing));
         // Templates (ADR 0010): a page can be saved as one; a database, a
         // row or a template cannot. A page from a template, always.
         assert!(Command::SaveAsTemplate.available(&cx()));

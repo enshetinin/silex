@@ -16,8 +16,13 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::NewPage | Command::NewSubpage | Command::NewRow => icons::PLUS,
         Command::NewDatabase => icons::TABLE,
         Command::RenamePage => icons::TEXT,
+        Command::DuplicatePage => icons::COPY,
+        Command::FindInPage | Command::ReplaceInPage => icons::SEARCH,
         Command::AddFavorite | Command::RemoveFavorite => icons::STAR,
-        Command::ExportPage | Command::ExportWorkspace => icons::EXPORT,
+        Command::ExportPage
+        | Command::ExportViewCsv
+        | Command::ExportDatabaseCsv
+        | Command::ExportWorkspace => icons::EXPORT,
         Command::AttachFiles => icons::PAPERCLIP,
         Command::LinkPage => icons::LINK,
         Command::PageHistory => icons::HISTORY,
@@ -42,6 +47,9 @@ pub(super) fn command_shortcut(command: Command, cmd: &str) -> Option<String> {
         // In a database Cmd+Shift+N adds a row (`create_subpage`).
         Command::NewSubpage | Command::NewRow => format!("{cmd}+Mayús+N"),
         Command::RenamePage => "F2".to_owned(),
+        Command::FindInPage => format!("{cmd}+F"),
+        Command::ReplaceInPage if cmd == "Cmd" => "Cmd+Opción+F".to_owned(),
+        Command::ReplaceInPage => "Ctrl+H".to_owned(),
         Command::SaveNow => format!("{cmd}+S"),
         Command::ZoomIn => format!("{cmd}++"),
         Command::ZoomOut => format!("{cmd}+−"),
@@ -65,6 +73,7 @@ impl SilexApp {
             file_database: self.db.path().is_some(),
             backup_running: self.backup_job.is_some(),
             export_running: self.export_job.is_some(),
+            csv_export_running: self.csv_export.is_some(),
             settings: self.settings,
         }
     }
@@ -85,9 +94,14 @@ impl SilexApp {
             (Command::NewSubpage, Some(id)) => self.create_subpage(&id)?,
             // The open page is renamed in its title, as from its "…" menu.
             (Command::RenamePage, Some(_)) => self.focus_title = true,
+            (Command::DuplicatePage, Some(id)) => self.start_duplicate(&id)?,
+            (Command::FindInPage, Some(_)) => self.open_find(ctx, false),
+            (Command::ReplaceInPage, Some(_)) => self.open_find(ctx, true),
             (Command::AddFavorite, Some(id)) => self.set_favorite(&id, true)?,
             (Command::RemoveFavorite, Some(id)) => self.set_favorite(&id, false)?,
             (Command::ExportPage, Some(_)) => self.export_current_page(ctx)?,
+            (Command::ExportViewCsv, Some(_)) => self.export_database_csv(ctx, false)?,
+            (Command::ExportDatabaseCsv, Some(_)) => self.export_database_csv(ctx, true)?,
             (Command::AttachFiles, Some(_)) => self.files.pick = Some(None),
             (Command::LinkPage, Some(_)) => self.open_link_picker(None, None),
             (Command::PageHistory, Some(_)) => self.open_page_history()?,
