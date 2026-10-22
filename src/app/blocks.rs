@@ -222,6 +222,11 @@ pub(super) struct BlockView<'a> {
     pub(super) preview: Option<&'a PreviewState>,
     /// A link's page, as its card shows it (H7.5).
     pub(super) link: Option<LinkState>,
+    /// Matches of the find bar in its text (H11.7): character ranges, and
+    /// whether each is the one shown.
+    pub(super) found: Vec<(usize, usize, bool)>,
+    /// Scroll the page to the match shown in this block.
+    pub(super) reveal: bool,
 }
 
 /// One block, borderless: a hover handle in the left gutter (type and
@@ -358,7 +363,52 @@ pub(super) fn block_field(
             if let Some(text) = placeholder {
                 edit = edit.hint_text(egui::RichText::new(text).color(p.text_faint));
             }
+            // Find in the page (H11.7): matches are painted behind the
+            // text, in a slot taken before the field paints. A code block
+            // fills its own frame over that slot, so there they are
+            // painted over it and the text inside them again.
+            let framed = block.kind == BlockKind::Code;
+            let behind =
+                (!view.found.is_empty() && !framed).then(|| ui.painter().add(egui::Shape::Noop));
             let output = edit.show(ui);
+            if !view.found.is_empty() {
+                let mut shapes = Vec::new();
+                let mut covered = Vec::new();
+                let mut shown = None;
+                for &(start, end, current) in &view.found {
+                    let fill = if current {
+                        p.find_current
+                    } else {
+                        p.find_match
+                    };
+                    let rects = match_rects(&output.galley, output.galley_pos, start, end);
+                    if current {
+                        shown = rects.iter().copied().reduce(egui::Rect::union);
+                    }
+                    for rect in rects {
+                        shapes.push(egui::Shape::rect_filled(rect, 2.0, fill));
+                        covered.push(rect);
+                    }
+                }
+                match behind {
+                    Some(slot) => ui.painter().set(slot, egui::Shape::Vec(shapes)),
+                    None => {
+                        ui.painter().extend(shapes);
+                        for rect in covered {
+                            ui.painter().with_clip_rect(rect).galley(
+                                output.galley_pos,
+                                output.galley.clone(),
+                                p.text,
+                            );
+                        }
+                    }
+                }
+                if view.reveal
+                    && let Some(rect) = shown
+                {
+                    ui.scroll_to_rect(rect.expand(8.0), Some(egui::Align::Center));
+                }
+            }
             if let Some(slot) = quote_slot {
                 let bar = egui::Rect::from_min_max(
                     slot.left_top() + egui::vec2(2.0, 2.0),
@@ -1225,9 +1275,15 @@ impl SilexApp {
         };
         let id = self.block_field_id(&block_id);
         let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        let anchor = self
+            .pending_anchor
+            .as_ref()
+            .filter(|(anchor_block, _)| *anchor_block == block_id)
+            .map_or(char, |(_, anchor)| *anchor);
         state
             .cursor
-            .set_char_range(Some(egui::text::CCursorRange::one(
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(anchor),
                 egui::text::CCursor::new(char),
             )));
         state.store(ctx, id);
@@ -1235,6 +1291,7 @@ impl SilexApp {
         // Keep it until the target block has focus, so it can scroll into view.
         if self.caret.as_ref().is_some_and(|c| c.block_id == block_id) {
             self.pending_focus = None;
+            self.pending_anchor = None;
         }
     }
 
@@ -1300,6 +1357,9 @@ impl SilexApp {
             return;
         }
 
+        // Find in the page (H11.7): fixed above the page, in its column.
+        self.find_bar(ui, 720.0 + GUTTER);
+
         let mut edit: Option<EditKind> = None;
         let mut block_action: Option<(BlockAction, String)> = None;
         let mut hovered = None;
@@ -1356,6 +1416,24 @@ impl SilexApp {
                     let dragging =
                         egui::DragAndDrop::payload::<BlockDrag>(&ctx).map(|drag| drag.0.clone());
                     let mut rects = Vec::with_capacity(self.blocks.len());
+                    // The find bar's matches, by block (H11.7).
+                    let mut found_by_block: std::collections::HashMap<
+                        usize,
+                        Vec<(usize, usize, bool)>,
+                    > = std::collections::HashMap::new();
+                    let mut reveal_block = None;
+                    if let Some(bar) = self.find.as_mut() {
+                        for (i, m) in bar.matches.iter().enumerate() {
+                            found_by_block.entry(m.block).or_default().push((
+                                m.start,
+                                m.end,
+                                i == bar.current,
+                            ));
+                        }
+                        if std::mem::take(&mut bar.reveal) {
+                            reveal_block = bar.shown().map(|m| m.block);
+                        }
+                    }
                     for (index, (block, number)) in self.blocks.iter_mut().zip(numbers).enumerate()
                     {
                         let field = field_id(self.doc_generation, "block", &block.id);
@@ -1377,6 +1455,8 @@ impl SilexApp {
                                 .and_then(|a| self.files.previews.get(a)),
                             link: (block.kind == BlockKind::PageLink)
                                 .then(|| link_state(&self.pages, &self.links.targets, block)),
+                            found: found_by_block.remove(&index).unwrap_or_default(),
+                            reveal: reveal_block == Some(index),
                         };
                         if index > 0 {
                             ui.add_space(heading_space(block.kind));

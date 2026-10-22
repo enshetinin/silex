@@ -20,6 +20,7 @@ mod dialogs;
 mod document;
 mod duplicate;
 mod files;
+mod find;
 mod frame;
 pub mod icons;
 mod jobs;
@@ -48,8 +49,8 @@ mod view_tabs;
 
 pub use self::startup::StartupError;
 use self::{
-    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, duplicate::*, files::*, links::*,
-    page_history::*, privacy::*, read_only::*, row_page::*, row_selection::*, search::*,
+    blocks::*, cells::*, database::*, date_picker::*, dialogs::*, duplicate::*, files::*, find::*,
+    links::*, page_history::*, privacy::*, read_only::*, row_page::*, row_selection::*, search::*,
     side_panel::*, sidebar::*, space::*, tab_bar::*, table_undo::*, templates::*, view_menus::*,
     view_tabs::*,
 };
@@ -138,6 +139,11 @@ pub struct SilexApp {
     pending_key: Option<(EditorKey, String)>,
     /// Block to focus (and cursor position) on the next frame.
     pending_focus: Option<(String, usize)>,
+    /// With `pending_focus`, the other end of a selection in that block
+    /// (block id, char): the match chosen when the find bar closes.
+    pending_anchor: Option<(String, usize)>,
+    /// The find bar of the open page (H11.7).
+    find: Option<FindBar>,
     /// Multi-line paste taken this frame (block id, text), run after layout.
     pending_paste: Option<(String, String)>,
     /// Last exported file, offered with "Abrir carpeta".
@@ -271,6 +277,8 @@ impl SilexApp {
             ime_composing: false,
             pending_key: None,
             pending_focus: None,
+            pending_anchor: None,
+            find: None,
             pending_paste: None,
             last_export: None,
             import_job: None,
@@ -394,6 +402,7 @@ impl SilexApp {
             self.slash = None;
             self.slash_dismissed = None;
             self.selection = None;
+            self.find = None;
             self.blocks = self.db.list_blocks(&id)?;
             self.load_attachments(&id)?;
             self.database = None;
@@ -612,6 +621,18 @@ impl SilexApp {
         if self.search.is_some() {
             return;
         }
+        // Find in the page (H11.7). The replace shortcut first:
+        // consume_shortcut would take Cmd+Opción+F as Cmd+F.
+        let find_dialog = self.links.picker.is_some()
+            || self.page_history.is_some()
+            || self.templates.picker.is_some();
+        if !find_dialog {
+            if pressed(replace_shortcut(ctx)) || pressed(Sc::new(M::COMMAND | M::ALT, Key::F)) {
+                self.open_find(ctx, true);
+            } else if pressed(Sc::new(M::COMMAND, Key::F)) {
+                self.open_find(ctx, false);
+            }
+        }
         // Tabs (ADR 0011), not while a dialog has the keyboard. Cmd+T is
         // a new tab: the search window, to choose its page.
         let dialog = self.links.picker.is_some()
@@ -653,7 +674,7 @@ impl SilexApp {
         // In a database's table (not typing in a field), Cmd+Z undoes the
         // table's changes (H6.4); elsewhere, the document's.
         let table = self.table_has_focus(ctx);
-        let document = table || self.document_has_focus(ctx);
+        let document = table || self.document_has_focus(ctx) || self.find_bar_has_focus(ctx);
         let redo = document
             && (pressed(Sc::new(M::COMMAND | M::SHIFT, Key::Z))
                 || pressed(Sc::new(M::COMMAND, Key::Y)));
@@ -815,6 +836,7 @@ impl SilexApp {
             && self.templates.picker.is_none()
         {
             self.take_pasted_image(&ctx);
+            self.find_keys(&ctx);
             self.take_editor_key(&ctx);
             self.apply_pending_focus(&ctx);
             self.handle_selection_keys(&ctx);

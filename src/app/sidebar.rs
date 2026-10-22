@@ -915,6 +915,15 @@ impl SilexApp {
                     (format!("{cmd}+N"), "Nueva página"),
                     (format!("{cmd}+Mayús+N"), "Nueva subpágina"),
                     (format!("{cmd}+K"), "Buscar páginas y acciones"),
+                    (format!("{cmd}+F"), "Buscar en la página"),
+                    (
+                        if cmd == "Cmd" {
+                            "Cmd+Opción+F".to_owned()
+                        } else {
+                            "Ctrl+H".to_owned()
+                        },
+                        "Buscar y reemplazar en la página",
+                    ),
                     ("Alt+↑ / Alt+↓".to_owned(), "Página anterior / siguiente"),
                     (format!("{cmd}+clic"), "Abrir en una pestaña nueva"),
                     ("Alt+clic".to_owned(), "Abrir al lado, solo para leer"),

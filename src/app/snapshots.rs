@@ -150,6 +150,89 @@ fn block_handle_menu() -> anyhow::Result<()> {
     })
 }
 
+/// H11.7: the style guide after Cmd+Opción+F, «in» searched and «IN»
+/// typed as its replacement. The bar sits above the page, with
+/// «Reemplazar»; every match is painted, the one shown stronger (also in
+/// the code block, which has its own background).
+fn find_bar_harness(theme: egui::Theme) -> anyhow::Result<Harness<'static, SilexApp>> {
+    use eframe::egui::{Key, Modifiers};
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), demo_app()?);
+    harness.run();
+    harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::ALT, Key::F);
+    harness.run();
+    harness.get_by_label("Buscar en la página").type_text("in");
+    harness.run();
+    harness.get_by_label("Reemplazar por").focus();
+    harness.run();
+    harness.get_by_label("Reemplazar por").type_text("IN");
+    harness.run();
+    Ok(harness)
+}
+
+fn contents_of(harness: &Harness<'_, SilexApp>) -> Vec<String> {
+    harness
+        .state()
+        .blocks
+        .iter()
+        .map(|b| b.content.clone())
+        .collect()
+}
+
+/// Each control has a name and the counter is read out; «Reemplazar todo»
+/// from its button is one Cmd+Z; «×» closes the bar.
+#[test]
+fn the_find_bar_highlights_and_replaces() -> anyhow::Result<()> {
+    use eframe::egui::{Key, Modifiers};
+    let mut harness = find_bar_harness(egui::Theme::Light)?;
+    // «interfaz», «Principios», «install».
+    assert_eq!(
+        harness
+            .state()
+            .find
+            .as_ref()
+            .map(|f| f.counter())
+            .as_deref(),
+        Some("1 de 3")
+    );
+    assert!(
+        harness.query_by_label("1 de 3").is_some(),
+        "the counter is read out"
+    );
+    assert_accessible(&harness, "find bar");
+    if enabled() {
+        harness.snapshot("find_bar_light");
+    }
+    let before = contents_of(&harness);
+    click_button(&mut harness, "Reemplazar todo");
+    let after = contents_of(&harness);
+    assert!(
+        after.iter().any(|t| t == "theme::INstall(&ctx);"),
+        "{after:?}"
+    );
+    assert!(after.iter().any(|t| t.contains("PrINcipios")), "{after:?}");
+    assert!(harness.query_by_label("3 reemplazadas").is_some());
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    harness.run();
+    assert_eq!(contents_of(&harness), before, "one Cmd+Z undoes them all");
+    click_button(&mut harness, "Cerrar la búsqueda");
+    assert!(harness.state().find.is_none());
+    Ok(())
+}
+
+#[test]
+fn the_find_bar_dark() -> anyhow::Result<()> {
+    let mut harness = find_bar_harness(egui::Theme::Dark)?;
+    if enabled() {
+        harness.snapshot("find_bar_dark");
+    }
+    Ok(())
+}
+
 // ---- Accessibility: no rendering needed, so these always run (also in CI). ----
 
 /// The demo app in a harness, settled.

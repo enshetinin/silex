@@ -13,6 +13,10 @@ pub enum Command {
     RenamePage,
     /// A copy of the open page right below it (H11.4).
     DuplicatePage,
+    /// The find bar of the open page (H11.7).
+    FindInPage,
+    /// The find bar with «Reemplazar» (H11.7).
+    ReplaceInPage,
     AddFavorite,
     RemoveFavorite,
     ExportPage,
@@ -72,7 +76,7 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 29] = [
+    pub const ALL: [Command; 31] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
@@ -80,6 +84,8 @@ impl Command {
         Command::NewFromTemplate,
         Command::RenamePage,
         Command::DuplicatePage,
+        Command::FindInPage,
+        Command::ReplaceInPage,
         Command::AddFavorite,
         Command::RemoveFavorite,
         Command::ExportPage,
@@ -112,6 +118,8 @@ impl Command {
             Command::NewRow => "Nueva fila",
             Command::RenamePage => "Renombrar la página",
             Command::DuplicatePage => "Duplicar la página",
+            Command::FindInPage => "Buscar en la página",
+            Command::ReplaceInPage => "Buscar y reemplazar en la página",
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
@@ -147,6 +155,8 @@ impl Command {
             Command::NewRow => &["crear", "entrada", "registro", "row"],
             Command::RenamePage => &["titulo", "nombre", "cambiar", "rename"],
             Command::DuplicatePage => &["copiar", "clonar", "copia", "duplicate", "copy"],
+            Command::FindInPage => &["encontrar", "texto", "palabra", "find"],
+            Command::ReplaceInPage => &["cambiar", "sustituir", "texto", "palabra", "replace"],
             Command::AddFavorite => &["estrella", "marcar", "favorite", "star"],
             Command::RemoveFavorite => &["estrella", "desmarcar", "favorite", "star"],
             Command::ExportPage => &["md", "descargar", "guardar", "export"],
@@ -200,9 +210,11 @@ impl Command {
                 cx.database_open && !cx.csv_export_running
             }
             // A database shows its table, not blocks.
-            Command::AttachFiles | Command::LinkPage | Command::PageHistory => {
-                cx.page_open && !cx.database_open
-            }
+            Command::AttachFiles
+            | Command::LinkPage
+            | Command::PageHistory
+            | Command::FindInPage
+            | Command::ReplaceInPage => cx.page_open && !cx.database_open,
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
             Command::AddFavorite => cx.page_open && !cx.favorite && !cx.template_open,
             // A template makes pages with «Nueva página desde plantilla».
@@ -369,6 +381,15 @@ mod tests {
         assert_eq!(
             matching_commands("nueva fila", &database),
             [Command::NewRow]
+        );
+        // Find in the page (H11.7): a page has blocks, a database does not.
+        assert!(Command::FindInPage.available(&cx()));
+        assert!(Command::ReplaceInPage.available(&cx()));
+        assert!(!Command::FindInPage.available(&database));
+        assert!(!Command::ReplaceInPage.available(&database));
+        assert_eq!(
+            matching_commands("reemplazar", &cx()),
+            [Command::ReplaceInPage]
         );
         // CSV (H11.5): only for a database, and one export at a time.
         assert!(Command::ExportViewCsv.available(&database));

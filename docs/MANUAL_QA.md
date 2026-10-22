@@ -336,3 +336,13 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - Borra la vista abierta, cierra y abre: la base se abre en la que queda.
 - Envía la base a la papelera y restáurala: vuelve a abrirse en su última vista.
 - Restaura una copia de seguridad anterior: las bases se abren en la vista que tenían en esa copia.
+
+## 38. Buscar y reemplazar en la página (H11.7)
+- En una página larga, Cmd/Ctrl+F: aparece la barra sobre la página con el cursor en su campo. Escribe una palabra que salga varias veces: todas quedan resaltadas y la primera desde el cursor, más fuerte; dice «N de M».
+- Sin importar mayúsculas ni tildes: «arbol» encuentra «Árbol» y «ÁRBOL»; «cafe» encuentra «café». También en tareas hechas (tachadas) y en bloques de código.
+- Intro y ↓ van a la siguiente, Mayús+Intro y ↑ a la anterior, dando la vuelta; la página se desplaza hasta cada una.
+- Esc cierra: la coincidencia queda elegida en su bloque; escribe y se sustituye.
+- Cmd+Opción+F (Ctrl+H en Windows y Linux): aparece «Reemplazar por». Intro allí reemplaza una y pasa a la siguiente; «Reemplazar todo» las cambia todas y dice cuántas. Cmd/Ctrl+Z deshace cada acción de una vez. Cierra y abre la app: los cambios se guardaron.
+- Con un IME (japonés o chino), escribe en el campo de búsqueda y confirma con Intro: no salta a otra coincidencia ni reemplaza nada por error.
+- En una base de datos, Cmd/Ctrl+F no abre nada. Cambiar de página cierra la barra.
+- En oscuro, el resaltado se distingue y el texto se lee.

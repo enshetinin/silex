@@ -54,6 +54,8 @@ fn frame(
                     attachment: None,
                     preview: None,
                     link: None,
+                    found: Vec::new(),
+                    reveal: false,
                 },
             )
             .text_changed;
@@ -4214,5 +4216,249 @@ fn startup_and_navigation_smoke() -> anyhow::Result<()> {
              (peor {worst:?})"
         );
     }
+    Ok(())
+}
+
+// ---- H11.7: find and replace in the page ----
+
+fn find_counter(app: &SilexApp) -> String {
+    app.find.as_ref().map(|f| f.counter()).unwrap_or_default()
+}
+
+fn shown_match(app: &SilexApp) -> Option<(usize, usize, usize)> {
+    let m = app.find.as_ref()?.shown()?;
+    Some((m.block, m.start, m.end))
+}
+
+/// The selection (anchor, cursor) of block `index`'s field, as stored.
+fn block_selection(app: &SilexApp, ctx: &egui::Context, index: usize) -> Option<(usize, usize)> {
+    let id = app.block_field_id(&app.blocks[index].id);
+    let range = egui::text_edit::TextEditState::load(ctx, id)?
+        .cursor
+        .char_range()?;
+    Some((range.secondary.index.0, range.primary.index.0))
+}
+
+#[test]
+fn cmd_f_finds_counts_and_steps_through_the_page() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (Par, 0, "Árbol y arbol"),
+            (Cod, 0, "let arbol = 1;"),
+            (Bul, 0, "sin nada"),
+            (Par, 0, "ÁRBOL 🌳"),
+        ],
+        // The caret in the third block: the search starts after it.
+        2,
+        0,
+    )?;
+    app_frame(&mut app, &ctx, vec![key(Key::F, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(app.find.is_some(), "the bar opens");
+    assert!(
+        ctx.memory(|m| m.has_focus(FindField::Query.id())),
+        "its field has the keyboard"
+    );
+    type_into(&mut app, &ctx, "arbol");
+    assert_eq!(find_counter(&app), "4 de 4", "the first after the caret");
+    assert_eq!(shown_match(&app), Some((3, 0, 5)));
+    // Enter goes round to the first; Shift+Enter and ↑ go back; ↓ forward.
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(find_counter(&app), "1 de 4");
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::SHIFT)]);
+    assert_eq!(find_counter(&app), "4 de 4");
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+    assert_eq!(find_counter(&app), "3 de 4");
+    assert_eq!(shown_match(&app), Some((1, 4, 9)), "in the code block");
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    assert_eq!(find_counter(&app), "4 de 4");
+    assert!(
+        ctx.memory(|m| m.has_focus(FindField::Query.id())),
+        "Enter keeps the keyboard in the field"
+    );
+    // A query with no match.
+    type_into(&mut app, &ctx, "x");
+    assert_eq!(find_counter(&app), "Sin resultados");
+    assert_eq!(
+        contents(&app)[0].2,
+        "Árbol y arbol",
+        "searching changes nothing"
+    );
+    Ok(())
+}
+
+#[test]
+fn esc_closes_the_bar_and_leaves_the_match_chosen() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno"), (Par, 0, "dos y tres")], 0, 0)?;
+    app_frame(&mut app, &ctx, vec![key(Key::F, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![]);
+    type_into(&mut app, &ctx, "TRES");
+    assert_eq!(find_counter(&app), "1 de 1");
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.find.is_none());
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(1));
+    assert_eq!(
+        block_selection(&app, &ctx, 1),
+        Some((6, 10)),
+        "«tres» chosen"
+    );
+    // Typing replaces it, as in any text field.
+    type_into(&mut app, &ctx, "4");
+    assert_eq!(contents(&app)[1].2, "dos y 4");
+    Ok(())
+}
+
+#[test]
+fn replace_one_then_all_each_one_undo_step() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "gato, Gato y GATO"), (Bul, 0, "un gato")], 0, 0)?;
+    app_frame(&mut app, &ctx, vec![key(Key::F, M::COMMAND | M::ALT)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        app.find.as_ref().is_some_and(|f| f.replace),
+        "with «Reemplazar»"
+    );
+    type_into(&mut app, &ctx, "gato");
+    assert_eq!(find_counter(&app), "1 de 4");
+    // Into «Reemplazar por»: Cmd+Opción+F again goes there.
+    app_frame(&mut app, &ctx, vec![key(Key::F, M::COMMAND | M::ALT)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(ctx.memory(|m| m.has_focus(FindField::Replacement.id())));
+    type_into(&mut app, &ctx, "gatos");
+    // Enter replaces the one shown and shows the next (not inside «gatos»).
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(contents(&app)[0].2, "gatos, Gato y GATO");
+    assert_eq!(shown_match(&app), Some((0, 7, 11)), "the next one");
+    assert_eq!(find_counter(&app), "2 de 4", "«gatos» still matches «gato»");
+
+    let before_all = contents(&app);
+    app.run_find(FindAction::ReplaceAll);
+    assert_eq!(contents(&app)[0].2, "gatoss, gatos y gatos");
+    assert_eq!(contents(&app)[1].2, "un gatos");
+    assert_eq!(
+        app.find.as_ref().and_then(|f| f.status.clone()).as_deref(),
+        Some("4 reemplazadas")
+    );
+    // Cmd+Z with the bar's field focused undoes the page, in one step each.
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(contents(&app), before_all, "«Reemplazar todo» is one step");
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(
+        contents(&app)[0].2,
+        "gato, Gato y GATO",
+        "and the single one"
+    );
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND | M::SHIFT)]);
+    assert_eq!(contents(&app)[0].2, "gatos, Gato y GATO");
+    assert!(app.save.is_dirty(), "saved by the autosave");
+    Ok(())
+}
+
+#[test]
+fn ctrl_h_opens_replace_outside_a_mac() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "hola")], 0, 0)?;
+    ctx.set_os(egui::os::OperatingSystem::Windows);
+    app_frame(&mut app, &ctx, vec![key(Key::H, M::CTRL)]);
+    assert!(app.find.as_ref().is_some_and(|f| f.replace));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.find.is_none(), "Esc closes it");
+    Ok(())
+}
+
+#[test]
+fn enter_confirming_an_ime_composition_does_not_jump_or_replace() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "にほん y にほん")], 0, 0)?;
+    app_frame(&mut app, &ctx, vec![key(Key::F, M::COMMAND | M::ALT)]);
+    app_frame(&mut app, &ctx, vec![]);
+    type_into(&mut app, &ctx, "に");
+    assert_eq!(find_counter(&app), "1 de 2");
+    let preedit = egui::Event::Ime(egui::ImeEvent::Preedit {
+        text: "ほ".into(),
+        active_range_chars: None,
+    });
+    app_frame(&mut app, &ctx, vec![preedit]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Ime(egui::ImeEvent::Commit("ほ".into()))],
+    );
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(find_counter(&app), "1 de 2", "Enter did not jump");
+    assert!(
+        ctx.memory(|m| m.has_focus(FindField::Query.id())),
+        "still typing"
+    );
+    assert_eq!(contents(&app)[0].2, "にほん y にほん", "nothing replaced");
+    // Once composed, Enter jumps again.
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(find_counter(&app), "2 de 2");
+    Ok(())
+}
+
+#[test]
+fn the_bar_is_for_pages_and_closes_with_another_page() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "hola")], 0, 0)?;
+    app_frame(&mut app, &ctx, vec![key(Key::F, M::COMMAND)]);
+    assert!(app.find.is_some());
+    let other = app.db.create_page("Otra", None)?;
+    app.reload_pages()?;
+    app.open_page(other)?;
+    assert!(app.find.is_none(), "another page: closed");
+    // A database has no blocks: Cmd+F does nothing there.
+    app.create_database(None)?;
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::F, M::COMMAND)]);
+    assert!(app.find.is_none());
+    Ok(())
+}
+
+#[test]
+fn the_page_scrolls_to_the_match_shown() -> anyhow::Result<()> {
+    let mut specs: Vec<(BlockKind, u8, &str)> = vec![(Par, 0, "aguja al principio")];
+    specs.extend(std::iter::repeat_n((Par, 0, "paja"), 120));
+    specs.push((Par, 0, "aguja al final"));
+    let (mut app, ctx) = editor_app(&specs, 0, 0)?;
+    // A window of a real size, so the page does not fit.
+    let frame = |app: &mut SilexApp, events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 760.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+        output.textures_delta.clear();
+    };
+    frame(&mut app, vec![key(Key::F, M::COMMAND)]);
+    frame(&mut app, vec![]);
+    for c in "aguja".chars() {
+        frame(&mut app, vec![egui::Event::Text(c.to_string())]);
+    }
+    frame(&mut app, vec![]);
+    assert_eq!(find_counter(&app), "1 de 2");
+    let top = app.editor_scroll;
+    frame(&mut app, vec![key(Key::Enter, M::NONE)]);
+    frame(&mut app, vec![]);
+    frame(&mut app, vec![]);
+    assert_eq!(find_counter(&app), "2 de 2");
+    assert!(
+        app.editor_scroll > top + 500.0,
+        "{} → {}",
+        top,
+        app.editor_scroll
+    );
+    frame(&mut app, vec![key(Key::Enter, M::NONE)]);
+    frame(&mut app, vec![]);
+    frame(&mut app, vec![]);
+    assert!(
+        app.editor_scroll < 200.0,
+        "back at the top: {}",
+        app.editor_scroll
+    );
     Ok(())
 }
