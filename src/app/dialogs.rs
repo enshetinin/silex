@@ -255,6 +255,13 @@ impl SilexApp {
             });
             return;
         }
+        if let Some((_, title)) = &self.csv_export {
+            let text = format!("Exportando «{title}» a CSV…");
+            Self::banner(ui, icons::EXPORT, &text, |ui| {
+                ui.spinner();
+            });
+            return;
+        }
         let Some(path) = self.last_export.clone() else {
             return;
         };

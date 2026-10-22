@@ -1648,6 +1648,37 @@ impl SilexApp {
                         extra = Some("export");
                         ui.close();
                     }
+                    if self.database.is_some() {
+                        let idle = self.csv_export.is_none();
+                        if ui
+                            .add_enabled(
+                                idle,
+                                egui::Button::new((
+                                    icons::icon(icons::EXPORT),
+                                    " Exportar la vista a CSV",
+                                )),
+                            )
+                            .on_hover_text("Las columnas y filas que muestra esta vista")
+                            .clicked()
+                        {
+                            extra = Some("csv_view");
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                idle,
+                                egui::Button::new((
+                                    icons::icon(icons::EXPORT),
+                                    " Exportar toda la base a CSV",
+                                )),
+                            )
+                            .on_hover_text("Todas las filas y columnas, sin filtros")
+                            .clicked()
+                        {
+                            extra = Some("csv_all");
+                            ui.close();
+                        }
+                    }
                     if ui
                         .button((icons::icon(icons::SAVE), " Guardar ahora"))
                         .clicked()
@@ -1665,6 +1696,10 @@ impl SilexApp {
         match extra {
             Some("export") => {
                 let result = self.export_current_page(&ui.ctx().clone());
+                self.report(result);
+            }
+            Some(scope @ ("csv_view" | "csv_all")) => {
+                let result = self.export_database_csv(&ui.ctx().clone(), scope == "csv_all");
                 self.report(result);
             }
             Some("save") => {

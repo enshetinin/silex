@@ -148,6 +148,9 @@ pub struct SilexApp {
     /// A page with attachments being exported on a worker thread (H7.9),
     /// and its title for the notice.
     page_export: Option<(silex_desktop::export::PageExportJob, String)>,
+    /// A database being written as CSV on a worker thread (H11.5), and its
+    /// title for the notice.
+    csv_export: Option<(silex_desktop::export::CsvExportJob, String)>,
     /// Attachments of the open page and the work on files (ADR 0007).
     files: Files,
     /// «Espacio» and «Liberar espacio» (H7.4).
@@ -272,6 +275,7 @@ impl SilexApp {
             import_job: None,
             export_job: None,
             page_export: None,
+            csv_export: None,
             files: Files::default(),
             space: Space::default(),
             links: Links::default(),
@@ -829,6 +833,7 @@ impl SilexApp {
         self.tick_free_space();
         self.tick_workspace_export();
         self.tick_page_export();
+        self.tick_csv_export();
         Self::drop_hint(&ctx);
         let now = Instant::now();
         if self.save.is_due(now) {

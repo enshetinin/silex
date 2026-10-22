@@ -18,7 +18,10 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::RenamePage => icons::TEXT,
         Command::DuplicatePage => icons::COPY,
         Command::AddFavorite | Command::RemoveFavorite => icons::STAR,
-        Command::ExportPage | Command::ExportWorkspace => icons::EXPORT,
+        Command::ExportPage
+        | Command::ExportViewCsv
+        | Command::ExportDatabaseCsv
+        | Command::ExportWorkspace => icons::EXPORT,
         Command::AttachFiles => icons::PAPERCLIP,
         Command::LinkPage => icons::LINK,
         Command::PageHistory => icons::HISTORY,
@@ -66,6 +69,7 @@ impl SilexApp {
             file_database: self.db.path().is_some(),
             backup_running: self.backup_job.is_some(),
             export_running: self.export_job.is_some(),
+            csv_export_running: self.csv_export.is_some(),
             settings: self.settings,
         }
     }
@@ -90,6 +94,8 @@ impl SilexApp {
             (Command::AddFavorite, Some(id)) => self.set_favorite(&id, true)?,
             (Command::RemoveFavorite, Some(id)) => self.set_favorite(&id, false)?,
             (Command::ExportPage, Some(_)) => self.export_current_page(ctx)?,
+            (Command::ExportViewCsv, Some(_)) => self.export_database_csv(ctx, false)?,
+            (Command::ExportDatabaseCsv, Some(_)) => self.export_database_csv(ctx, true)?,
             (Command::AttachFiles, Some(_)) => self.files.pick = Some(None),
             (Command::LinkPage, Some(_)) => self.open_link_picker(None, None),
             (Command::PageHistory, Some(_)) => self.open_page_history()?,

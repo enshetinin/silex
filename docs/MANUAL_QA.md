@@ -322,3 +322,11 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - Elige varias filas → «Duplicar» en la barra: cada copia debajo de su original; un Cmd/Ctrl+Z las quita todas.
 - Cmd+K → «Duplicar la página» hace lo mismo con la página abierta.
 - «Copias y exportación»: el espacio de adjuntos no crece al duplicar una página con archivos. Cierra y abre la app: las copias siguen ahí.
+
+## 36. Exportar una base a CSV (H11.5)
+- Abre una base con texto, número (con decimales y negativos), casilla, fecha y opción → «Más acciones» → «Exportar la vista a CSV». Aparece «Exportado a …/Título.csv»; «Abrir carpeta» la muestra.
+- Ábrelo en Numbers, LibreOffice y Excel (Datos → Desde texto/CSV): acentos y emojis bien, una columna por propiedad, fechas `AAAA-MM-DD`, casillas `true`/`false`, números con punto. Un texto con comas, comillas o saltos de línea queda en una sola celda.
+- En la vista, oculta una columna, filtra y ordena: «Exportar la vista a CSV» trae solo esas columnas y filas, en ese orden. «Exportar toda la base a CSV» trae todas, en el orden manual.
+- Exporta dos veces: el segundo es «Título (2).csv», el primero no cambia.
+- Cmd+K → «csv» o «excel» lista las dos exportaciones; en una página normal no aparecen.
+- Excel con región española y doble clic en el archivo: anota si lo pone todo en una columna (límite conocido).

@@ -1,6 +1,7 @@
 //! Domain and persistence layer, independent of the desktop UI.
 pub mod attach_job;
 pub mod attachment;
+pub mod csv;
 pub mod db;
 pub mod editor;
 pub mod export;

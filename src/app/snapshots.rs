@@ -679,6 +679,88 @@ fn database_rows_open_as_pages_and_every_control_has_a_name() -> anyhow::Result<
     Ok(())
 }
 
+/// H11.5: «Más acciones» offers both CSV exports; the view one leaves out
+/// what the view hides, the other writes everything. Written on the export
+/// thread with a notice while it runs.
+#[test]
+fn a_database_exports_its_view_or_everything_to_csv() -> anyhow::Result<()> {
+    let (app, _, _) = database_app()?;
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Más acciones de la página");
+    assert!(menu_item(&harness, "Exportar la vista a CSV").is_some());
+    assert!(menu_item(&harness, "Exportar toda la base a CSV").is_some());
+    assert_accessible(&harness, "database page menu");
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+
+    // The view hides «Autor» and shows only rows with a page count.
+    {
+        let state = harness.state_mut().database.as_mut().expect("database");
+        let autor = state
+            .properties
+            .iter()
+            .find(|p| p.name == "Autor")
+            .map(|p| p.id.clone())
+            .expect("Autor");
+        let paginas = state
+            .properties
+            .iter()
+            .find(|p| p.name == "Páginas")
+            .map(|p| p.id.clone())
+            .expect("Páginas");
+        let view = state.view;
+        let config = &mut state.views[view].config;
+        config.set_hidden(&autor, true);
+        config.filters.push(silex_desktop::view::Filter {
+            property: paginas,
+            op: silex_desktop::view::FilterOp::NotEmpty,
+            value: String::new(),
+        });
+    }
+    let dir = std::env::temp_dir().join(format!("silex-app-csv-{}", uuid::Uuid::new_v4()));
+    let result = (|| -> anyhow::Result<()> {
+        let ctx = harness.ctx.clone();
+        let export = |harness: &mut Harness<'_, SilexApp>, all: bool| {
+            harness
+                .state_mut()
+                .export_database_csv_to(&ctx, &dir, all)?;
+            assert!(harness.state().csv_export.is_some(), "on the worker");
+            let start = std::time::Instant::now();
+            while harness.state().csv_export.is_some()
+                && start.elapsed() < std::time::Duration::from_secs(30)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                harness.run();
+            }
+            let path = harness.state().last_export.clone().expect("exported");
+            anyhow::Ok((path.clone(), std::fs::read_to_string(path)?))
+        };
+        let (path, view) = export(&mut harness, false)?;
+        assert_eq!(path, dir.join("Lecturas.csv"));
+        assert_eq!(
+            view,
+            "\u{feff}Nombre,Páginas,Leído,Estado,Terminado\r\n\
+             Rayuela,736,true,Terminado,2026-09-14\r\n\
+             Pedro Páramo,124,false,,\r\n"
+        );
+        let (path, all) = export(&mut harness, true)?;
+        assert_eq!(path, dir.join("Lecturas (2).csv"), "never overwrites");
+        let lines: Vec<&str> = all.split("\r\n").collect();
+        assert_eq!(
+            lines[0],
+            "\u{feff}Nombre,Autor,Páginas,Leído,Estado,Terminado"
+        );
+        assert_eq!(lines[3], "Ficciones,Jorge Luis Borges,,false,Leyendo,");
+        assert!(
+            harness.query_by_label_contains("Exportado a").is_some(),
+            "the notice offers the folder"
+        );
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
 /// A menu item: a button whose label is `text` after its icon glyph.
 fn menu_item<'h>(
     harness: &'h Harness<'_, SilexApp>,
