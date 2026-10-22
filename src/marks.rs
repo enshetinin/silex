@@ -151,15 +151,10 @@ pub fn replace(marks: &[Mark], start: usize, end: usize, inserted: usize) -> Vec
     out
 }
 
-/// Marks after the text changed from `old` to `new` (one edit: typing,
-/// pasting, deleting or IME text). The changed part is found from the
-/// common prefix and suffix, so formatting outside it is kept.
-pub fn adjust(marks: &[Mark], old: &str, new: &str) -> Vec<Mark> {
-    if marks.is_empty() || old == new {
-        let mut out = marks.to_vec();
-        normalize(&mut out, new.chars().count());
-        return out;
-    }
+/// Where `old` and `new` differ, as one edit found from their common
+/// prefix and suffix: `(start, old_end, new_end)` in characters, so
+/// `old[start..old_end]` became `new[start..new_end]`.
+pub fn edit_range(old: &str, new: &str) -> (usize, usize, usize) {
     let old_chars: Vec<char> = old.chars().collect();
     let new_chars: Vec<char> = new.chars().collect();
     let prefix = old_chars
@@ -175,14 +170,151 @@ pub fn adjust(marks: &[Mark], old: &str, new: &str) -> Vec<Mark> {
         .take(max_suffix)
         .take_while(|(a, b)| a == b)
         .count();
-    let mut out = replace(
-        marks,
-        prefix,
-        old_chars.len() - suffix,
-        new_chars.len() - suffix - prefix,
-    );
-    normalize(&mut out, new_chars.len());
+    (prefix, old_chars.len() - suffix, new_chars.len() - suffix)
+}
+
+/// Marks after the text changed from `old` to `new` (one edit: typing,
+/// pasting, deleting or IME text). The changed part is found from the
+/// common prefix and suffix ([`edit_range`]), so formatting outside it is
+/// kept.
+pub fn adjust(marks: &[Mark], old: &str, new: &str) -> Vec<Mark> {
+    let len = new.chars().count();
+    if marks.is_empty() || old == new {
+        let mut out = marks.to_vec();
+        normalize(&mut out, len);
+        return out;
+    }
+    let (start, old_end, new_end) = edit_range(old, new);
+    let mut out = replace(marks, start, old_end, new_end - start);
+    normalize(&mut out, len);
     out
+}
+
+/// The kinds of formatting text typed at `at` takes: the marks it falls
+/// inside, and bold, italic and strikethrough that end right there
+/// (as [`replace`] does with an insertion).
+pub fn typing_kinds(marks: &[Mark], at: usize) -> Vec<MarkKind> {
+    marks
+        .iter()
+        .filter(|m| m.start < at && (at < m.end || (at == m.end && m.kind.inclusive_end())))
+        .map(|m| m.kind.clone())
+        .collect()
+}
+
+/// Formatting with a keyboard shortcut (ADR 0015): everything but links,
+/// which need a URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Format {
+    Bold,
+    Italic,
+    Code,
+    Strike,
+}
+
+impl Format {
+    pub const ALL: [Format; 4] = [Format::Bold, Format::Italic, Format::Code, Format::Strike];
+
+    pub fn kind(self) -> MarkKind {
+        match self {
+            Format::Bold => MarkKind::Bold,
+            Format::Italic => MarkKind::Italic,
+            Format::Code => MarkKind::Code,
+            Format::Strike => MarkKind::Strike,
+        }
+    }
+
+    /// Name in menus and the palette.
+    pub fn label(self) -> &'static str {
+        match self {
+            Format::Bold => "Negrita",
+            Format::Italic => "Cursiva",
+            Format::Code => "Código en línea",
+            Format::Strike => "Tachado",
+        }
+    }
+}
+
+/// Bold, italic, code or strikethrough chosen with no text selected: it
+/// applies to what is typed next at `at`, until the cursor moves
+/// (ADR 0015). `on` adds formatting the text would not take, `off` drops
+/// formatting it would continue.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypingFormat {
+    /// Where the cursor was when it was chosen. An IME rewrites its text
+    /// from there, so edits between `from` and `at` keep it.
+    pub from: usize,
+    /// Where the next text goes: the end of what was typed with it.
+    pub at: usize,
+    pub on: Vec<Format>,
+    pub off: Vec<Format>,
+}
+
+impl TypingFormat {
+    /// The typing format after `format` is toggled at `at` in a text with
+    /// `marks`, starting from `current` (kept only if it is for the same
+    /// place). `None` when typing would just follow the marks again.
+    pub fn toggle(
+        marks: &[Mark],
+        current: Option<TypingFormat>,
+        at: usize,
+        format: Format,
+    ) -> Option<TypingFormat> {
+        let mut next = current.filter(|t| t.at == at).unwrap_or(TypingFormat {
+            from: at,
+            at,
+            ..TypingFormat::default()
+        });
+        let follows = typing_kinds(marks, at).contains(&format.kind());
+        if next.has(marks, format) {
+            next.on.retain(|f| *f != format);
+            if follows {
+                next.off.push(format);
+            }
+        } else {
+            next.off.retain(|f| *f != format);
+            if !follows {
+                next.on.push(format);
+            }
+        }
+        (!next.on.is_empty() || !next.off.is_empty()).then_some(next)
+    }
+
+    /// Whether text typed now at `self.at` would have `format`.
+    pub fn has(&self, marks: &[Mark], format: Format) -> bool {
+        if self.on.contains(&format) {
+            return true;
+        }
+        !self.off.contains(&format) && typing_kinds(marks, self.at).contains(&format.kind())
+    }
+
+    /// Applies an edit `(start, old_end, new_end)` (see [`edit_range`])
+    /// to `marks` (already moved for it): the new text gets this format,
+    /// and the next text goes after it. Returns `None` if the edit was
+    /// somewhere else, which ends the typing format.
+    pub fn typed(
+        &mut self,
+        marks: &[Mark],
+        (start, old_end, new_end): (usize, usize, usize),
+    ) -> Option<Vec<Mark>> {
+        if start < self.from || start > self.at || old_end > self.at {
+            return None;
+        }
+        self.at = new_end;
+        Some(self.apply(marks, start, new_end))
+    }
+
+    /// The marks once the characters `[start, end)` were typed with this
+    /// format (`marks` already moved for them).
+    pub fn apply(&self, marks: &[Mark], start: usize, end: usize) -> Vec<Mark> {
+        let mut out = marks.to_vec();
+        for format in &self.on {
+            out = add(&out, format.kind(), start, end);
+        }
+        for format in &self.off {
+            out = remove(&out, &format.kind(), start, end);
+        }
+        out
+    }
 }
 
 /// Splits the marks of a text at character `at`: those of the part before
@@ -709,6 +841,69 @@ mod tests {
         ] {
             assert_eq!(normalize_url(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn edit_range_finds_the_one_change() {
+        assert_eq!(edit_range("hola", "hola"), (4, 4, 4));
+        assert_eq!(edit_range("hola", "hoXla"), (2, 2, 3));
+        assert_eq!(edit_range("hola", "ha"), (1, 3, 1));
+        assert_eq!(edit_range("café🌾", "café🌾!"), (5, 5, 6));
+        assert_eq!(edit_range("aa", "aaa"), (2, 2, 3));
+    }
+
+    #[test]
+    fn typing_follows_the_marks_it_is_in() {
+        let marks = vec![m(2, 5, Bold), m(5, 8, Code), m(0, 2, link("https://a.es"))];
+        assert_eq!(typing_kinds(&marks, 3), vec![Bold]);
+        assert_eq!(
+            typing_kinds(&marks, 5),
+            vec![Bold],
+            "bold continues, code starts"
+        );
+        assert_eq!(typing_kinds(&marks, 8), vec![], "code does not continue");
+        assert_eq!(typing_kinds(&marks, 2), vec![], "links do not continue");
+        assert_eq!(typing_kinds(&marks, 0), vec![]);
+    }
+
+    #[test]
+    fn a_typing_format_turns_on_and_off() {
+        use Format as F;
+        // Plain text: Cmd+B turns bold on for what comes next…
+        let plain: Vec<Mark> = vec![];
+        let on = TypingFormat::toggle(&plain, None, 3, F::Bold).expect("on");
+        assert!(on.has(&plain, F::Bold));
+        assert_eq!(on.apply(&plain, 3, 6), vec![m(3, 6, Bold)]);
+        // …and again turns it back off: nothing pending.
+        assert_eq!(
+            TypingFormat::toggle(&plain, Some(on.clone()), 3, F::Bold),
+            None
+        );
+        // Another place starts fresh.
+        let elsewhere = TypingFormat::toggle(&plain, Some(on), 1, F::Italic).expect("on");
+        assert_eq!((elsewhere.at, elsewhere.on.clone()), (1, vec![F::Italic]));
+
+        // At the end of bold: Cmd+B stops it, the text typed is plain.
+        let bold = vec![m(0, 4, Bold)];
+        let off = TypingFormat::toggle(&bold, None, 4, F::Bold).expect("off");
+        assert!(!off.has(&bold, F::Bold));
+        let typed = replace(&bold, 4, 4, 2);
+        assert_eq!(typed, vec![m(0, 6, Bold)], "bold would continue");
+        assert_eq!(off.apply(&typed, 4, 6), vec![m(0, 4, Bold)]);
+        // Typing goes on after the text; an IME rewrites from `from`.
+        let mut typing = TypingFormat::toggle(&plain, None, 2, F::Bold).expect("on");
+        assert_eq!(typing.typed(&plain, (2, 2, 4)), Some(vec![m(2, 4, Bold)]));
+        assert_eq!(typing.at, 4);
+        assert_eq!(typing.typed(&plain, (2, 4, 3)), Some(vec![m(2, 3, Bold)]));
+        assert_eq!(typing.at, 3);
+        assert_eq!(typing.typed(&plain, (0, 0, 1)), None, "somewhere else");
+        // Two formats at once.
+        let both = TypingFormat::toggle(&plain, None, 0, F::Italic);
+        let both = TypingFormat::toggle(&plain, both, 0, F::Code).expect("both");
+        assert_eq!(
+            both.apply(&plain, 0, 2),
+            vec![m(0, 2, Italic), m(0, 2, Code)]
+        );
     }
 
     /// Small deterministic generator (no new crates).

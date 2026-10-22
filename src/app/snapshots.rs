@@ -150,6 +150,23 @@ fn block_handle_menu() -> anyhow::Result<()> {
     })
 }
 
+/// H12.1c: «Formato» open in the paragraph's menu, with each format's
+/// shortcut.
+#[test]
+fn block_format_menu() -> anyhow::Result<()> {
+    snapshot_with(
+        "block_format_menu_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            let paragraph = harness.state().blocks[1].id.clone();
+            egui::Popup::open_id(&harness.ctx, super::blocks::handle_menu_id(&paragraph));
+            harness.run();
+            harness.get_by_label_contains("Formato").hover();
+            harness.run();
+        },
+    )
+}
+
 /// H11.7: the style guide after Cmd+Opción+F, «in» searched and «IN»
 /// typed as its replacement. The bar sits above the page, with
 /// «Reemplazar»; every match is painted, the one shown stronger (also in
@@ -3201,4 +3218,39 @@ fn inline_formatting_light() -> anyhow::Result<()> {
 #[test]
 fn inline_formatting_dark() -> anyhow::Result<()> {
     formatting_snapshot("inline_formatting_dark", egui::Theme::Dark)
+}
+
+/// H12.1c: the «…» menu of a block, opened over text selected in it:
+/// «Formato» → «Negrita» makes just that text bold, with real clicks and
+/// the focus moving to the menu. Its items have names.
+#[test]
+fn the_block_menu_formats_the_text_selected() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    // «Una interfaz limpia, …»: select «interfaz».
+    let paragraph = harness.state().blocks[1].id.clone();
+    harness.state_mut().pending_focus = Some((paragraph.clone(), 12));
+    harness.state_mut().pending_anchor = Some((paragraph.clone(), 4));
+    harness.run();
+    egui::Popup::open_id(&harness.ctx, super::blocks::handle_menu_id(&paragraph));
+    harness.run();
+    harness.get_by_label_contains("Formato").click();
+    harness.run();
+    assert_accessible(&harness, "format menu");
+    harness.get_by_label_contains("Negrita").click();
+    harness.run();
+    let block = &harness.state().blocks[1];
+    let bold: Vec<String> = block
+        .marks
+        .iter()
+        .map(|m| {
+            block
+                .content
+                .chars()
+                .skip(m.start)
+                .take(m.end - m.start)
+                .collect()
+        })
+        .collect();
+    assert_eq!(bold, ["interfaz"]);
+    Ok(())
 }

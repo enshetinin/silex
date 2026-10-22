@@ -5,7 +5,7 @@
 //! selection and IME keep working on the same characters; only the look of
 //! each run changes.
 use eframe::egui::{self, Color32, FontFamily, FontId, Stroke, TextFormat, text::LayoutJob};
-use silex_desktop::marks::{Mark, MarkKind};
+use silex_desktop::marks::{Format, Mark, MarkKind};
 
 use super::theme;
 
@@ -96,6 +96,31 @@ fn format_for(base: &TextFormat, active: &[&MarkKind], look: &InlineLook) -> Tex
         format.strikethrough.color = format.color;
     }
     format
+}
+
+/// The keyboard shortcut of a format, as menus show it.
+pub(super) fn shortcut(ctx: &egui::Context, format: Format) -> String {
+    shortcut_label(format, super::cmd_label(ctx))
+}
+
+/// The keyboard shortcut of a format, with `cmd` "Cmd" or "Ctrl".
+pub(super) fn shortcut_label(format: Format, cmd: &str) -> String {
+    match format {
+        Format::Bold => format!("{cmd}+B"),
+        Format::Italic => format!("{cmd}+I"),
+        Format::Code => format!("{cmd}+E"),
+        Format::Strike => format!("{cmd}+Mayús+X"),
+    }
+}
+
+/// The icon of a format.
+pub(super) fn icon(format: Format) -> &'static str {
+    match format {
+        Format::Bold => super::icons::BOLD,
+        Format::Italic => super::icons::ITALIC,
+        Format::Code => super::icons::CODE,
+        Format::Strike => super::icons::STRIKETHROUGH,
+    }
 }
 
 /// The look of formatting in the current theme.

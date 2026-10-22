@@ -4,6 +4,7 @@ use eframe::egui::{self, TextEdit};
 use silex_desktop::{
     editor,
     history::EditKind,
+    marks::{self, Format, TypingFormat},
     model::{Block, BlockKind, list_numbers},
 };
 
@@ -39,6 +40,12 @@ pub(super) enum EditorKey {
     Select,
     /// Enter in the slash menu: apply this type, or attach files.
     Slash(editor::SlashItem),
+    /// Cmd/Ctrl+B, I, E or Shift+X: format the selection, or what is
+    /// typed next (ADR 0015).
+    Format(Format),
+    /// The same from the block's «…» menu: the selection, or the whole
+    /// block when nothing is selected.
+    FormatBlock(Format),
 }
 
 /// Slash menu shown under the focused block while "/word" is being typed.
@@ -80,12 +87,17 @@ pub(super) enum BlockAction {
     RevealFile,
     /// A link (ADR 0008): open its page.
     OpenLink,
+    /// Bold, italic… on the selection, or on the whole block (ADR 0015).
+    Format(Format),
 }
 
 /// What a block reported while being drawn.
 pub(super) struct BlockOutput {
     /// The text was edited (groups into one undo step while typing).
     pub(super) text_changed: bool,
+    /// With `text_changed` on the focused block: what changed, as
+    /// `(start, old_end, new_end)` in characters (`marks::edit_range`).
+    pub(super) edit: Option<(usize, usize, usize)>,
     /// Checkbox changed.
     pub(super) other_changed: bool,
     pub(super) action: Option<BlockAction>,
@@ -278,7 +290,7 @@ pub(super) fn block_field(
                     first_row: true,
                     last_row: true,
                 });
-                return (false, false, action.or(file_action), caret);
+                return (false, None, false, action.or(file_action), caret);
             }
             // Height of the first line of body text (text margin included):
             // markers center on it, and it is the minimum height of a block
@@ -334,6 +346,11 @@ pub(super) fn block_field(
             // the new text and moves the marks with it.
             let done = block.kind == BlockKind::Todo && block.checked;
             let before = (!block.marks.is_empty()).then(|| block.content.clone());
+            // The focused block also reports what an edit changed, so a
+            // typing format (Cmd+B with nothing selected) can apply to it.
+            let old_text = before
+                .clone()
+                .or_else(|| view.focused.then(|| block.content.clone()));
             let singleline = block.kind.is_heading();
             let base = {
                 let font_id = style.resolve(ui.style());
@@ -450,6 +467,9 @@ pub(super) fn block_field(
             if text_changed && let Some(old) = &before {
                 block.marks = silex_desktop::marks::adjust(&block.marks, old, &block.content);
             }
+            let edit = old_text
+                .filter(|_| text_changed)
+                .map(|old| silex_desktop::marks::edit_range(&old, &block.content));
             if view.scroll_into_view {
                 output.response.scroll_to_me(None);
             }
@@ -466,13 +486,14 @@ pub(super) fn block_field(
                         last_row: row + 1 >= output.galley.rows.len(),
                     }
                 });
-            (text_changed, other_changed, action, caret)
+            (text_changed, edit, other_changed, action, caret)
         })
         .inner
     });
-    let (text_changed, other_changed, action, caret) = inner.inner;
+    let (text_changed, edit, other_changed, action, caret) = inner.inner;
     BlockOutput {
         text_changed,
+        edit,
         other_changed,
         action,
         caret,
@@ -540,6 +561,22 @@ fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<
                         }
                     }
                 });
+                // On the text selected, or on the whole block (ADR 0015).
+                if block.kind.takes_marks() {
+                    ui.menu_button((icons::icon(icons::BOLD), " Formato"), |ui| {
+                        for format in Format::ALL {
+                            let button = egui::Button::new((
+                                icons::icon(inline::icon(format)),
+                                format!(" {}", format.label()),
+                            ))
+                            .shortcut_text(inline::shortcut(ui.ctx(), format));
+                            if ui.add(button).clicked() {
+                                action = Some(BlockAction::Format(format));
+                                ui.close();
+                            }
+                        }
+                    });
+                }
                 ui.separator();
             } else if block.kind == BlockKind::PageLink {
                 if ui
@@ -711,6 +748,22 @@ pub(super) fn ime_composing_after(ctx: &egui::Context, mut composing: bool) -> b
     composing
 }
 
+/// Takes Cmd/Ctrl+B, I, E or Shift+X from this frame's input, if pressed.
+fn take_format_shortcut(ctx: &egui::Context) -> Option<Format> {
+    use egui::{Key, KeyboardShortcut, Modifiers as M};
+    [
+        (Format::Bold, M::COMMAND, Key::B),
+        (Format::Italic, M::COMMAND, Key::I),
+        (Format::Code, M::COMMAND, Key::E),
+        (Format::Strike, M::COMMAND | M::SHIFT, Key::X),
+    ]
+    .into_iter()
+    .find(|(_, modifiers, key)| {
+        ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(*modifiers, *key)))
+    })
+    .map(|(format, _, _)| format)
+}
+
 /// Removes the character at `char_index` (if any), and its formatting.
 pub(super) fn delete_char(block: &mut Block, char_index: usize) {
     if let Some((byte, _)) = block.content.char_indices().nth(char_index) {
@@ -754,6 +807,14 @@ impl SilexApp {
             })
         });
         let focused = ctx.memory(|m| m.has_focus(self.block_field_id(&block.id)));
+        // Bold, italic… work with a selection too (ADR 0015).
+        if focused
+            && block.kind.is_text()
+            && let Some(format) = take_format_shortcut(ctx)
+        {
+            self.pending_key = Some((EditorKey::Format(format), block.id.clone()));
+            return;
+        }
         if (!focused && !escape) || caret.selection {
             return;
         }
@@ -892,6 +953,11 @@ impl SilexApp {
         let cursor = egui::text_edit::TextEditState::load(ctx, field)
             .and_then(|s| s.cursor.char_range())
             .map_or(0, |r| r.primary.index.0);
+        if let EditorKey::Format(format) | EditorKey::FormatBlock(format) = command {
+            let whole = matches!(command, EditorKey::FormatBlock(_));
+            self.format_block(ctx, &block_id, format, whole);
+            return;
+        }
         let caret = match command {
             EditorKey::Enter => editor::enter(&mut self.blocks, index, cursor, || {
                 uuid::Uuid::new_v4().to_string()
@@ -972,6 +1038,8 @@ impl SilexApp {
                     char: cursor,
                 })
             }
+            // Run above, before the cursor logic.
+            EditorKey::Format(_) | EditorKey::FormatBlock(_) => None,
             EditorKey::Duplicate => editor::duplicate_range(&mut self.blocks, index, index, || {
                 uuid::Uuid::new_v4().to_string()
             })
@@ -1251,12 +1319,77 @@ impl SilexApp {
         });
     }
 
+    /// Bold, italic, code or strikethrough on block `id` (ADR 0015): on
+    /// its text selection if there is one. Otherwise, from a menu
+    /// (`whole`), on the whole block; from the keyboard, on what is typed
+    /// next at the cursor. Code blocks take no formatting: a notice says so.
+    pub(super) fn format_block(
+        &mut self,
+        ctx: &egui::Context,
+        id: &str,
+        format: Format,
+        whole: bool,
+    ) {
+        let Some(index) = self.blocks.iter().position(|b| b.id == id) else {
+            return;
+        };
+        if !self.blocks[index].kind.takes_marks() {
+            if self.blocks[index].kind == BlockKind::Code {
+                self.notice =
+                    Some("Un bloque de código no tiene formato: conviértelo en texto.".into());
+            }
+            return;
+        }
+        // From the keyboard the field has the focus and its selection; a
+        // menu or the palette took the focus, so the selection it had then.
+        let field = self.block_field_id(id);
+        let live = egui::text_edit::TextEditState::load(ctx, field)
+            .and_then(|s| s.cursor.char_range())
+            .map(|r| (r.secondary.index.0, r.primary.index.0));
+        let remembered = self
+            .format_target
+            .as_ref()
+            .filter(|(target, _, _)| target == id)
+            .map(|(_, anchor, cursor)| (*anchor, *cursor));
+        let (anchor, cursor) = if whole { remembered.or(live) } else { live }.unwrap_or((0, 0));
+        let block = &mut self.blocks[index];
+        let len = block.content.chars().count();
+        let (anchor, cursor) = (anchor.min(len), cursor.min(len));
+        let (start, end) = (anchor.min(cursor), anchor.max(cursor));
+        if start == end && !whole {
+            let current = self
+                .typing_format
+                .take()
+                .filter(|(block_id, _)| block_id == id)
+                .map(|(_, typing)| typing);
+            self.typing_format = TypingFormat::toggle(&block.marks, current, cursor, format)
+                .map(|typing| (id.to_owned(), typing));
+            return;
+        }
+        let (start, end) = if start < end { (start, end) } else { (0, len) };
+        if start == end {
+            return;
+        }
+        block.marks = marks::toggle(&block.marks, format.kind(), start, end);
+        self.typing_format = None;
+        // One undo step (ADR 0004); the text keeps its selection, also
+        // when a menu or the palette took the focus.
+        self.mark_dirty();
+        self.pending_focus = Some((id.to_owned(), cursor));
+        self.pending_anchor = Some((id.to_owned(), anchor));
+    }
+
     /// Runs an action from a block's "…" menu.
     pub(super) fn block_action(&mut self, action: BlockAction, id: &str) {
         let Some(index) = self.blocks.iter().position(|b| b.id == id) else {
             return;
         };
         let changed = match action {
+            BlockAction::Format(format) => {
+                // Needs the text field's selection: run with the editor keys.
+                self.pending_key = Some((EditorKey::FormatBlock(format), id.to_owned()));
+                return;
+            }
             BlockAction::OpenFile | BlockAction::SaveFile | BlockAction::RevealFile => {
                 self.files.pending.push((action, id.to_owned()));
                 return;
@@ -1495,6 +1628,16 @@ impl SilexApp {
                         }
                         let out = block_field(ui, self.doc_generation, block, &view);
                         rects.push(out.rect);
+                        // What is typed with Cmd+B and nothing selected (ADR 0015).
+                        if out.text_changed
+                            && let Some((target, typing)) = self.typing_format.as_mut()
+                            && *target == block.id
+                        {
+                            match out.edit.and_then(|edit| typing.typed(&block.marks, edit)) {
+                                Some(marks) => block.marks = marks,
+                                None => self.typing_format = None,
+                            }
+                        }
                         // An image in sight: kept, or decoded if it has no preview (H7.2).
                         if let Some(id) = &block.attachment
                             && self
@@ -1599,6 +1742,30 @@ impl SilexApp {
             });
         });
         self.editor_scroll = scrolled.state.clamped_offset().y;
+        // Where the palette and the «…» menu apply formatting (ADR 0015).
+        if let Some(caret) = &self.caret
+            && self
+                .blocks
+                .iter()
+                .any(|b| b.id == caret.block_id && b.kind.takes_marks())
+        {
+            let field = self.block_field_id(&caret.block_id);
+            let (anchor, cursor) = egui::text_edit::TextEditState::load(ui.ctx(), field)
+                .and_then(|s| s.cursor.char_range())
+                .map_or((caret.char, caret.char), |r| {
+                    (r.secondary.index.0, r.primary.index.0)
+                });
+            self.format_target = Some((caret.block_id.clone(), anchor, cursor));
+        }
+        // A typing format lasts until the cursor moves.
+        if let Some((id, typing)) = &self.typing_format
+            && !self
+                .caret
+                .as_ref()
+                .is_some_and(|c| c.block_id == *id && c.char == typing.at && !c.selection)
+        {
+            self.typing_format = None;
+        }
         self.hovered_block = hovered;
         if let Some(kind) = edit {
             self.changed(kind);

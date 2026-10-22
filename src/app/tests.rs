@@ -4807,3 +4807,178 @@ fn find_and_replace_keeps_the_formatting_on_the_replaced_word() {
     assert_eq!(blocks[0].content, "centeno y centeno");
     assert_eq!(blocks[0].marks, vec![bold(10, 17)]);
 }
+
+// ---- Formatting shortcuts, menu and palette (H12.1c, ADR 0015) ----
+
+/// Selects characters `anchor..cursor` of block `index`.
+fn select_text(
+    app: &mut SilexApp,
+    ctx: &egui::Context,
+    index: usize,
+    anchor: usize,
+    cursor: usize,
+) {
+    let id = app.blocks[index].id.clone();
+    app.pending_focus = Some((id.clone(), cursor));
+    app.pending_anchor = Some((id, anchor));
+    app_frame(app, ctx, vec![]);
+    app_frame(app, ctx, vec![]);
+}
+
+fn italic(start: usize, end: usize) -> silex_desktop::marks::Mark {
+    silex_desktop::marks::Mark::new(start, end, silex_desktop::marks::MarkKind::Italic)
+}
+
+#[test]
+fn shortcuts_format_the_selection_and_keep_it() -> anyhow::Result<()> {
+    use silex_desktop::marks::{Mark, MarkKind};
+    let (mut app, ctx) = editor_app(&[(Par, 0, "pan de centeno")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 0, 3);
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    assert_eq!(marked_words(&app, 0), ["pan"]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        block_selection(&app, &ctx, 0),
+        Some((0, 3)),
+        "still selected"
+    );
+    // Again: the whole selection is bold, so it goes.
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    assert!(app.blocks[0].marks.is_empty());
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+
+    // A selection made backwards; the other shortcuts.
+    select_text(&mut app, &ctx, 0, 14, 7);
+    app_frame(&mut app, &ctx, vec![key(Key::I, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![key(Key::E, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![key(Key::X, M::COMMAND | M::SHIFT)]);
+    assert_eq!(app.blocks[0].content, "pan de centeno", "no text was cut");
+    assert_eq!(
+        app.blocks[0].marks,
+        vec![
+            bold(0, 3),
+            italic(7, 14),
+            Mark::new(7, 14, MarkKind::Code),
+            Mark::new(7, 14, MarkKind::Strike),
+        ]
+    );
+    // Each change is one undo step.
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(app.blocks[0].marks.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn with_nothing_selected_the_shortcut_formats_what_is_typed_next() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "Hoy ")], 0, 4)?;
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    assert!(app.blocks[0].marks.is_empty(), "nothing to format yet");
+    app_frame(&mut app, &ctx, type_text("pan"));
+    app_frame(&mut app, &ctx, type_text(" caliente"));
+    assert_eq!(marked_words(&app, 0), ["pan caliente"]);
+    // Cmd+B again at the end of bold: what follows is plain.
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    app_frame(&mut app, &ctx, type_text(" y café"));
+    assert_eq!(app.blocks[0].content, "Hoy pan caliente y café");
+    assert_eq!(marked_words(&app, 0), ["pan caliente"]);
+
+    // Moving the cursor forgets it.
+    app_frame(&mut app, &ctx, vec![key(Key::I, M::COMMAND)]);
+    assert!(app.typing_format.is_some());
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowLeft, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(app.typing_format.is_none());
+    app_frame(&mut app, &ctx, type_text("!"));
+    assert!(
+        !app.blocks[0]
+            .marks
+            .iter()
+            .any(|m| m.kind == silex_desktop::marks::MarkKind::Italic)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_typing_format_survives_an_ime_composition() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "Kanji: ")], 0, 7)?;
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    let preedit = |text: &str| {
+        egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: text.into(),
+            active_range_chars: None,
+        })
+    };
+    app_frame(&mut app, &ctx, vec![preedit("ka")]);
+    app_frame(&mut app, &ctx, vec![preedit("kan")]);
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Ime(egui::ImeEvent::Commit("漢".into()))],
+    );
+    app_frame(&mut app, &ctx, type_text("字"));
+    assert_eq!(app.blocks[0].content, "Kanji: 漢字");
+    assert_eq!(marked_words(&app, 0), ["漢字"]);
+    Ok(())
+}
+
+#[test]
+fn a_code_block_says_it_takes_no_formatting() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Cod, 0, "let x = 1;")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 0, 3);
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    assert!(app.blocks[0].marks.is_empty());
+    assert!(
+        app.notice.as_deref().is_some_and(|n| n.contains("código")),
+        "{:?}",
+        app.notice
+    );
+    Ok(())
+}
+
+#[test]
+fn the_block_menu_formats_the_selection_or_the_whole_block() -> anyhow::Result<()> {
+    use silex_desktop::marks::Format;
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno dos"), (Bul, 0, "tres")], 0, 0)?;
+    // No selection: the whole block.
+    let second = app.blocks[1].id.clone();
+    app.block_action(BlockAction::Format(Format::Bold), &second);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(marked_words(&app, 1), ["tres"]);
+    // With a selection: just that.
+    select_text(&mut app, &ctx, 0, 4, 7);
+    // Opening the menu takes the focus away (and egui drops the selection).
+    let field = app.block_field_id(&app.blocks[0].id);
+    ctx.memory_mut(|m| m.surrender_focus(field));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    let first = app.blocks[0].id.clone();
+    app.block_action(BlockAction::Format(Format::Italic), &first);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks[0].marks, vec![italic(4, 7)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(0), "focus back on the text");
+    assert_eq!(block_selection(&app, &ctx, 0), Some((4, 7)));
+    Ok(())
+}
+
+#[test]
+fn the_palette_formats_the_last_block_edited() -> anyhow::Result<()> {
+    use silex_desktop::marks::Format;
+    use silex_desktop::palette::Command;
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno dos")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 0, 3);
+    // Cmd+K takes the focus away, and egui drops the selection of a field
+    // without focus: the command still formats what was selected.
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    app_frame(&mut app, &ctx, type_text("negr"));
+    assert_eq!(block_selection(&app, &ctx, 0), Some((3, 3)));
+    assert!(app.search.is_some());
+    assert!(Command::Format(Format::Bold).available(&app.palette_context()));
+    app.search = None;
+    app.run_command(&ctx, Command::Format(Format::Bold))?;
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(marked_words(&app, 0), ["uno"]);
+    assert_eq!(block_selection(&app, &ctx, 0), Some((0, 3)));
+    Ok(())
+}

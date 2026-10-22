@@ -366,7 +366,7 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
   5. Publica el borrador. Si algo salió mal, borra el borrador y la etiqueta (`git push --delete origin v1.0.0`) y repite.
 
 ## 41. Formato en línea: pintar y editar (H12.1b, ADR 0015)
-Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlite3` y `SILEX_DB_PATH=/ruta/nueva.sqlite3 cargo run`), abre «QA · Formato en línea» (en Favoritos). Todavía no hay atajos para poner formato: llegan en H12.1c.
+Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlite3` y `SILEX_DB_PATH=/ruta/nueva.sqlite3 cargo run`), abre «QA · Formato en línea» (en Favoritos). Los atajos para poner formato están en la sección 42.
 - Se ven negrita, cursiva, las dos juntas, tachado, código con fondo gris y enlaces subrayados en el color de acento, en claro y en oscuro (Ajustes → Tema). En el título, la negrita no cambia el aspecto, porque ya es seminegrita.
 - Escribe dentro de «esta negrita» y justo al final de «esta otra»: lo nuevo sale en negrita. Escribe justo al final de «código» y de «un enlace»: lo nuevo sale normal.
 - Escribe al principio de una palabra en negrita: lo nuevo sale normal y la negrita se desplaza.
@@ -376,3 +376,13 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Selecciona texto con formato, cópialo y pégalo en otra app: llega como texto plano.
 - Buscar y reemplazar (Cmd/Ctrl+Alt+F) una palabra en negrita: la palabra nueva sale en negrita.
 - Cierra y abre la app: el formato sigue en su sitio. En «Historial de versiones…», una versión con formato lo muestra y restaurarla lo devuelve.
+
+## 42. Formato en línea: atajos, menú y paleta (H12.1c, ADR 0015)
+- Selecciona una palabra y pulsa Cmd/Ctrl+B: sale en negrita y sigue seleccionada. Otra vez Cmd/Ctrl+B: la quita. Igual con Cmd/Ctrl+I (cursiva), Cmd/Ctrl+E (código) y Cmd/Ctrl+Mayús+X (tachado, sin cortar el texto). Cmd/Ctrl+Z deshace cada cambio por separado.
+- Selecciona una frase con parte en negrita y pulsa Cmd/Ctrl+B: toda queda en negrita. Si ya lo estaba toda, se quita.
+- Sin seleccionar nada, pulsa Cmd/Ctrl+B y escribe: lo nuevo sale en negrita. Pulsa otra vez Cmd/Ctrl+B y sigue escribiendo: sale normal. Pulsa Cmd/Ctrl+I, mueve el cursor con una flecha y escribe: no sale en cursiva.
+- Con un método de entrada (japonés o chino), pulsa Cmd/Ctrl+B y compón una palabra: sale en negrita entera.
+- En un bloque de código, Cmd/Ctrl+B no hace nada y un aviso dice que el código no tiene formato.
+- Selecciona texto y abre el menú «…» del bloque → «Formato» → «Cursiva»: solo ese texto, que vuelve a quedar seleccionado. Sin selección, el menú da formato a todo el bloque. Cada opción muestra su atajo.
+- Selecciona texto, abre Cmd/Ctrl+K y escribe «negrita» (o «tachar», «formato»): el comando da formato a lo seleccionado. En una base de datos no aparece.
+- «Atajos de teclado» lista Cmd/Ctrl+B, I, E y Cmd/Ctrl+Mayús+X. En Windows y Linux, con Ctrl.

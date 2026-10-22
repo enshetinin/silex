@@ -56,6 +56,7 @@ Requisitos:
 - **Abrir un enlace:** Cmd/Ctrl+clic, o Cmd/Ctrl+Intro con el cursor dentro. Un clic normal coloca el cursor para editar. Al pasar el ratón se ve la URL y cómo abrirla. Se abre con `Context::open_url`, igual que «Buscar actualizaciones» (ADR 0014): la app no hace ninguna petición de red.
 - **URL permitidas:** `http`, `https` y `mailto`. Una URL sin esquema que parece una dirección (`ejemplo.com/x`) recibe `https://`; cualquier otro esquema (`file:`, `javascript:`…) se rechaza al escribirla y se descarta al leer o importar.
 - **Menú «…» del bloque y paleta:** «Negrita», «Cursiva», «Código», «Tachado» y «Enlace…», con su atajo al lado, para quien no los conoce.
+  - *Actualización (H12.1c):* el menú es un submenú «Formato». Sin texto seleccionado, el menú y la paleta dan formato a todo el bloque (un atajo, en cambio, al texto que se escriba a continuación). egui borra la selección de un campo cuando pierde el foco, y abrir el menú o la paleta lo quita: por eso usan la selección que tenía el último bloque editado y la vuelven a seleccionar. En un bloque de código, un aviso dice que no tiene formato. «Enlace…» llega con H12.1d.
 - **Accesibilidad:** el lector de pantalla sigue recibiendo el texto del bloque. Los enlaces se anuncian además como enlaces del bloque, con su texto. AccessKit no transmite negrita ni cursiva desde egui; queda como limitación conocida.
 
 ### Encaje con lo que ya existe

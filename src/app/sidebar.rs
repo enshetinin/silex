@@ -958,6 +958,11 @@ impl SilexApp {
                     (format!("{cmd}+Z / {cmd}+Mayús+Z"), "Deshacer / rehacer"),
                     ("/".to_owned(), "Cambiar el tipo de bloque"),
                     (
+                        format!("{cmd}+B / {cmd}+I / {cmd}+E"),
+                        "Negrita / cursiva / código",
+                    ),
+                    (format!("{cmd}+Mayús+X"), "Tachado"),
+                    (
                         "Arrastrar el asa".to_owned(),
                         "Mover el bloque (Esc cancela)",
                     ),
