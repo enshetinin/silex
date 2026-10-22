@@ -3092,3 +3092,113 @@ fn a_narrow_database_beside_a_page_keeps_its_toolbar_and_the_window() -> anyhow:
     }
     Ok(())
 }
+
+/// A page with every kind of inline formatting (H12.1b, ADR 0015), in
+/// paragraphs, a heading, a list, a done task and a quote.
+fn formatting_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::marks::{Mark, MarkKind};
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let page = db.create_page("Formato en línea", None)?;
+    let link = || MarkKind::Link("https://ejemplo.com".into());
+    let specs: Vec<(BlockKind, bool, &str, Vec<Mark>)> = vec![
+        (
+            BlockKind::Heading2,
+            false,
+            "Un título con cursiva y código",
+            vec![
+                Mark::new(14, 21, MarkKind::Italic),
+                Mark::new(24, 30, MarkKind::Code),
+            ],
+        ),
+        (
+            BlockKind::Paragraph,
+            false,
+            "Texto en negrita, en cursiva, en las dos, tachado y código en línea.",
+            vec![
+                Mark::new(9, 16, MarkKind::Bold),
+                Mark::new(21, 28, MarkKind::Italic),
+                Mark::new(33, 40, MarkKind::Bold),
+                Mark::new(33, 40, MarkKind::Italic),
+                Mark::new(42, 49, MarkKind::Strike),
+                Mark::new(52, 58, MarkKind::Code),
+            ],
+        ),
+        (
+            BlockKind::Paragraph,
+            false,
+            "Un enlace web a la documentación, y otro en negrita.",
+            vec![
+                Mark::new(3, 13, link()),
+                Mark::new(36, 51, link()),
+                Mark::new(44, 51, MarkKind::Bold),
+            ],
+        ),
+        (
+            BlockKind::Bulleted,
+            false,
+            "Una lista con una palabra importante",
+            vec![Mark::new(26, 36, MarkKind::Bold)],
+        ),
+        (
+            BlockKind::Todo,
+            true,
+            "Una tarea hecha con negrita",
+            vec![Mark::new(20, 27, MarkKind::Bold)],
+        ),
+        (
+            BlockKind::Quote,
+            false,
+            "Una cita con un enlace dentro.",
+            vec![Mark::new(16, 22, link())],
+        ),
+    ];
+    let blocks: Vec<Block> = specs
+        .into_iter()
+        .enumerate()
+        .map(|(position, (kind, checked, content, marks))| Block {
+            id: format!("b{position}"),
+            page_id: page.clone(),
+            kind,
+            content: content.to_owned(),
+            checked,
+            position: position as i64,
+            indent: 0,
+            attachment: None,
+            link: None,
+            marks,
+        })
+        .collect();
+    db.save_document(&page, "Formato en línea", &blocks)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+fn formatting_snapshot(name: &str, theme: egui::Theme) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 560.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            formatting_app()?,
+        );
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+#[test]
+fn inline_formatting_light() -> anyhow::Result<()> {
+    formatting_snapshot("inline_formatting_light", egui::Theme::Light)
+}
+
+#[test]
+fn inline_formatting_dark() -> anyhow::Result<()> {
+    formatting_snapshot("inline_formatting_dark", egui::Theme::Dark)
+}

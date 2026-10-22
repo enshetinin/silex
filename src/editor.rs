@@ -3,6 +3,7 @@
 //! Cursor positions are **character** indices (Unicode scalar values), the same
 //! unit egui uses for text cursors; they are converted to byte offsets here so a
 //! split never lands inside a multi-byte character.
+use crate::marks;
 use crate::model::{Block, BlockKind, MAX_INDENT};
 
 /// Where the text cursor should go after an operation.
@@ -49,6 +50,14 @@ fn new_block_like(source: &Block, kind: BlockKind, id: String, content: String) 
         attachment: None,
         link: None,
         marks: Vec::new(),
+    }
+}
+
+/// Drops the formatting of a block whose kind does not take it (code,
+/// ADR 0015), after its kind changed.
+pub fn fit_marks(block: &mut Block) {
+    if !block.kind.takes_marks() {
+        block.marks.clear();
     }
 }
 
@@ -101,8 +110,12 @@ pub fn enter(
     }
 
     let split_at = byte_index(&block.content, at_char);
+    let (before, after) = marks::split(&block.marks, at_char);
     let tail = blocks[index].content.split_off(split_at);
-    let below = new_block_like(&blocks[index], kind, new_id(), tail);
+    blocks[index].marks = before;
+    let mut below = new_block_like(&blocks[index], kind, new_id(), tail);
+    below.marks = after;
+    fit_marks(&mut below);
     blocks.insert(index + 1, below);
     Some(Caret {
         block: index + 1,
@@ -144,6 +157,8 @@ pub fn backspace_at_start(blocks: &mut Vec<Block>, index: usize) -> Option<Caret
     let previous = &mut blocks[index - 1];
     let char = char_len(&previous.content);
     previous.content.push_str(&removed.content);
+    previous.marks = marks::join(&previous.marks, char, &removed.marks);
+    fit_marks(previous);
     Some(Caret {
         block: index - 1,
         char,
@@ -160,6 +175,8 @@ pub fn delete_at_end(blocks: &mut Vec<Block>, index: usize) -> Option<Caret> {
     let block = &mut blocks[index];
     let char = char_len(&block.content);
     block.content.push_str(&next.content);
+    block.marks = marks::join(&block.marks, char, &next.marks);
+    fit_marks(block);
     Some(Caret { block: index, char })
 }
 
@@ -335,6 +352,9 @@ pub fn replace_matches(blocks: &mut [Block], matches: &[Match], replacement: &st
         let from = byte_index(&block.content, m.start);
         let to = byte_index(&block.content, m.end);
         block.content.replace_range(from..to, replacement);
+        // The new text takes the formatting of the first replaced
+        // character (ADR 0015).
+        block.marks = marks::replace(&block.marks, m.start, m.end, char_len(replacement));
         last = Some((m.block, m.start));
         replaced += 1;
     }
@@ -439,7 +459,9 @@ pub fn apply_slash(
     }
     let cut = byte_index(&block.content, cursor);
     block.content.replace_range(..cut, "");
+    block.marks = marks::replace(&block.marks, 0, cursor, 0);
     block.kind = kind;
+    fit_marks(block);
     if kind != BlockKind::Todo {
         block.checked = false;
     }
@@ -666,6 +688,9 @@ pub fn paste_lines(
     let block = blocks.get_mut(index)?;
     let split_at = byte_index(&block.content, cursor);
     let tail = block.content.split_off(split_at);
+    // The text after the cursor keeps its formatting; pasted text has none.
+    let (head_marks, tail_marks) = marks::split(&block.marks, cursor);
+    block.marks = head_marks;
     let base_indent = block.indent;
     if block.content.is_empty() && first.kind != BlockKind::Paragraph {
         block.kind = first.kind;
@@ -686,6 +711,7 @@ pub fn paste_lines(
                 checked: line.checked,
                 indent: base_indent.saturating_add(line.indent).min(MAX_INDENT),
                 content: line.content,
+                marks: Vec::new(),
                 ..template.clone()
             },
         );
@@ -693,5 +719,7 @@ pub fn paste_lines(
     let target = &mut blocks[last];
     let char = char_len(&target.content);
     target.content.push_str(&tail);
+    target.marks = marks::join(&target.marks, char, &tail_marks);
+    fit_marks(target);
     Some(Caret { block: last, char })
 }

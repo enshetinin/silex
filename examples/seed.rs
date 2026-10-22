@@ -76,9 +76,10 @@ fn main() -> Result<()> {
         .map(|r| r.id.clone())
         .context("la base no tiene filas")?;
     hito7(&mut db, &first_row)?;
+    formatting(&mut db)?;
     println!(
         "Creadas {PAGES} páginas, {} bloques, una base de {ROWS} filas con 5 propiedades \
-         y las páginas «QA · …» del Hito 7 en {}",
+         y las páginas «QA · …» del Hito 7 y del formato en línea en {}",
         PAGES * BLOCKS_PER_PAGE,
         path.to_string_lossy()
     );
@@ -115,6 +116,78 @@ fn link(page: &str, to: &str) -> Block {
         link: Some(to.into()),
         ..block(page, BlockKind::PageLink, "")
     }
+}
+
+/// «QA · Formato en línea» (H12.1b, ADR 0015): every kind of inline
+/// formatting in the block kinds that take it, plus a code block.
+fn formatting(db: &mut Database) -> Result<()> {
+    use silex_desktop::marks::{Mark, MarkKind};
+    let page = db.create_page("QA · Formato en línea", None)?;
+    db.set_favorite(&page, true)?;
+    // Marks over the first occurrence of each word (in characters).
+    let marked = |kind: BlockKind, text: &str, words: &[(&str, MarkKind)]| -> Result<Block> {
+        let mut out = block(&page, kind, text);
+        for (word, mark) in words {
+            let byte = text.find(word).context("palabra que no está en el texto")?;
+            let start = text[..byte].chars().count();
+            out.marks
+                .push(Mark::new(start, start + word.chars().count(), mark.clone()));
+        }
+        Ok(out)
+    };
+    let web = || MarkKind::Link("https://github.com/enshetinin/silex".into());
+    let mut todo = marked(
+        BlockKind::Todo,
+        "Tarea hecha con negrita",
+        &[("negrita", MarkKind::Bold)],
+    )?;
+    todo.checked = true;
+    let blocks = vec![
+        marked(
+            BlockKind::Heading2,
+            "Título con cursiva y código",
+            &[("cursiva", MarkKind::Italic), ("código", MarkKind::Code)],
+        )?,
+        marked(
+            BlockKind::Paragraph,
+            "Escribe dentro de esta negrita y al final de esta otra: sigue en negrita. Al final de código o de un enlace, no.",
+            &[
+                ("esta negrita", MarkKind::Bold),
+                ("esta otra", MarkKind::Bold),
+                ("código", MarkKind::Code),
+                ("un enlace", web()),
+            ],
+        )?,
+        marked(
+            BlockKind::Paragraph,
+            "Cursiva, tachado y las dos juntas con acentos: camión, pingüino, 日本語 🌾.",
+            &[
+                ("Cursiva", MarkKind::Italic),
+                ("tachado", MarkKind::Strike),
+                ("las dos juntas", MarkKind::Bold),
+                ("las dos juntas", MarkKind::Italic),
+                ("日本語 🌾", MarkKind::Bold),
+            ],
+        )?,
+        marked(
+            BlockKind::Bulleted,
+            "Pulsa Intro en medio de esta negrita para dividirla",
+            &[("esta negrita", MarkKind::Bold)],
+        )?,
+        todo,
+        marked(
+            BlockKind::Quote,
+            "Una cita con un enlace al repositorio.",
+            &[("enlace al repositorio", web())],
+        )?,
+        block(
+            &page,
+            BlockKind::Code,
+            "// Convertir un bloque en código quita su formato",
+        ),
+    ];
+    db.save_document(&page, "QA · Formato en línea", &blocks)?;
+    Ok(())
 }
 
 /// The Hito 7 pages: attachments (H7.1–H7.4, H7.9), links and backlinks

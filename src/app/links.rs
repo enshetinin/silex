@@ -443,6 +443,7 @@ impl SilexApp {
             .iter()
             .chain(&chars[caret.char..])
             .collect();
+        block.marks = silex_desktop::marks::replace(&block.marks, caret.char - 2, caret.char, 0);
         let empty = block.content.trim().is_empty() && block.kind == BlockKind::Paragraph;
         let id = block.id.clone();
         self.mark_dirty();

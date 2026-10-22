@@ -23,6 +23,7 @@ mod files;
 mod find;
 mod frame;
 pub mod icons;
+mod inline;
 mod jobs;
 mod links;
 mod page_history;

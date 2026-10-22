@@ -665,3 +665,85 @@ fn dropping_blocks_moves_them_to_the_gap() {
         [("b", Paragraph, 0, "b"), ("a", Todo, 1, "a")]
     );
 }
+
+/// Inline formatting follows the text through block operations (ADR 0015).
+mod formatting {
+    use super::*;
+    use silex_desktop::editor::{apply_slash, paste_lines};
+    use silex_desktop::marks::{Mark, MarkKind};
+
+    fn bold(start: usize, end: usize) -> Mark {
+        Mark::new(start, end, MarkKind::Bold)
+    }
+
+    fn with_marks(mut block: Block, marks: Vec<Mark>) -> Block {
+        block.marks = marks;
+        block
+    }
+
+    #[test]
+    fn delete_at_the_end_joins_the_formatting() {
+        let mut blocks = vec![
+            with_marks(b("a", Paragraph, 0, "uno"), vec![bold(0, 3)]),
+            with_marks(b("b", Paragraph, 0, "dos"), vec![bold(1, 3)]),
+        ];
+        delete_at_end(&mut blocks, 0);
+        assert_eq!(blocks[0].content, "unodos");
+        assert_eq!(blocks[0].marks, vec![bold(0, 3), bold(4, 6)]);
+    }
+
+    #[test]
+    fn joining_into_a_code_block_drops_the_formatting() {
+        let mut blocks = vec![
+            b("a", Code, 0, "let x;"),
+            with_marks(b("b", Paragraph, 0, "texto"), vec![bold(0, 5)]),
+        ];
+        backspace_at_start(&mut blocks, 1);
+        assert_eq!(blocks[0].content, "let x;texto");
+        assert!(blocks[0].marks.is_empty());
+    }
+
+    #[test]
+    fn enter_in_a_list_gives_each_half_its_formatting() {
+        let mut blocks = vec![with_marks(
+            b("a", Bulleted, 0, "pan🌾 rico"),
+            vec![bold(0, 4)],
+        )];
+        enter(&mut blocks, 0, 2, new_id);
+        assert_eq!(blocks[0].marks, vec![bold(0, 2)]);
+        assert_eq!(blocks[1].kind, Bulleted);
+        assert_eq!(blocks[1].marks, vec![bold(0, 2)]);
+        assert_eq!(blocks[1].content, "n🌾 rico");
+    }
+
+    #[test]
+    fn a_slash_command_removes_its_text_and_moves_the_formatting() {
+        // «/tit» typed before bold «hola».
+        let mut blocks = vec![with_marks(
+            b("a", Paragraph, 0, "/tithola"),
+            vec![bold(4, 8)],
+        )];
+        apply_slash(&mut blocks, 0, 4, Heading1);
+        assert_eq!(blocks[0].content, "hola");
+        assert_eq!(blocks[0].marks, vec![bold(0, 4)]);
+        apply_slash(&mut blocks, 0, 0, Code);
+        assert!(blocks[0].marks.is_empty(), "code takes no formatting");
+    }
+
+    #[test]
+    fn pasted_lines_are_plain_and_the_tail_keeps_its_formatting() {
+        // Caret between bold «ab» and bold «cd».
+        let mut blocks = vec![with_marks(b("a", Paragraph, 0, "abcd"), vec![bold(0, 4)])];
+        let mut n = 0;
+        paste_lines(&mut blocks, 0, 2, "uno\ndos", || {
+            n += 1;
+            format!("n{n}")
+        });
+        assert_eq!(
+            summary(&blocks),
+            [("a", Paragraph, 0, "abuno"), ("n1", Paragraph, 0, "doscd")]
+        );
+        assert_eq!(blocks[0].marks, vec![bold(0, 2)]);
+        assert_eq!(blocks[1].marks, vec![bold(3, 5)]);
+    }
+}

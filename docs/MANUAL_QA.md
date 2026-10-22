@@ -364,3 +364,15 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
   3. Espera el workflow «Paquetes» de la etiqueta: si la etiqueta no coincide con `Cargo.toml` o falta la sección del CHANGELOG, falla antes de construir.
   4. En GitHub → Releases, abre el borrador «Silex 1.0.0»: deben estar el `.dmg`, el `-setup.exe`, el `.deb` y el AppImage, con las notas del CHANGELOG. Descarga e instala al menos uno.
   5. Publica el borrador. Si algo salió mal, borra el borrador y la etiqueta (`git push --delete origin v1.0.0`) y repite.
+
+## 41. Formato en línea: pintar y editar (H12.1b, ADR 0015)
+Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlite3` y `SILEX_DB_PATH=/ruta/nueva.sqlite3 cargo run`), abre «QA · Formato en línea» (en Favoritos). Todavía no hay atajos para poner formato: llegan en H12.1c.
+- Se ven negrita, cursiva, las dos juntas, tachado, código con fondo gris y enlaces subrayados en el color de acento, en claro y en oscuro (Ajustes → Tema). En el título, la negrita no cambia el aspecto, porque ya es seminegrita.
+- Escribe dentro de «esta negrita» y justo al final de «esta otra»: lo nuevo sale en negrita. Escribe justo al final de «código» y de «un enlace»: lo nuevo sale normal.
+- Escribe al principio de una palabra en negrita: lo nuevo sale normal y la negrita se desplaza.
+- Con el cursor en medio de «esta negrita» de la lista, pulsa Intro: cada mitad conserva su negrita. Retroceso al principio del bloque nuevo las vuelve a unir.
+- Cambia un bloque con formato a «Código» (menú «…» o `/código`): pierde el formato; Cmd/Ctrl+Z lo devuelve.
+- Con un método de entrada (japonés o chino, o los acentos de macOS manteniendo una tecla), escribe al final de «日本語 🌾»: el texto compuesto sale en negrita y el cursor no salta.
+- Selecciona texto con formato, cópialo y pégalo en otra app: llega como texto plano.
+- Buscar y reemplazar (Cmd/Ctrl+Alt+F) una palabra en negrita: la palabra nueva sale en negrita.
+- Cierra y abre la app: el formato sigue en su sitio. En «Historial de versiones…», una versión con formato lo muestra y restaurarla lo devuelve.

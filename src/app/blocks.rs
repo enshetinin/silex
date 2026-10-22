@@ -8,7 +8,7 @@ use silex_desktop::{
 };
 
 use super::*;
-use super::{icons, theme};
+use super::{icons, inline, theme};
 
 /// Cursor state of the focused block text field.
 #[derive(Debug, Clone)]
@@ -327,17 +327,44 @@ pub(super) fn block_field(
                 BlockKind::Code => egui::TextStyle::Monospace,
                 _ => egui::TextStyle::Body,
             };
-            // A done to-do: muted and struck through.
-            let mut strikethrough = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
-                let format = egui::TextFormat {
-                    font_id: egui::TextStyle::Body.resolve(ui.style()),
-                    color: p.text_muted,
-                    strikethrough: egui::Stroke::new(1.0, p.text_muted),
+            // Inline formatting (ADR 0015) and a done to-do (muted and
+            // struck through) are painted by our own layouter over the
+            // same text. `before` is the text the marks belong to: while
+            // egui applies this frame's typing, the layouter already sees
+            // the new text and moves the marks with it.
+            let done = block.kind == BlockKind::Todo && block.checked;
+            let before = (!block.marks.is_empty()).then(|| block.content.clone());
+            let singleline = block.kind.is_heading();
+            let base = {
+                let font_id = style.resolve(ui.style());
+                let line_height =
+                    ui.fonts_mut(|f| f.row_height(&font_id)) + ui.spacing().extra_text_line_spacing;
+                egui::TextFormat {
+                    font_id,
+                    color: if done { p.text_muted } else { p.text },
+                    strikethrough: if done {
+                        egui::Stroke::new(1.0, p.text_muted)
+                    } else {
+                        egui::Stroke::NONE
+                    },
+                    line_height: Some(line_height),
                     ..Default::default()
+                }
+            };
+            let look = inline::look(ui.ctx());
+            let marks = &block.marks;
+            let mut formatted = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
+                let text = text.as_str();
+                let moved;
+                let marks = match &before {
+                    Some(old) if old != text => {
+                        moved = silex_desktop::marks::adjust(marks, old, text);
+                        &moved
+                    }
+                    _ => marks,
                 };
-                let mut job =
-                    egui::text::LayoutJob::single_section(text.as_str().to_owned(), format);
-                job.wrap.max_width = wrap;
+                let mut job = inline::layout_job(text, marks, &base, &look);
+                job.wrap.max_width = if singleline { f32::INFINITY } else { wrap };
                 ui.fonts_mut(|f| f.layout_job(job))
             };
             let mut edit = if block.kind.is_heading() {
@@ -357,8 +384,8 @@ pub(super) fn block_field(
                         .inner_margin(egui::Margin::same(10)),
                 );
             }
-            if block.kind == BlockKind::Todo && block.checked {
-                edit = edit.text_color(p.text_muted).layouter(&mut strikethrough);
+            if done || before.is_some() {
+                edit = edit.text_color(base.color).layouter(&mut formatted);
             }
             if let Some(text) = placeholder {
                 edit = edit.hint_text(egui::RichText::new(text).color(p.text_faint));
@@ -420,6 +447,9 @@ pub(super) fn block_field(
             let response =
                 egui::Response::clone(&output.response).accessible_name(block.kind.label());
             let text_changed = response.changed();
+            if text_changed && let Some(old) = &before {
+                block.marks = silex_desktop::marks::adjust(&block.marks, old, &block.content);
+            }
             if view.scroll_into_view {
                 output.response.scroll_to_me(None);
             }
@@ -681,10 +711,11 @@ pub(super) fn ime_composing_after(ctx: &egui::Context, mut composing: bool) -> b
     composing
 }
 
-/// Removes the character at `char_index` (if any).
-pub(super) fn delete_char(text: &mut String, char_index: usize) {
-    if let Some((byte, _)) = text.char_indices().nth(char_index) {
-        text.remove(byte);
+/// Removes the character at `char_index` (if any), and its formatting.
+pub(super) fn delete_char(block: &mut Block, char_index: usize) {
+    if let Some((byte, _)) = block.content.char_indices().nth(char_index) {
+        block.content.remove(byte);
+        block.marks = silex_desktop::marks::replace(&block.marks, char_index, char_index + 1, 0);
     }
 }
 
@@ -867,7 +898,7 @@ impl SilexApp {
             }),
             EditorKey::Backspace if cursor > 0 => {
                 // Text was typed before Backspace in the same frame: plain delete.
-                delete_char(&mut self.blocks[index].content, cursor - 1);
+                delete_char(&mut self.blocks[index], cursor - 1);
                 Some(editor::Caret {
                     block: index,
                     char: cursor - 1,
@@ -875,7 +906,7 @@ impl SilexApp {
             }
             EditorKey::Backspace => editor::backspace_at_start(&mut self.blocks, index),
             EditorKey::Delete if cursor < editor::block_char_len(&self.blocks[index]) => {
-                delete_char(&mut self.blocks[index].content, cursor);
+                delete_char(&mut self.blocks[index], cursor);
                 Some(editor::Caret {
                     block: index,
                     char: cursor,
@@ -1244,6 +1275,7 @@ impl SilexApp {
                 let block = &mut self.blocks[index];
                 let changed = block.kind != kind;
                 block.kind = kind;
+                editor::fit_marks(block);
                 if kind != BlockKind::Todo {
                     block.checked = false;
                 }
