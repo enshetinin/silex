@@ -1,11 +1,13 @@
 [package]
 name = "silex-desktop"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
 authors = []
 description = "Local-first native knowledge workspace built with Rust and SQLite"
 license = "MIT"
+# «Buscar actualizaciones» opens `<repository>/releases` (ADR 0014).
+repository = "https://github.com/enshetinin/silex"
 
 [dependencies]
 anyhow = "1"

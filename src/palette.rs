@@ -47,6 +47,8 @@ pub enum Command {
     ZoomOut,
     ZoomReset,
     ShowShortcuts,
+    /// Opens the page of versions in the browser (ADR 0014).
+    CheckUpdates,
 }
 
 /// The state that decides which commands make sense right now.
@@ -76,7 +78,7 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 31] = [
+    pub const ALL: [Command; 32] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
@@ -108,6 +110,7 @@ impl Command {
         Command::ZoomOut,
         Command::ZoomReset,
         Command::ShowShortcuts,
+        Command::CheckUpdates,
     ];
 
     pub fn label(self) -> &'static str {
@@ -143,6 +146,7 @@ impl Command {
             Command::ZoomOut => "Reducir el tamaño de la interfaz",
             Command::ZoomReset => "Tamaño de la interfaz al 100 %",
             Command::ShowShortcuts => "Ver los atajos de teclado",
+            Command::CheckUpdates => "Buscar actualizaciones",
         }
     }
 
@@ -189,6 +193,7 @@ impl Command {
             Command::ZoomOut => &["zoom", "achicar", "menos", "pequeno", "letra", "texto"],
             Command::ZoomReset => &["zoom", "normal", "original", "restablecer", "letra"],
             Command::ShowShortcuts => &["teclas", "teclado", "ayuda", "shortcuts", "help"],
+            Command::CheckUpdates => &["version", "actualizar", "descargar", "update", "release"],
         }
     }
 
@@ -202,7 +207,8 @@ impl Command {
             | Command::NewFromTemplate
             | Command::SaveNow
             | Command::OpenTrash
-            | Command::ShowShortcuts => true,
+            | Command::ShowShortcuts
+            | Command::CheckUpdates => true,
             // Inside a database a child is a row: «Nueva fila» instead.
             Command::NewSubpage => cx.page_open && !cx.database_open && !cx.template_open,
             Command::NewRow => cx.database_open,
@@ -321,7 +327,7 @@ mod tests {
     fn empty_query_lists_what_is_available_in_menu_order() {
         let all = matching_commands("", &cx());
         assert_eq!(all.first(), Some(&Command::NewPage));
-        assert_eq!(all.last(), Some(&Command::ShowShortcuts));
+        assert_eq!(all.last(), Some(&Command::CheckUpdates));
         // Default settings: "Sistema" and 100 % are current.
         for hidden in [
             Command::RemoveFavorite,
@@ -458,6 +464,25 @@ mod tests {
         assert!(Command::ZoomReset.available(&big));
         assert!(!Command::ThemeDark.available(&big));
         assert!(Command::ThemeSystem.available(&big));
+    }
+
+    #[test]
+    fn check_updates_is_always_there_and_found_by_its_words() {
+        let no_page = PaletteContext {
+            page_open: false,
+            file_database: false,
+            ..cx()
+        };
+        assert!(Command::CheckUpdates.available(&no_page));
+        for query in ["actualizaciones", "update"] {
+            assert_eq!(
+                matching_commands(query, &cx()),
+                [Command::CheckUpdates],
+                "{query}"
+            );
+        }
+        // «Historial de versiones» answers too.
+        assert!(matching_commands("version", &cx()).contains(&Command::CheckUpdates));
     }
 
     #[test]

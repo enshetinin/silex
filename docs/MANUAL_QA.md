@@ -354,3 +354,13 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - Escribe algo: «Recientes» desaparece; borra el texto: vuelve.
 - Cmd/Ctrl+T e Intro abre la reciente en una pestaña nueva.
 - Cierra y abre la app: la lista sigue igual.
+
+## 40. Publicar una versión (H9.4, ADR 0014)
+- En Ajustes, debajo de «Privacidad», sale «Silex 1.0.0»; «Buscar actualizaciones…» abre `https://github.com/enshetinin/silex/releases` en el navegador. Cmd/Ctrl+K → «actualizaciones» hace lo mismo.
+- Con un monitor de red (Little Snitch, el Monitor de actividad o `nettop`), la app no abre ninguna conexión al usar «Buscar actualizaciones»: la abre el navegador.
+- Para publicar, después de la PR de `develop` a `main` y con la CI en verde:
+  1. Revisa la fecha y el texto de la sección de la versión en `CHANGELOG.md`.
+  2. `git tag -a v1.0.0 -m "Silex 1.0.0"` en `main` y `git push origin v1.0.0`.
+  3. Espera el workflow «Paquetes» de la etiqueta: si la etiqueta no coincide con `Cargo.toml` o falta la sección del CHANGELOG, falla antes de construir.
+  4. En GitHub → Releases, abre el borrador «Silex 1.0.0»: deben estar el `.dmg`, el `-setup.exe`, el `.deb` y el AppImage, con las notas del CHANGELOG. Descarga e instala al menos uno.
+  5. Publica el borrador. Si algo salió mal, borra el borrador y la etiqueta (`git push --delete origin v1.0.0`) y repite.

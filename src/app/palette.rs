@@ -37,6 +37,7 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::ZoomOut => icons::ARROW_DOWN,
         Command::ZoomReset => icons::TEXT,
         Command::ShowShortcuts => icons::KEYBOARD,
+        Command::CheckUpdates => icons::DOWNLOAD,
     }
 }
 
@@ -133,6 +134,7 @@ impl SilexApp {
             }
             (Command::ZoomReset, _) => with_settings(self, &|s| s.zoom_percent = 100),
             (Command::ShowShortcuts, _) => self.shortcuts_dialog = true,
+            (Command::CheckUpdates, _) => open_releases_page(ctx),
             // A page command with no page open (not offered then).
             (_, None) => {}
         }

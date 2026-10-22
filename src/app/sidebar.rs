@@ -903,6 +903,20 @@ impl SilexApp {
         let ctx = ui.ctx().clone();
         self.set_settings(&ctx, settings);
         self.privacy_section(ui);
+        ui.separator();
+        // ADR 0014: the version, and a page to compare it with; no request.
+        let version = format!("Silex {}", silex_desktop::about::VERSION);
+        ui.label(egui::RichText::new(version).small().weak());
+        if ui
+            .button((icons::icon(icons::DOWNLOAD), " Buscar actualizaciones…"))
+            .on_hover_text(
+                "Abre la página de versiones en el navegador. Silex no se conecta a internet.",
+            )
+            .clicked()
+        {
+            open_releases_page(ui.ctx());
+            ui.close();
+        }
     }
 
     pub(super) fn shortcuts_help(ui: &mut egui::Ui) {
