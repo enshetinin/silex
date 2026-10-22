@@ -346,3 +346,11 @@ Con la semilla (`cargo run --release --example seed -- /tmp/silex-qa.sqlite3`; d
 - Con un IME (japonés o chino), escribe en el campo de búsqueda y confirma con Intro: no salta a otra coincidencia ni reemplaza nada por error.
 - En una base de datos, Cmd/Ctrl+F no abre nada. Cambiar de página cierra la barra.
 - En oscuro, el resaltado se distingue y el texto se lee.
+
+## 39. Páginas recientes en el buscador (H11.8)
+- Abre varias páginas (desde la barra lateral, una pestaña, un enlace). Cmd/Ctrl+K sin escribir: «Recientes» arriba con las últimas (como mucho 8), la más reciente primero y sin la abierta, cada una con su ruta.
+- Cmd/Ctrl+K e Intro vuelve a la página anterior; ↓ e Intro abre la siguiente de la lista.
+- Envía una a la papelera: deja de salir; restáurala: vuelve. Una plantilla abierta no sale.
+- Escribe algo: «Recientes» desaparece; borra el texto: vuelve.
+- Cmd/Ctrl+T e Intro abre la reciente en una pestaña nueva.
+- Cierra y abre la app: la lista sigue igual.

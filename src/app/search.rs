@@ -1,4 +1,5 @@
-//! Search window (Cmd+K): commands (H5.8) and pages (H5.7). Pages come
+//! Search window (Cmd+K): commands (H5.8) and pages (H5.7); with nothing
+//! typed, the pages opened recently first (H11.8). Pages come
 //! ranked, with their path and a snippet of the matching block; searches
 //! run on a worker thread (`SearchWorker`) so typing never waits for
 //! SQLite. Commands are matched inline (`palette::matching_commands`).
@@ -33,10 +34,14 @@ pub(super) struct SearchWindow {
     pub(super) new_tab: bool,
     /// The query last sent to the search (its results may still be coming).
     requested: String,
+    /// With nothing typed, the pages opened recently (H11.8), listed
+    /// first; empty otherwise.
+    pub(super) recent: Vec<SearchHit>,
     /// Commands matching the query, listed before the pages.
     pub(super) commands: Vec<Command>,
     pub(super) results: Vec<SearchHit>,
-    /// Highlighted entry (↑/↓) in commands, then pages; Enter chooses it.
+    /// Highlighted entry (↑/↓) in recent pages, commands, then pages;
+    /// Enter chooses it.
     pub(super) selected: usize,
     pub(super) error: Option<String>,
     /// `None` for an in-memory database (tests): searches run inline.
@@ -60,10 +65,19 @@ enum Entry {
 
 impl SearchWindow {
     fn len(&self) -> usize {
-        self.commands.len() + self.results.len()
+        self.recent.len() + self.commands.len() + self.results.len()
+    }
+
+    /// Where the found pages start: after the recent pages and commands.
+    fn first_result(&self) -> usize {
+        self.recent.len() + self.commands.len()
     }
 
     fn entry(&self, index: usize) -> Option<Entry> {
+        if let Some(hit) = self.recent.get(index) {
+            return Some(Entry::Page(hit.clone()));
+        }
+        let index = index - self.recent.len();
         match index.checked_sub(self.commands.len()) {
             None => self.commands.get(index).copied().map(Entry::Command),
             Some(page) => self.results.get(page).cloned().map(Entry::Page),
@@ -81,6 +95,7 @@ impl SilexApp {
         self.selection = None;
         self.slash = None;
         let commands = matching_commands("", &self.palette_context());
+        let recent = self.recent_hits();
         let repaint = ctx.clone();
         // Without a file (tests) or a thread, search inline.
         let worker = self
@@ -90,6 +105,7 @@ impl SilexApp {
         self.search = Some(SearchWindow {
             query: String::new(),
             requested: String::new(),
+            recent,
             commands,
             results: Vec::new(),
             selected: 0,
@@ -103,14 +119,45 @@ impl SilexApp {
         });
     }
 
+    /// The pages opened recently that the search window lists (H11.8):
+    /// live ones (not in the trash, not templates), without the open one.
+    fn recent_hits(&self) -> Vec<SearchHit> {
+        self.recent
+            .shown(self.selected.as_deref(), |id| {
+                self.pages.iter().any(|p| p.id == id)
+            })
+            .into_iter()
+            .filter_map(|id| self.pages.iter().find(|p| p.id == id))
+            .map(|page| SearchHit {
+                page: page.clone(),
+                title: vec![TextPart {
+                    text: page.title.clone(),
+                    matched: false,
+                }],
+                block: None,
+            })
+            .collect()
+    }
+
     /// Sends the query when it changed and collects results.
     fn refresh_search(&mut self) {
         let palette = self.palette_context();
+        let typed = self.search.as_ref().is_some_and(|w| w.query != w.requested);
+        let recent = if typed {
+            self.recent_hits()
+        } else {
+            Vec::new()
+        };
         let Some(window) = self.search.as_mut() else {
             return;
         };
         if window.query != window.requested {
             window.requested = window.query.clone();
+            window.recent = if window.query.trim().is_empty() {
+                recent
+            } else {
+                Vec::new()
+            };
             window.commands = matching_commands(&window.query, &palette);
             window.selected = 0;
             window.error = None;
@@ -143,7 +190,7 @@ impl SilexApp {
         if !window.open_when_ready || window.query != window.requested {
             return None;
         }
-        let on_page = window.selected >= window.commands.len();
+        let on_page = window.selected >= window.first_result();
         if on_page && window.worker.as_ref().is_some_and(SearchWorker::is_pending) {
             return None;
         }
@@ -223,6 +270,11 @@ impl SilexApp {
             .iter()
             .map(|hit| self.page_path(&hit.page.id))
             .collect();
+        let recent_paths: Vec<String> = window
+            .recent
+            .iter()
+            .map(|hit| self.page_path(&hit.page.id))
+            .collect();
         let pending = window.worker.as_ref().is_some_and(SearchWorker::is_pending);
 
         let id = egui::Id::unique("silex_search_window");
@@ -281,10 +333,27 @@ impl SilexApp {
                         ui.add_space(theme::space::XS);
                         let scroll = std::mem::take(&mut window.scroll_to_selected);
                         let cmd = cmd_label(ui.ctx());
+                        if !window.recent.is_empty() {
+                            section(ui, p, "Recientes");
+                        }
+                        for (index, (hit, path)) in
+                            window.recent.iter().zip(&recent_paths).enumerate()
+                        {
+                            let selected = index == window.selected;
+                            let row = result_row(ui, p, hit, path, selected);
+                            if row.clicked() {
+                                open = Some(index);
+                            }
+                            if selected && scroll {
+                                row.scroll_to_me(None);
+                            }
+                        }
                         if !window.commands.is_empty() {
                             section(ui, p, "Acciones");
                         }
-                        for (index, command) in window.commands.iter().enumerate() {
+                        let first_command = window.recent.len();
+                        for (offset, command) in window.commands.iter().enumerate() {
+                            let index = first_command + offset;
                             let selected = index == window.selected;
                             let shortcut = command_shortcut(*command, cmd);
                             let row = command_row(ui, p, *command, shortcut.as_deref(), selected);
@@ -309,7 +378,7 @@ impl SilexApp {
                                 p.text_muted,
                             );
                         }
-                        let first_page = window.commands.len();
+                        let first_page = window.first_result();
                         for (offset, (hit, path)) in window.results.iter().zip(&paths).enumerate() {
                             let index = first_page + offset;
                             let selected = index == window.selected;

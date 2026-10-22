@@ -271,6 +271,30 @@ impl Database {
         Ok(())
     }
 
+    /// The pages opened recently as last stored
+    /// ([`crate::recent::Recent::to_json`]), if any (H11.8). Kept in
+    /// `settings`, which ignores the key.
+    pub fn recent_pages(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [RECENT_PAGES],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Remembers the pages opened recently, for the next start.
+    pub fn save_recent_pages(&self, json: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![RECENT_PAGES, json],
+        )?;
+        Ok(())
+    }
+
     /// The view of `database_id` last open (H11.6), if one was stored. It
     /// may have been deleted since: the caller falls back to the first.
     pub fn last_view(&self, database_id: &str) -> Result<Option<String>> {
@@ -2288,6 +2312,8 @@ const COMPACTING: &str = "compacting";
 const SYNCED_WARNING: &str = "synced_warning_dismissed";
 /// `settings` key of the open tabs (ADR 0011).
 const OPEN_TABS: &str = "open_tabs";
+/// `settings` key of the pages opened recently (H11.8).
+const RECENT_PAGES: &str = "recent_pages";
 /// Start of the `settings` key of a database's last open view (H11.6),
 /// followed by the database's id.
 const LAST_VIEW_PREFIX: &str = "last_view:";

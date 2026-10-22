@@ -12,6 +12,7 @@ pub mod model;
 pub mod palette;
 pub mod privacy;
 pub mod property;
+pub mod recent;
 pub mod safe_path;
 pub mod save_state;
 pub mod search;

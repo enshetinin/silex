@@ -174,6 +174,11 @@ pub struct SilexApp {
     parked: std::collections::HashMap<String, Parked>,
     /// The tabs as last stored, to write them only when they change.
     saved_tabs: String,
+    /// Pages opened recently, listed by the search window with nothing
+    /// typed (H11.8).
+    recent: silex_desktop::recent::Recent,
+    /// `recent` as last stored, to write it only when it changes.
+    saved_recent: String,
     /// Scroll of the open page's blocks as of the last frame.
     editor_scroll: f32,
     /// Scroll to restore on the next frame (a tab shown again).
@@ -293,6 +298,8 @@ impl SilexApp {
             tabs: silex_desktop::tabs::Tabs::default(),
             parked: std::collections::HashMap::new(),
             saved_tabs: String::new(),
+            recent: silex_desktop::recent::Recent::default(),
+            saved_recent: String::new(),
             editor_scroll: 0.0,
             pending_scroll: None,
             click_modifiers: egui::Modifiers::NONE,
@@ -314,6 +321,8 @@ impl SilexApp {
         app.favorites = app.db.list_favorites()?;
         app.templates.list = app.db.list_templates()?;
         app.rebuild_tree();
+        // Before a page opens, which is a visit (H11.8).
+        app.load_recent();
         // The tabs of last time (ADR 0011), those still live; else the
         // first page. A damaged value only loses the tabs.
         if let Some(json) = app.db.open_tabs().ok().flatten() {
@@ -419,8 +428,33 @@ impl SilexApp {
             self.load_links()?;
             self.rebuild_tree();
             self.refresh_side();
+            if let Some(id) = &self.selected {
+                self.recent.visit(id);
+            }
+            self.save_recent();
         }
         Ok(found)
+    }
+
+    /// Reads the pages opened recently (H11.8). A damaged value, or one
+    /// that cannot be read, only empties the list.
+    fn load_recent(&mut self) {
+        let json = self.db.recent_pages().ok().flatten().unwrap_or_default();
+        self.recent = silex_desktop::recent::Recent::from_json(&json);
+        self.saved_recent = self.recent.to_json();
+    }
+
+    /// Stores the pages opened recently if they changed. A failure is only
+    /// a notice: the list still works in this session.
+    fn save_recent(&mut self) {
+        let json = self.recent.to_json();
+        if json != self.saved_recent {
+            let result = self.db.save_recent_pages(&json);
+            if result.is_ok() {
+                self.saved_recent = json;
+            }
+            self.report(result);
+        }
     }
 
     /// Stores the tabs if they changed (to reopen them next time). A

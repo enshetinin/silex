@@ -4462,3 +4462,123 @@ fn the_page_scrolls_to_the_match_shown() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---- H11.8: recent pages in the search window ----
+
+fn recent_titles(app: &SilexApp) -> Vec<String> {
+    app.search
+        .as_ref()
+        .map(|w| w.recent.iter().map(|h| h.page.title.clone()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_empty_search_lists_recent_pages_kept_between_sessions() -> anyhow::Result<()> {
+    // Declared before the apps: removed after their files are closed.
+    let tmp = TempFolder::new("silex-app-recent")?;
+    let path = tmp.0.join("silex.sqlite3");
+    let start = |path: &std::path::Path| -> anyhow::Result<SilexApp> {
+        let mut app = SilexApp::new(Database::open(path)?)?;
+        app.startup_backup_pending = false;
+        Ok(app)
+    };
+    let ctx = egui::Context::default();
+    let (proyecto, notas) = {
+        let mut app = start(&path)?;
+        let proyecto = app.db.create_page("Proyecto", None)?;
+        let notas = app.db.create_page("Notas", Some(&proyecto))?;
+        let recetas = app.db.create_page("Recetas", None)?;
+        let borrador = app.db.create_page("Borrador", None)?;
+        app.reload_pages()?;
+        for id in [&borrador, &recetas, &proyecto, &notas] {
+            app.open_page(id.clone())?;
+        }
+        // A template opened is not listed; a page in the trash neither.
+        let plantilla = app.db.save_as_template(&recetas)?;
+        app.reload_pages()?;
+        app.open_page(plantilla)?;
+        app.open_page(notas.clone())?;
+        app.trash_page(&borrador)?;
+        app_frame(&mut app, &ctx, vec![]);
+        (proyecto, notas)
+    };
+
+    let mut app = start(&path)?;
+    assert_eq!(app.selected.as_deref(), Some(notas.as_str()), "its tab");
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    // Most recent first, without the open page, the template or the trash.
+    // (the welcome page opened when the file was new counts too).
+    assert_eq!(
+        recent_titles(&app),
+        ["Proyecto", "Recetas", "Mi primera página"]
+    );
+    assert_eq!(app.search.as_ref().map(|w| w.selected), Some(0));
+    // Enter opens the first: going back to the page before is one key.
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(app.search.is_none());
+    assert_eq!(app.selected.as_deref(), Some(proyecto.as_str()));
+
+    // ↓ then Enter: the second. Now «Notas» (with its path) is the first.
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    assert_eq!(
+        recent_titles(&app),
+        ["Notas", "Recetas", "Mi primera página"]
+    );
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        app.selected
+            .as_ref()
+            .and_then(|id| app.find_page(id))
+            .map(|p| p.title.clone()),
+        Some("Recetas".to_owned())
+    );
+
+    // Typing leaves the recent pages out; clearing brings them back.
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![egui::Event::Text("not".into())]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(recent_titles(&app).is_empty());
+    // The search runs on its worker thread: wait for its results.
+    let found = |app: &SilexApp| {
+        app.search
+            .as_ref()
+            .is_some_and(|w| w.results.iter().any(|h| h.page.title == "Notas"))
+    };
+    let waiting = std::time::Instant::now();
+    while !found(&app) && waiting.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app_frame(&mut app, &ctx, vec![]);
+    }
+    assert!(found(&app), "«Notas» found");
+    for _ in 0..3 {
+        app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    }
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        recent_titles(&app),
+        ["Proyecto", "Notas", "Mi primera página"]
+    );
+    assert!(app.notice.is_none(), "{:?}", app.notice);
+    Ok(())
+}
+
+#[test]
+fn cmd_t_opens_a_recent_page_in_a_new_tab() -> anyhow::Result<()> {
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    let ctx = egui::Context::default();
+    let first = app.selected.clone().expect("a page");
+    let otra = app.db.create_page("Otra", None)?;
+    app.reload_pages()?;
+    app.open_page(otra.clone())?;
+    let tabs = app.tabs.len();
+    app_frame(&mut app, &ctx, vec![key(Key::T, M::COMMAND)]);
+    assert_eq!(app.search.as_ref().map(|w| w.recent.len()), Some(1));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.selected.as_deref(), Some(first.as_str()));
+    assert_eq!(app.tabs.len(), tabs + 1, "in a new tab");
+    Ok(())
+}
