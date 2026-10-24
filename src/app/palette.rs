@@ -38,6 +38,7 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::ZoomReset => icons::TEXT,
         Command::ShowShortcuts => icons::KEYBOARD,
         Command::CheckUpdates => icons::DOWNLOAD,
+        Command::Format(format) => super::inline::icon(format),
     }
 }
 
@@ -55,6 +56,7 @@ pub(super) fn command_shortcut(command: Command, cmd: &str) -> Option<String> {
         Command::ZoomIn => format!("{cmd}++"),
         Command::ZoomOut => format!("{cmd}+−"),
         Command::ZoomReset => format!("{cmd}+0"),
+        Command::Format(format) => super::inline::shortcut_label(format, cmd),
         _ => return None,
     })
 }
@@ -75,6 +77,11 @@ impl SilexApp {
             backup_running: self.backup_job.is_some(),
             export_running: self.export_job.is_some(),
             csv_export_running: self.csv_export.is_some(),
+            format_block: self.format_target.as_ref().is_some_and(|(id, _, _)| {
+                self.blocks
+                    .iter()
+                    .any(|b| &b.id == id && b.kind.takes_marks())
+            }),
             settings: self.settings,
         }
     }
@@ -98,6 +105,11 @@ impl SilexApp {
             (Command::DuplicatePage, Some(id)) => self.start_duplicate(&id)?,
             (Command::FindInPage, Some(_)) => self.open_find(ctx, false),
             (Command::ReplaceInPage, Some(_)) => self.open_find(ctx, true),
+            (Command::Format(format), Some(_)) => {
+                if let Some((id, _, _)) = self.format_target.clone() {
+                    self.format_block(ctx, &id, format, true);
+                }
+            }
             (Command::AddFavorite, Some(id)) => self.set_favorite(&id, true)?,
             (Command::RemoveFavorite, Some(id)) => self.set_favorite(&id, false)?,
             (Command::ExportPage, Some(_)) => self.export_current_page(ctx)?,

@@ -23,6 +23,7 @@ mod files;
 mod find;
 mod frame;
 pub mod icons;
+mod inline;
 mod jobs;
 mod links;
 mod page_history;
@@ -137,6 +138,14 @@ pub struct SilexApp {
     ime_composing: bool,
     /// Editor key taken this frame, run after layout.
     pending_key: Option<(EditorKey, String)>,
+    /// Bold, italic… chosen with no text selected, for what is typed next
+    /// in that block (block id), until the cursor moves (ADR 0015).
+    typing_format: Option<(String, silex_desktop::marks::TypingFormat)>,
+    /// The last block edited that takes formatting, with its selection
+    /// (block id, anchor, cursor) as of the last frame it had the focus:
+    /// where the palette and the «…» menu apply bold, italic… (ADR 0015).
+    /// egui drops a field's selection when it loses the focus.
+    format_target: Option<(String, usize, usize)>,
     /// Block to focus (and cursor position) on the next frame.
     pending_focus: Option<(String, usize)>,
     /// With `pending_focus`, the other end of a selection in that block
@@ -287,6 +296,8 @@ impl SilexApp {
             caret: None,
             ime_composing: false,
             pending_key: None,
+            typing_format: None,
+            format_target: None,
             pending_focus: None,
             pending_anchor: None,
             find: None,

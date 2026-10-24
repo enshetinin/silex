@@ -381,6 +381,44 @@ fn scale_smoke() -> anyhow::Result<()> {
         t.elapsed()
     );
 
+    // Inline formatting (ADR 0015): the same page with ~150 characters
+    // and 6 marks per block, and one keystroke in a long formatted block.
+    use silex_desktop::marks::{self, Mark, MarkKind};
+    let text = "Texto con negrita, cursiva, código y un enlace web, repetido para que cada bloque tenga una longitud parecida a la de un párrafo corto real.";
+    let formatted: Vec<Mark> = (0..6)
+        .map(|i| {
+            let kind = [MarkKind::Bold, MarkKind::Italic, MarkKind::Code][i % 3].clone();
+            Mark::new(i * 20, i * 20 + 8, kind)
+        })
+        .collect();
+    for block in &mut big {
+        block.content = text.to_owned();
+        block.marks = formatted.clone();
+    }
+    let t = Instant::now();
+    let copy = big.clone();
+    assert!(copy == big);
+    println!(
+        "instantánea de deshacer (1000 bloques con formato): {:?}",
+        t.elapsed()
+    );
+    let long = text.repeat(15); // ~2100 characters
+    let long_marks: Vec<Mark> = (0..90)
+        .map(|i| Mark::new(i * 23, i * 23 + 10, MarkKind::Bold))
+        .collect();
+    let typed = {
+        let mut chars: Vec<char> = long.chars().collect();
+        chars.insert(1000, 'x');
+        chars.into_iter().collect::<String>()
+    };
+    let t = Instant::now();
+    let moved = marks::adjust(&long_marks, &long, &typed);
+    println!(
+        "ajustar 90 marcas tras una pulsación (2100 caracteres): {:?}",
+        t.elapsed()
+    );
+    assert_eq!(moved.len(), long_marks.len());
+
     let backups = std::env::temp_dir().join(format!("silex-scale-{}", uuid::Uuid::new_v4()));
     let t = Instant::now();
     let copy = silex_desktop::db::backup::create_backup(tmp.path(), &backups)?;

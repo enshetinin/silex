@@ -128,6 +128,7 @@ fn block(page: &str, id: &str, content: &str) -> Block {
         indent: 0,
         attachment: None,
         link: None,
+        marks: Vec::new(),
     }
 }
 

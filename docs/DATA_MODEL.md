@@ -84,8 +84,16 @@
 - «Exportar todo» escribe las plantillas en `Plantillas/` (con número si una página ya se llama así), con sus adjuntos.
 - Probado: v8→v9 y v1→v9 conservando los `rowid`, las versiones y los favoritos; un fallo a mitad que deja la v8 intacta; una copia v8 restaurada y actualizada.
 
+## Versión 10 — formato en línea (`0010_inline_marks.sql`, ADR 0015)
+- `blocks.marks TEXT NULL` con `CHECK (marks IS NULL OR json_valid(marks))`: el formato del texto como lista JSON de tramos `{"start", "end", "type"}` (y `"url"` en los enlaces), con posiciones en caracteres sobre `content`. `NULL` es «sin formato», y así quedan todos los bloques existentes. Solo añade la columna: no reconstruye `blocks` y conserva los `rowid`.
+- `content` sigue siendo el texto plano: la búsqueda FTS5, la exportación y el buscador de la página no cambian. El trigger de búsqueda solo reacciona a `UPDATE OF content`, así que cambiar el formato no reindexa.
+- Rust (`src/marks.rs`) guarda las marcas normalizadas (ordenadas, dentro del texto y sin solaparse las del mismo tipo), solo en párrafos, títulos, listas, tareas y citas, y con enlaces `http`, `https` o `mailto`. Al leer, unas marcas que no encajan con el texto se descartan con un aviso en el registro, y el texto se conserva.
+- Duplicar, guardar como plantilla y crear desde plantilla copian las marcas; al cambiar `{{fecha}}` por la fecha, se mueven con el texto.
+- Historial: una versión con algún bloque con formato se guarda con `format` 2 (`marks` en cada bloque); sin formato, sigue siendo `format` 1, igual que antes. Se leen las dos.
+- Probado: v9→v10 y v1→v10 conservando los `rowid`, la búsqueda, las versiones, los favoritos y las plantillas; un fallo de la migración (una columna `marks` puesta por otra herramienta) que deja la v9 intacta; una copia v9 restaurada y actualizada; JSON dañado que conserva el texto.
+
 ## Evolución
-- Las migraciones publicadas (`0001`…`0009`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
+- Las migraciones publicadas (`0001`…`0010`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).
 - Antes de actualizar una base existente en disco se crea una copia verificada con el esquema antiguo. Si esa copia falla, no se migra.
 - Las copias de esquemas anteriores son válidas: la verificación acepta `1..=LATEST` y la restauración actualiza la base después de restaurar.

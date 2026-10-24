@@ -1,5 +1,6 @@
 //! Page templates (ADR 0010), without SQL or egui: `{{fecha}}` and the
 //! example templates Silex offers the first time.
+use crate::marks::Mark;
 use crate::model::{BlockKind, NewBlock};
 use crate::versions::MONTHS;
 
@@ -29,6 +30,18 @@ pub fn fill_date(text: &str, today: &str) -> String {
     match long_date(today) {
         Some(date) if text.contains(DATE_PLACEHOLDER) => text.replace(DATE_PLACEHOLDER, &date),
         _ => text.to_owned(),
+    }
+}
+
+/// Like [`fill_date`], also moving the formatting of `text` (ADR 0015)
+/// so it stays on the same words.
+pub fn fill_date_marked(text: &str, marks: &[Mark], today: &str) -> (String, Vec<Mark>) {
+    match long_date(today) {
+        Some(date) if text.contains(DATE_PLACEHOLDER) => (
+            text.replace(DATE_PLACEHOLDER, &date),
+            crate::marks::replace_all(marks, text, DATE_PLACEHOLDER, &date),
+        ),
+        _ => (text.to_owned(), marks.to_vec()),
     }
 }
 

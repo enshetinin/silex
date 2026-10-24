@@ -150,6 +150,23 @@ fn block_handle_menu() -> anyhow::Result<()> {
     })
 }
 
+/// H12.1c: «Formato» open in the paragraph's menu, with each format's
+/// shortcut.
+#[test]
+fn block_format_menu() -> anyhow::Result<()> {
+    snapshot_with(
+        "block_format_menu_light",
+        eframe::egui::Theme::Light,
+        |harness| {
+            let paragraph = harness.state().blocks[1].id.clone();
+            egui::Popup::open_id(&harness.ctx, super::blocks::handle_menu_id(&paragraph));
+            harness.run();
+            harness.get_by_label_contains("Formato").hover();
+            harness.run();
+        },
+    )
+}
+
 /// H11.7: the style guide after Cmd+Opción+F, «in» searched and «IN»
 /// typed as its replacement. The bar sits above the page, with
 /// «Reemplazar»; every match is painted, the one shown stronger (also in
@@ -2208,6 +2225,7 @@ fn attachments_app() -> anyhow::Result<SilexApp> {
         indent: 0,
         attachment: None,
         link: None,
+        marks: Vec::new(),
     }];
     // A real image (a soft gradient), so its preview shows (H7.2).
     let (w, h) = (480u32, 260u32);
@@ -2239,6 +2257,7 @@ fn attachments_app() -> anyhow::Result<SilexApp> {
             indent: 0,
             attachment: Some(attachment.id),
             link: None,
+            marks: Vec::new(),
         });
     }
     db.save_document(&page, "Viaje a Lisboa", &blocks)?;
@@ -2391,6 +2410,7 @@ fn drag_app() -> anyhow::Result<SilexApp> {
             indent: 0,
             attachment: None,
             link: None,
+            marks: Vec::new(),
         })
         .collect();
     db.save_document(&page, "Arrastrar", &blocks)?;
@@ -2863,6 +2883,7 @@ fn links_app() -> anyhow::Result<SilexApp> {
         indent: 0,
         attachment: None,
         link: link.map(str::to_owned),
+        marks: Vec::new(),
     };
     let blocks = [
         block("p", BlockKind::Paragraph, "Hoy revisé el diseño:", None),
@@ -2930,6 +2951,7 @@ fn backlinks_app() -> anyhow::Result<(SilexApp, String)> {
         indent: 0,
         attachment: None,
         link: Some(recetas.clone()),
+        marks: Vec::new(),
     };
     for (page, title) in [
         (&diario, "Diario"),
@@ -3085,5 +3107,150 @@ fn a_narrow_database_beside_a_page_keeps_its_toolbar_and_the_window() -> anyhow:
         );
         assert!(menu.left() >= tabs[0].left(), "{menu:?}");
     }
+    Ok(())
+}
+
+/// A page with every kind of inline formatting (H12.1b, ADR 0015), in
+/// paragraphs, a heading, a list, a done task and a quote.
+fn formatting_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::marks::{Mark, MarkKind};
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let page = db.create_page("Formato en línea", None)?;
+    let link = || MarkKind::Link("https://ejemplo.com".into());
+    let specs: Vec<(BlockKind, bool, &str, Vec<Mark>)> = vec![
+        (
+            BlockKind::Heading2,
+            false,
+            "Un título con cursiva y código",
+            vec![
+                Mark::new(14, 21, MarkKind::Italic),
+                Mark::new(24, 30, MarkKind::Code),
+            ],
+        ),
+        (
+            BlockKind::Paragraph,
+            false,
+            "Texto en negrita, en cursiva, en las dos, tachado y código en línea.",
+            vec![
+                Mark::new(9, 16, MarkKind::Bold),
+                Mark::new(21, 28, MarkKind::Italic),
+                Mark::new(33, 40, MarkKind::Bold),
+                Mark::new(33, 40, MarkKind::Italic),
+                Mark::new(42, 49, MarkKind::Strike),
+                Mark::new(52, 58, MarkKind::Code),
+            ],
+        ),
+        (
+            BlockKind::Paragraph,
+            false,
+            "Un enlace web a la documentación, y otro en negrita.",
+            vec![
+                Mark::new(3, 13, link()),
+                Mark::new(36, 51, link()),
+                Mark::new(44, 51, MarkKind::Bold),
+            ],
+        ),
+        (
+            BlockKind::Bulleted,
+            false,
+            "Una lista con una palabra importante",
+            vec![Mark::new(26, 36, MarkKind::Bold)],
+        ),
+        (
+            BlockKind::Todo,
+            true,
+            "Una tarea hecha con negrita",
+            vec![Mark::new(20, 27, MarkKind::Bold)],
+        ),
+        (
+            BlockKind::Quote,
+            false,
+            "Una cita con un enlace dentro.",
+            vec![Mark::new(16, 22, link())],
+        ),
+    ];
+    let blocks: Vec<Block> = specs
+        .into_iter()
+        .enumerate()
+        .map(|(position, (kind, checked, content, marks))| Block {
+            id: format!("b{position}"),
+            page_id: page.clone(),
+            kind,
+            content: content.to_owned(),
+            checked,
+            position: position as i64,
+            indent: 0,
+            attachment: None,
+            link: None,
+            marks,
+        })
+        .collect();
+    db.save_document(&page, "Formato en línea", &blocks)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+fn formatting_snapshot(name: &str, theme: egui::Theme) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 560.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            formatting_app()?,
+        );
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+#[test]
+fn inline_formatting_light() -> anyhow::Result<()> {
+    formatting_snapshot("inline_formatting_light", egui::Theme::Light)
+}
+
+#[test]
+fn inline_formatting_dark() -> anyhow::Result<()> {
+    formatting_snapshot("inline_formatting_dark", egui::Theme::Dark)
+}
+
+/// H12.1c: the «…» menu of a block, opened over text selected in it:
+/// «Formato» → «Negrita» makes just that text bold, with real clicks and
+/// the focus moving to the menu. Its items have names.
+#[test]
+fn the_block_menu_formats_the_text_selected() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(demo_app()?);
+    // «Una interfaz limpia, …»: select «interfaz».
+    let paragraph = harness.state().blocks[1].id.clone();
+    harness.state_mut().pending_focus = Some((paragraph.clone(), 12));
+    harness.state_mut().pending_anchor = Some((paragraph.clone(), 4));
+    harness.run();
+    egui::Popup::open_id(&harness.ctx, super::blocks::handle_menu_id(&paragraph));
+    harness.run();
+    harness.get_by_label_contains("Formato").click();
+    harness.run();
+    assert_accessible(&harness, "format menu");
+    harness.get_by_label_contains("Negrita").click();
+    harness.run();
+    let block = &harness.state().blocks[1];
+    let bold: Vec<String> = block
+        .marks
+        .iter()
+        .map(|m| {
+            block
+                .content
+                .chars()
+                .skip(m.start)
+                .take(m.end - m.start)
+                .collect()
+        })
+        .collect();
+    assert_eq!(bold, ["interfaz"]);
     Ok(())
 }

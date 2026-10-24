@@ -1,6 +1,7 @@
 //! Command palette (H5.8): the actions the search window offers and how a
 //! query picks them. Pure: the app decides what each one does.
 use crate::editor::fold;
+use crate::marks::Format;
 use crate::settings::{Settings, ThemeMode, zoom_step};
 
 /// An action that can be run from the search window.
@@ -17,6 +18,9 @@ pub enum Command {
     FindInPage,
     /// The find bar with «Reemplazar» (H11.7).
     ReplaceInPage,
+    /// Bold, italic… on the text selected in the last block edited, or on
+    /// the whole block (ADR 0015).
+    Format(Format),
     AddFavorite,
     RemoveFavorite,
     ExportPage,
@@ -70,6 +74,9 @@ pub struct PaletteContext {
     pub export_running: bool,
     /// A database is being written as CSV (H11.5).
     pub csv_export_running: bool,
+    /// A block of the open page that takes formatting was the last one
+    /// edited (ADR 0015).
+    pub format_block: bool,
     pub settings: Settings,
 }
 
@@ -78,7 +85,7 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 32] = [
+    pub const ALL: [Command; 36] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
@@ -88,6 +95,10 @@ impl Command {
         Command::DuplicatePage,
         Command::FindInPage,
         Command::ReplaceInPage,
+        Command::Format(Format::Bold),
+        Command::Format(Format::Italic),
+        Command::Format(Format::Code),
+        Command::Format(Format::Strike),
         Command::AddFavorite,
         Command::RemoveFavorite,
         Command::ExportPage,
@@ -123,6 +134,7 @@ impl Command {
             Command::DuplicatePage => "Duplicar la página",
             Command::FindInPage => "Buscar en la página",
             Command::ReplaceInPage => "Buscar y reemplazar en la página",
+            Command::Format(format) => format.label(),
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
@@ -161,6 +173,10 @@ impl Command {
             Command::DuplicatePage => &["copiar", "clonar", "copia", "duplicate", "copy"],
             Command::FindInPage => &["encontrar", "texto", "palabra", "find"],
             Command::ReplaceInPage => &["cambiar", "sustituir", "texto", "palabra", "replace"],
+            Command::Format(Format::Bold) => &["formato", "fuerte", "resaltar", "bold"],
+            Command::Format(Format::Italic) => &["formato", "italica", "inclinada", "italic"],
+            Command::Format(Format::Code) => &["formato", "monoespaciada", "codigo", "code"],
+            Command::Format(Format::Strike) => &["formato", "tachar", "rayado", "strikethrough"],
             Command::AddFavorite => &["estrella", "marcar", "favorite", "star"],
             Command::RemoveFavorite => &["estrella", "desmarcar", "favorite", "star"],
             Command::ExportPage => &["md", "descargar", "guardar", "export"],
@@ -222,6 +238,7 @@ impl Command {
             | Command::FindInPage
             | Command::ReplaceInPage => cx.page_open && !cx.database_open,
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
+            Command::Format(_) => cx.page_open && !cx.database_open && cx.format_block,
             Command::AddFavorite => cx.page_open && !cx.favorite && !cx.template_open,
             // A template makes pages with «Nueva página desde plantilla».
             Command::DuplicatePage => cx.page_open && !cx.template_open,
@@ -319,8 +336,31 @@ mod tests {
             backup_running: false,
             export_running: false,
             csv_export_running: false,
+            format_block: false,
             settings: Settings::default(),
         }
+    }
+
+    #[test]
+    fn formatting_is_offered_after_editing_a_text_block() {
+        assert!(!Command::Format(Format::Bold).available(&cx()));
+        let editing = PaletteContext {
+            format_block: true,
+            ..cx()
+        };
+        assert_eq!(
+            matching_commands("negrita", &editing),
+            [Command::Format(Format::Bold)]
+        );
+        assert_eq!(
+            matching_commands("tachar", &editing),
+            [Command::Format(Format::Strike)]
+        );
+        assert!(matching_commands("formato", &editing).len() >= 4);
+        assert!(!Command::Format(Format::Bold).available(&PaletteContext {
+            database_open: true,
+            ..editing
+        }));
     }
 
     #[test]

@@ -116,6 +116,12 @@ impl BlockKind {
         }
     }
 
+    /// Whether the block's text can have inline formatting (ADR 0015):
+    /// not code, files or links to pages.
+    pub fn takes_marks(self) -> bool {
+        self.is_text() && self != BlockKind::Code
+    }
+
     pub fn is_heading(self) -> bool {
         matches!(
             self,
@@ -176,6 +182,9 @@ pub struct Block {
     /// The page a [`BlockKind::PageLink`] block points at (ADR 0008);
     /// `None` for every other kind (and for a link whose page is gone).
     pub link: Option<String>,
+    /// Inline formatting over `content` (ADR 0015), in normal form; empty
+    /// for kinds that do not take it ([`BlockKind::takes_marks`]).
+    pub marks: Vec<crate::marks::Mark>,
 }
 
 impl Block {

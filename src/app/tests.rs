@@ -19,6 +19,7 @@ fn block(id: &str) -> Block {
         indent: 0,
         attachment: None,
         link: None,
+        marks: Vec::new(),
     }
 }
 
@@ -1509,6 +1510,7 @@ fn sidebar_width_is_stable_across_frames() -> anyhow::Result<()> {
                 indent: 0,
                 attachment: None,
                 link: None,
+                marks: Vec::new(),
             });
             egui::Popup::open_id(&ctx, super::blocks::handle_menu_id("b"));
         }
@@ -4600,5 +4602,383 @@ fn check_updates_only_asks_the_system_to_open_the_releases_page() -> anyhow::Res
         })
         .collect();
     assert_eq!(urls, ["https://github.com/enshetinin/silex/releases"]);
+    Ok(())
+}
+
+// ---- Inline formatting (H12.1b, ADR 0015) ----
+
+/// One paragraph with `text` and `marks`, saved, focused at `char`.
+fn formatted_app(
+    text: &str,
+    marks: Vec<silex_desktop::marks::Mark>,
+    char: usize,
+) -> anyhow::Result<(SilexApp, egui::Context)> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, text)], 0, char)?;
+    app.blocks[0].marks = marks;
+    let page = app.selected.clone().expect("page");
+    let title = app.title.clone();
+    app.db.save_document(&page, &title, &app.blocks)?;
+    app.reset_history();
+    app_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx))
+}
+
+fn bold(start: usize, end: usize) -> silex_desktop::marks::Mark {
+    silex_desktop::marks::Mark::new(start, end, silex_desktop::marks::MarkKind::Bold)
+}
+
+/// The characters each mark of block `index` covers.
+fn marked_words(app: &SilexApp, index: usize) -> Vec<String> {
+    let block = &app.blocks[index];
+    block
+        .marks
+        .iter()
+        .map(|m| {
+            block
+                .content
+                .chars()
+                .skip(m.start)
+                .take(m.end - m.start)
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn typing_inside_and_at_the_end_of_bold_continues_it() -> anyhow::Result<()> {
+    // «hola mundo», «mundo» bold, caret inside it.
+    let (mut app, ctx) = formatted_app("hola mundo", vec![bold(5, 10)], 7)?;
+    app_frame(&mut app, &ctx, type_text("XY"));
+    assert_eq!(app.blocks[0].content, "hola muXYndo");
+    assert_eq!(marked_words(&app, 0), ["muXYndo"]);
+    // At the end: still bold.
+    app_frame(&mut app, &ctx, vec![key(Key::End, M::NONE)]);
+    app_frame(&mut app, &ctx, type_text("!"));
+    assert_eq!(marked_words(&app, 0), ["muXYndo!"]);
+    // At the start of the line: not bold, and the bold word moves.
+    app_frame(&mut app, &ctx, vec![key(Key::Home, M::NONE)]);
+    app_frame(&mut app, &ctx, type_text("¡"));
+    assert_eq!(app.blocks[0].content, "¡hola muXYndo!");
+    assert_eq!(marked_words(&app, 0), ["muXYndo!"]);
+    // Deleting inside the bold word shrinks it.
+    app_frame(&mut app, &ctx, vec![key(Key::End, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    assert_eq!(marked_words(&app, 0), ["muXYndo"]);
+
+    // Saved with the text.
+    app.save_now()?;
+    let page = app.selected.clone().expect("page");
+    let stored = app.db.list_blocks(&page)?;
+    assert_eq!(stored[0].marks, app.blocks[0].marks);
+    Ok(())
+}
+
+#[test]
+fn enter_and_backspace_split_and_join_the_formatting() -> anyhow::Result<()> {
+    // Caret between «mun» and «do».
+    let (mut app, ctx) = formatted_app("hola mundo", vec![bold(5, 10)], 8)?;
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(
+        contents(&app),
+        [(Par, 0, "hola mun".into()), (Par, 0, "do".into())]
+    );
+    assert_eq!(marked_words(&app, 0), ["mun"]);
+    assert_eq!(marked_words(&app, 1), ["do"]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(1));
+    // Backspace at the start joins them back into one bold word.
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    assert_eq!(contents(&app), [(Par, 0, "hola mundo".into())]);
+    assert_eq!(app.blocks[0].marks, vec![bold(5, 10)]);
+    Ok(())
+}
+
+#[test]
+fn undo_brings_the_formatting_back() -> anyhow::Result<()> {
+    let (mut app, ctx) = formatted_app("hola mundo", vec![bold(5, 10)], 10)?;
+    // Delete the whole bold word, then undo.
+    for _ in 0..5 {
+        app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    }
+    assert_eq!(app.blocks[0].content, "hola ");
+    assert!(app.blocks[0].marks.is_empty());
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(app.blocks[0].content, "hola mundo");
+    assert_eq!(app.blocks[0].marks, vec![bold(5, 10)]);
+    Ok(())
+}
+
+#[test]
+fn turning_a_block_into_code_drops_its_formatting_undoably() -> anyhow::Result<()> {
+    let (mut app, ctx) = formatted_app("hola mundo", vec![bold(5, 10)], 0)?;
+    let id = app.blocks[0].id.clone();
+    app.block_action(BlockAction::Convert(Cod), &id);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks[0].kind, Cod);
+    assert!(app.blocks[0].marks.is_empty());
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(app.blocks[0].kind, Par);
+    assert_eq!(app.blocks[0].marks, vec![bold(5, 10)]);
+    Ok(())
+}
+
+#[test]
+fn ime_text_at_the_end_of_bold_stays_bold() -> anyhow::Result<()> {
+    let (mut app, ctx) = formatted_app("negrita", vec![bold(0, 7)], 7)?;
+    let preedit = |text: &str| {
+        egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: text.into(),
+            active_range_chars: None,
+        })
+    };
+    app_frame(&mut app, &ctx, vec![preedit("ka")]);
+    app_frame(&mut app, &ctx, vec![preedit("kan")]);
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Ime(egui::ImeEvent::Commit("漢".into()))],
+    );
+    assert_eq!(app.blocks[0].content, "negrita漢");
+    assert_eq!(app.blocks[0].marks, vec![bold(0, 8)]);
+    Ok(())
+}
+
+#[test]
+fn formatted_text_is_painted_in_runs_over_the_same_text() -> anyhow::Result<()> {
+    use silex_desktop::marks::{Mark, MarkKind};
+    let text = "negrita, cursiva, código y enlace";
+    let marks = vec![
+        bold(0, 7),
+        Mark::new(9, 16, MarkKind::Italic),
+        Mark::new(18, 24, MarkKind::Code),
+        Mark::new(27, 33, MarkKind::Link("https://ejemplo.com".into())),
+    ];
+    let (mut app, ctx) = formatted_app(text, marks, 0)?;
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.update_ui(ui));
+    output.textures_delta.clear();
+    fn find(shape: &egui::Shape, text: &str) -> Option<std::sync::Arc<egui::Galley>> {
+        match shape {
+            egui::Shape::Text(t) if t.galley.text() == text => Some(t.galley.clone()),
+            egui::Shape::Vec(inner) => inner.iter().find_map(|s| find(s, text)),
+            _ => None,
+        }
+    }
+    let galley = output
+        .shapes
+        .iter()
+        .find_map(|c| find(&c.shape, text))
+        .expect("the block's text is painted");
+    let sections = &galley.job.sections;
+    assert!(sections.len() >= 7, "{} runs", sections.len());
+    let format_at = |byte: usize| {
+        &sections
+            .iter()
+            .find(|s| (s.byte_range.start.0..s.byte_range.end.0).contains(&byte))
+            .expect("covered")
+            .format
+    };
+    let p = theme::current(&ctx);
+    assert_eq!(
+        format_at(0).font_id.family,
+        egui::FontFamily::Name(theme::SEMIBOLD.into())
+    );
+    assert!(format_at(10).italics);
+    assert_eq!(
+        format_at(text.find("código").expect("word")).background,
+        p.code_bg
+    );
+    let link = format_at(text.find("enlace").expect("word"));
+    assert_eq!(link.color, p.accent_strong);
+    assert_eq!(link.underline.color, p.accent_strong);
+    assert_eq!(format_at(text.find(" y ").expect("word")).color, p.text);
+    Ok(())
+}
+
+#[test]
+fn find_and_replace_keeps_the_formatting_on_the_replaced_word() {
+    use silex_desktop::editor::{find_in_blocks, replace_matches};
+    let mut blocks = vec![Block {
+        content: "pan y pan".into(),
+        marks: vec![bold(6, 9)],
+        ..block("a")
+    }];
+    let matches = find_in_blocks(&blocks, "pan");
+    assert_eq!(replace_matches(&mut blocks, &matches, "centeno"), 2);
+    assert_eq!(blocks[0].content, "centeno y centeno");
+    assert_eq!(blocks[0].marks, vec![bold(10, 17)]);
+}
+
+// ---- Formatting shortcuts, menu and palette (H12.1c, ADR 0015) ----
+
+/// Selects characters `anchor..cursor` of block `index`.
+fn select_text(
+    app: &mut SilexApp,
+    ctx: &egui::Context,
+    index: usize,
+    anchor: usize,
+    cursor: usize,
+) {
+    let id = app.blocks[index].id.clone();
+    app.pending_focus = Some((id.clone(), cursor));
+    app.pending_anchor = Some((id, anchor));
+    app_frame(app, ctx, vec![]);
+    app_frame(app, ctx, vec![]);
+}
+
+fn italic(start: usize, end: usize) -> silex_desktop::marks::Mark {
+    silex_desktop::marks::Mark::new(start, end, silex_desktop::marks::MarkKind::Italic)
+}
+
+#[test]
+fn shortcuts_format_the_selection_and_keep_it() -> anyhow::Result<()> {
+    use silex_desktop::marks::{Mark, MarkKind};
+    let (mut app, ctx) = editor_app(&[(Par, 0, "pan de centeno")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 0, 3);
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    assert_eq!(marked_words(&app, 0), ["pan"]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        block_selection(&app, &ctx, 0),
+        Some((0, 3)),
+        "still selected"
+    );
+    // Again: the whole selection is bold, so it goes.
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    assert!(app.blocks[0].marks.is_empty());
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+
+    // A selection made backwards; the other shortcuts.
+    select_text(&mut app, &ctx, 0, 14, 7);
+    app_frame(&mut app, &ctx, vec![key(Key::I, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![key(Key::E, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![key(Key::X, M::COMMAND | M::SHIFT)]);
+    assert_eq!(app.blocks[0].content, "pan de centeno", "no text was cut");
+    assert_eq!(
+        app.blocks[0].marks,
+        vec![
+            bold(0, 3),
+            italic(7, 14),
+            Mark::new(7, 14, MarkKind::Code),
+            Mark::new(7, 14, MarkKind::Strike),
+        ]
+    );
+    // Each change is one undo step.
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(app.blocks[0].marks.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn with_nothing_selected_the_shortcut_formats_what_is_typed_next() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "Hoy ")], 0, 4)?;
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    assert!(app.blocks[0].marks.is_empty(), "nothing to format yet");
+    app_frame(&mut app, &ctx, type_text("pan"));
+    app_frame(&mut app, &ctx, type_text(" caliente"));
+    assert_eq!(marked_words(&app, 0), ["pan caliente"]);
+    // Cmd+B again at the end of bold: what follows is plain.
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    app_frame(&mut app, &ctx, type_text(" y café"));
+    assert_eq!(app.blocks[0].content, "Hoy pan caliente y café");
+    assert_eq!(marked_words(&app, 0), ["pan caliente"]);
+
+    // Moving the cursor forgets it.
+    app_frame(&mut app, &ctx, vec![key(Key::I, M::COMMAND)]);
+    assert!(app.typing_format.is_some());
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowLeft, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(app.typing_format.is_none());
+    app_frame(&mut app, &ctx, type_text("!"));
+    assert!(
+        !app.blocks[0]
+            .marks
+            .iter()
+            .any(|m| m.kind == silex_desktop::marks::MarkKind::Italic)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_typing_format_survives_an_ime_composition() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "Kanji: ")], 0, 7)?;
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    let preedit = |text: &str| {
+        egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: text.into(),
+            active_range_chars: None,
+        })
+    };
+    app_frame(&mut app, &ctx, vec![preedit("ka")]);
+    app_frame(&mut app, &ctx, vec![preedit("kan")]);
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![egui::Event::Ime(egui::ImeEvent::Commit("漢".into()))],
+    );
+    app_frame(&mut app, &ctx, type_text("字"));
+    assert_eq!(app.blocks[0].content, "Kanji: 漢字");
+    assert_eq!(marked_words(&app, 0), ["漢字"]);
+    Ok(())
+}
+
+#[test]
+fn a_code_block_says_it_takes_no_formatting() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Cod, 0, "let x = 1;")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 0, 3);
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    assert!(app.blocks[0].marks.is_empty());
+    assert!(
+        app.notice.as_deref().is_some_and(|n| n.contains("código")),
+        "{:?}",
+        app.notice
+    );
+    Ok(())
+}
+
+#[test]
+fn the_block_menu_formats_the_selection_or_the_whole_block() -> anyhow::Result<()> {
+    use silex_desktop::marks::Format;
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno dos"), (Bul, 0, "tres")], 0, 0)?;
+    // No selection: the whole block.
+    let second = app.blocks[1].id.clone();
+    app.block_action(BlockAction::Format(Format::Bold), &second);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(marked_words(&app, 1), ["tres"]);
+    // With a selection: just that.
+    select_text(&mut app, &ctx, 0, 4, 7);
+    // Opening the menu takes the focus away (and egui drops the selection).
+    let field = app.block_field_id(&app.blocks[0].id);
+    ctx.memory_mut(|m| m.surrender_focus(field));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    let first = app.blocks[0].id.clone();
+    app.block_action(BlockAction::Format(Format::Italic), &first);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks[0].marks, vec![italic(4, 7)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(0), "focus back on the text");
+    assert_eq!(block_selection(&app, &ctx, 0), Some((4, 7)));
+    Ok(())
+}
+
+#[test]
+fn the_palette_formats_the_last_block_edited() -> anyhow::Result<()> {
+    use silex_desktop::marks::Format;
+    use silex_desktop::palette::Command;
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno dos")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 0, 3);
+    // Cmd+K takes the focus away, and egui drops the selection of a field
+    // without focus: the command still formats what was selected.
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    app_frame(&mut app, &ctx, type_text("negr"));
+    assert_eq!(block_selection(&app, &ctx, 0), Some((3, 3)));
+    assert!(app.search.is_some());
+    assert!(Command::Format(Format::Bold).available(&app.palette_context()));
+    app.search = None;
+    app.run_command(&ctx, Command::Format(Format::Bold))?;
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(marked_words(&app, 0), ["uno"]);
+    assert_eq!(block_selection(&app, &ctx, 0), Some((0, 3)));
     Ok(())
 }
