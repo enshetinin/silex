@@ -6332,3 +6332,294 @@ fn todays_note_comes_from_the_journal_template() -> anyhow::Result<()> {
     assert!(!app.blocks[0].content.contains("{{fecha}}"));
     Ok(())
 }
+
+// ---- H13.1: rows and cards in their manual order ----
+
+/// A table with rows A, B, C and D, open in a window of the default size.
+fn rows_app() -> anyhow::Result<(SilexApp, egui::Context, String, Vec<String>)> {
+    let (mut app, ctx, base) = database_app()?;
+    let rows = ["A", "B", "C", "D"]
+        .into_iter()
+        .map(|title| app.db.create_row(&base, title))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    app.reload_pages()?;
+    app.open_page(base.clone())?;
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, base, rows))
+}
+
+fn stored_titles(app: &SilexApp, base: &str) -> anyhow::Result<Vec<String>> {
+    Ok(app
+        .db
+        .database_rows(base)?
+        .into_iter()
+        .map(|p| p.title)
+        .collect())
+}
+
+fn row_rect(ctx: &egui::Context, row: &str) -> egui::Rect {
+    ctx.read_response(database::row_name_id(row))
+        .map(|r| r.rect)
+        .unwrap_or_else(|| panic!("row {row} drawn"))
+}
+
+/// Points at a row so its handle shows, and returns where the handle is.
+fn row_handle_at(app: &mut SilexApp, ctx: &egui::Context, row: &str) -> egui::Pos2 {
+    // Rects are read one frame late.
+    sized_frame(app, ctx, vec![]);
+    let name = row_rect(ctx, row);
+    sized_frame(app, ctx, vec![egui::Event::PointerMoved(name.center())]);
+    sized_frame(app, ctx, vec![]);
+    ctx.read_response(egui::Id::unique(("silex-row-handle", row)))
+        .map(|r| r.rect.center())
+        .unwrap_or_else(|| panic!("handle of {row} drawn"))
+}
+
+#[test]
+fn a_row_dragged_by_its_handle_moves_and_one_undo_puts_it_back() -> anyhow::Result<()> {
+    let (mut app, ctx, base, rows) = rows_app()?;
+    let handle = row_handle_at(&mut app, &ctx, &rows[0]);
+    // In the gutter, left of the row.
+    assert!(handle.x < row_rect(&ctx, &rows[0]).left());
+    // A, let go just above the line between C and D.
+    let to = egui::pos2(
+        row_rect(&ctx, &rows[2]).center().x,
+        row_rect(&ctx, &rows[2]).bottom() - 3.0,
+    );
+    drag(&mut app, &ctx, handle, to);
+    assert_eq!(shown_titles(&app), ["B", "C", "A", "D"]);
+    assert_eq!(stored_titles(&app, &base)?, ["B", "C", "A", "D"]);
+    // One step of Cmd+Z, and back again.
+    app.undo_table();
+    assert_eq!(shown_titles(&app), ["A", "B", "C", "D"]);
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    app.redo_table();
+    assert_eq!(stored_titles(&app, &base)?, ["B", "C", "A", "D"]);
+    // To the top: above the first row.
+    sized_frame(&mut app, &ctx, vec![]);
+    let handle = row_handle_at(&mut app, &ctx, &rows[3]);
+    let to = row_rect(&ctx, &rows[1]).left_top() + egui::vec2(20.0, 2.0);
+    drag(&mut app, &ctx, handle, to);
+    assert_eq!(stored_titles(&app, &base)?, ["D", "B", "C", "A"]);
+    Ok(())
+}
+
+#[test]
+fn esc_or_letting_go_in_place_moves_nothing() -> anyhow::Result<()> {
+    let (mut app, ctx, base, rows) = rows_app()?;
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let handle = row_handle_at(&mut app, &ctx, &rows[0]);
+    let to = row_rect(&ctx, &rows[3]).center();
+    sized_frame(&mut app, &ctx, vec![button(handle, true)]);
+    sized_frame(
+        &mut app,
+        &ctx,
+        vec![egui::Event::PointerMoved(handle + egui::vec2(0.0, 24.0))],
+    );
+    sized_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(to)]);
+    assert!(egui::DragAndDrop::has_payload_of_type::<RowDrag>(&ctx));
+    sized_frame(
+        &mut app,
+        &ctx,
+        vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+    );
+    sized_frame(&mut app, &ctx, vec![button(to, false)]);
+    sized_frame(&mut app, &ctx, vec![]);
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    // Let go on its own place: nothing to undo.
+    let handle = row_handle_at(&mut app, &ctx, &rows[1]);
+    drag(&mut app, &ctx, handle, row_rect(&ctx, &rows[1]).center());
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    assert!(app.database.as_ref().is_some_and(|d| !d.history.can_undo()));
+    Ok(())
+}
+
+#[test]
+fn chosen_rows_are_dragged_together() -> anyhow::Result<()> {
+    let (mut app, ctx, base, rows) = rows_app()?;
+    if let Some(state) = app.database.as_mut() {
+        state.selection.extend([rows[0].clone(), rows[2].clone()]);
+    }
+    sized_frame(&mut app, &ctx, vec![]);
+    let handle = row_handle_at(&mut app, &ctx, &rows[2]);
+    let to = row_rect(&ctx, &rows[3]).center() + egui::vec2(0.0, 15.0);
+    drag(&mut app, &ctx, handle, to);
+    assert_eq!(stored_titles(&app, &base)?, ["B", "D", "A", "C"]);
+    // They stay chosen; one undo puts both back.
+    assert_eq!(app.database.as_ref().map(|d| d.selection.len()), Some(2));
+    app.undo_table();
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    Ok(())
+}
+
+#[test]
+fn rows_hidden_by_a_filter_keep_their_place() -> anyhow::Result<()> {
+    use silex_desktop::view::{Filter, FilterOp, NAME};
+    let (mut app, ctx, base, rows) = rows_app()?;
+    // B is hidden.
+    change_view(&mut app, |c| {
+        c.filters.push(Filter {
+            property: NAME.into(),
+            op: FilterOp::NotContains,
+            value: "B".into(),
+        });
+    });
+    sized_frame(&mut app, &ctx, vec![]);
+    assert_eq!(shown_titles(&app), ["A", "C", "D"]);
+    let handle = row_handle_at(&mut app, &ctx, &rows[3]);
+    let to = row_rect(&ctx, &rows[2]).left_top() + egui::vec2(20.0, 2.0);
+    drag(&mut app, &ctx, handle, to);
+    assert_eq!(shown_titles(&app), ["A", "D", "C"]);
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "D", "C"]);
+    Ok(())
+}
+
+#[test]
+fn a_sorted_view_says_why_rows_stay() -> anyhow::Result<()> {
+    use silex_desktop::view::{Direction, NAME, Sort};
+    let (mut app, ctx, base, rows) = rows_app()?;
+    change_view(&mut app, |c| {
+        c.sorts.push(Sort {
+            property: NAME.into(),
+            direction: Direction::Descending,
+        });
+    });
+    sized_frame(&mut app, &ctx, vec![]);
+    assert_eq!(shown_titles(&app), ["D", "C", "B", "A"]);
+    // The handle cannot be dragged; a click explains.
+    let handle = row_handle_at(&mut app, &ctx, &rows[0]);
+    drag(&mut app, &ctx, handle, row_rect(&ctx, &rows[3]).center());
+    assert!(!egui::DragAndDrop::has_any_payload(&ctx));
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    let handle = row_handle_at(&mut app, &ctx, &rows[0]);
+    let button = |pressed| egui::Event::PointerButton {
+        pos: handle,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    sized_frame(&mut app, &ctx, vec![button(true)]);
+    sized_frame(&mut app, &ctx, vec![button(false)]);
+    sized_frame(&mut app, &ctx, vec![]);
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(notice.contains("ordenada por «Nombre»"), "{notice}");
+    // «Subir» in the row's menu says the same.
+    app.notice = None;
+    app.apply_table_action(
+        &base,
+        TableAction::Row(RowAction::Reorder(rows[1].clone(), Shift::Up)),
+    )?;
+    assert!(app.notice.is_some());
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    Ok(())
+}
+
+#[test]
+fn up_and_down_in_a_row_menu_follow_the_view_and_undo() -> anyhow::Result<()> {
+    use silex_desktop::view::{Filter, FilterOp, NAME};
+    let (mut app, _ctx, base, rows) = rows_app()?;
+    app.apply_table_action(
+        &base,
+        TableAction::Row(RowAction::Reorder(rows[2].clone(), Shift::Up)),
+    )?;
+    assert_eq!(shown_titles(&app), ["A", "C", "B", "D"]);
+    // At the edge, nothing.
+    app.apply_table_action(
+        &base,
+        TableAction::Row(RowAction::Reorder(rows[3].clone(), Shift::Down)),
+    )?;
+    assert_eq!(stored_titles(&app, &base)?, ["A", "C", "B", "D"]);
+    // With B hidden, «Bajar» on C passes D, the next one on show.
+    change_view(&mut app, |c| {
+        c.filters.push(Filter {
+            property: NAME.into(),
+            op: FilterOp::NotContains,
+            value: "B".into(),
+        });
+    });
+    app.apply_table_action(
+        &base,
+        TableAction::Row(RowAction::Reorder(rows[2].clone(), Shift::Down)),
+    )?;
+    assert_eq!(shown_titles(&app), ["A", "D", "C"]);
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "D", "C"]);
+    app.undo_table();
+    assert_eq!(stored_titles(&app, &base)?, ["A", "C", "B", "D"]);
+    app.undo_table();
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    Ok(())
+}
+
+#[test]
+fn a_card_dropped_within_its_column_changes_place() -> anyhow::Result<()> {
+    let (mut app, ctx, rows, [estado, leyendo, _]) = board_app()?;
+    let base = app.selected.clone().unwrap_or_default();
+    // Bestiario, also Leyendo: under Rayuela.
+    let bestiario = app.db.create_row(&base, "Bestiario")?;
+    app.db.set_value(
+        &bestiario,
+        &estado,
+        Some(&CellValue::Select(leyendo.clone())),
+    )?;
+    app.open_page(base.clone())?;
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    let (rayuela, card) = (card_rect(&ctx, &rows[0]), card_rect(&ctx, &bestiario));
+    assert!(card.top() > rayuela.bottom());
+    // Above Rayuela.
+    drag(
+        &mut app,
+        &ctx,
+        card.center(),
+        rayuela.center_top() + egui::vec2(0.0, 4.0),
+    );
+    assert_eq!(
+        stored_titles(&app, &base)?,
+        ["Bestiario", "Rayuela", "Ficciones", "Aleph"]
+    );
+    // Still Leyendo.
+    assert_eq!(
+        stored(&app, &bestiario, &estado)?,
+        Some(CellValue::Select(leyendo.clone()))
+    );
+    sized_frame(&mut app, &ctx, vec![]);
+    assert!(card_rect(&ctx, &bestiario).top() < card_rect(&ctx, &rows[0]).top());
+    app.undo_table();
+    assert_eq!(
+        stored_titles(&app, &base)?,
+        ["Rayuela", "Ficciones", "Aleph", "Bestiario"]
+    );
+    // Sorted by name: it stays, and the notice says why.
+    change_view(&mut app, |c| {
+        c.sorts.push(silex_desktop::view::Sort {
+            property: silex_desktop::view::NAME.into(),
+            direction: silex_desktop::view::Direction::Descending,
+        });
+    });
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    let (rayuela, card) = (card_rect(&ctx, &rows[0]), card_rect(&ctx, &bestiario));
+    assert!(card.top() > rayuela.bottom(), "R before B, descending");
+    drag(
+        &mut app,
+        &ctx,
+        card.center(),
+        rayuela.center_top() + egui::vec2(0.0, 4.0),
+    );
+    assert_eq!(
+        stored_titles(&app, &base)?,
+        ["Rayuela", "Ficciones", "Aleph", "Bestiario"]
+    );
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("ordenada por"))
+    );
+    Ok(())
+}

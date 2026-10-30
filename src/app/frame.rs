@@ -82,9 +82,14 @@ impl SilexApp {
                         .show(|ui| self.settings_menu(ui));
                     ui.add_space(theme::space::SM);
                     self.status_bar(ui);
+                    if ui.button("Grafo").clicked() {
+                        let result = self.open_graph(ui.ctx());
+                        self.report(result);
+                    }
                 });
             },
         );
+        self.graph_window(ui.ctx());
         if let Some(id) = open {
             let result = self.open_page(id);
             self.report(result);

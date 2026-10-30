@@ -26,6 +26,7 @@ mod duplicate;
 mod files;
 mod find;
 mod frame;
+mod graph;
 mod icon_picker;
 pub mod icons;
 mod inline;
@@ -38,6 +39,7 @@ mod page_history;
 mod palette;
 mod privacy;
 mod read_only;
+mod row_order;
 mod row_page;
 mod row_selection;
 mod search;
@@ -60,9 +62,9 @@ mod web_links;
 pub use self::startup::StartupError;
 use self::{
     blocks::*, cells::*, database::*, date_picker::*, dialogs::*, duplicate::*, files::*, find::*,
-    links::*, page_history::*, privacy::*, read_only::*, row_page::*, row_selection::*, search::*,
-    side_panel::*, sidebar::*, space::*, tab_bar::*, table_undo::*, templates::*, view_menus::*,
-    view_tabs::*,
+    links::*, page_history::*, privacy::*, read_only::*, row_order::*, row_page::*,
+    row_selection::*, search::*, side_panel::*, sidebar::*, space::*, tab_bar::*, table_undo::*,
+    templates::*, view_menus::*, view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop

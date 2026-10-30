@@ -1,7 +1,9 @@
 //! A database's board view (H6.5, ADR 0006): the rows as cards, in one
 //! column per option of a select property, after a column for the rows
 //! without one. Dragging a card to another column sets that value (one
-//! change in the table's undo); the card's context menu (or its «⋯»,
+//! change in the table's undo); within its own column, a line shows where
+//! it goes and it moves there (H13.1, only without a sort: `row_order.rs`).
+//! The card's context menu (or its «⋯»,
 //! H11.1) does the same with «Mover a…», and a click (or Intro) opens the
 //! row as a page. Supr with a card focused sends it to the trash. The view's
 //! filters, sort and hidden properties apply as in the table. A column's
@@ -99,8 +101,11 @@ struct Board<'a> {
     dirty: &'a mut HashSet<String>,
     /// A card whose name takes the keyboard focus (a new card, «Renombrar»).
     focus: &'a mut Option<(String, usize)>,
-    /// A card is being dragged.
-    dragging: bool,
+    /// The row of the card being dragged.
+    dragging: Option<String>,
+    /// The view is sorted: then cards are not moved by hand within a
+    /// column (H13.1).
+    sorted: bool,
     /// A column's new name, typed in its menu.
     rename: &'a mut Option<(String, String)>,
     /// The column waiting for «Borrar» to be confirmed.
@@ -153,6 +158,7 @@ impl SilexApp {
         let Some(config) = views.get(*view).map(|v| &v.config) else {
             return;
         };
+        let sorted = config.is_sorted(properties);
         let Some(group) = board_property(properties, config) else {
             no_group_yet(ui, actions);
             return;
@@ -172,7 +178,8 @@ impl SilexApp {
             shown,
             dirty,
             focus,
-            dragging: egui::DragAndDrop::has_payload_of_type::<CardDrag>(ui.ctx()),
+            dragging: egui::DragAndDrop::payload::<CardDrag>(ui.ctx()).map(|d| d.0.clone()),
+            sorted,
             rename: group_rename,
             delete: option_delete,
             handle_focus,
@@ -195,7 +202,7 @@ impl SilexApp {
                     board.new_group(ui, new_property);
                 });
             });
-        if board.dragging {
+        if board.dragging.is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
         // A new name is saved when its menu closes; Escape drops it.
@@ -283,20 +290,45 @@ impl Board<'_> {
                 p.text_faint,
             );
 
-            for &index in &group.rows {
-                self.card(ui, index, option);
-            }
+            let cards: Vec<egui::Rect> = group
+                .rows
+                .iter()
+                .map(|&index| self.card(ui, index, option))
+                .collect();
             let new = new_card_button(ui, &name);
             if new.clicked() {
                 self.actions
                     .push(TableAction::AddCard(group.option.clone()));
             }
-            (background, ui.min_rect())
+            (background, ui.min_rect(), cards)
         });
-        let (background, rect) = inner.inner;
+        let (background, rect, cards) = inner.inner;
 
-        // A card held over the column lights it up; let go, it moves here.
-        let over = self.dragging && ui.rect_contains_pointer(rect);
+        let over = self.dragging.is_some() && ui.rect_contains_pointer(rect);
+        let ids: Vec<String> = group
+            .rows
+            .iter()
+            .filter_map(|&i| self.rows.get(i).map(|r| r.id.clone()))
+            .collect();
+        let own = self
+            .dragging
+            .as_ref()
+            .filter(|row| ids.contains(row))
+            .cloned();
+        if let (true, Some(row)) = (over, own) {
+            // Within its own column: the line where it would go (H13.1).
+            self.drop_in_column(ui, &row, &ids, &cards);
+            ui.painter().set(
+                background,
+                egui::Shape::rect_filled(
+                    rect,
+                    egui::CornerRadius::same(theme::radius::LG),
+                    p.subtle,
+                ),
+            );
+            return;
+        }
+        // A card held over another column lights it up; let go, it moves here.
         let fill = if over { p.accent_soft } else { p.subtle };
         ui.painter().set(
             background,
@@ -307,6 +339,58 @@ impl Board<'_> {
             && let Some(drag) = egui::DragAndDrop::take_payload::<CardDrag>(ui.ctx())
         {
             self.move_card(&drag.0, group.option.clone());
+        }
+    }
+
+    /// A card held over its own column (`ids`, its cards' rows, drawn at
+    /// `cards`): the line where it would go, and the move when let go.
+    /// In a sorted view, letting go elsewhere in the column says why it
+    /// stays.
+    fn drop_in_column(&mut self, ui: &egui::Ui, row: &str, ids: &[String], cards: &[egui::Rect]) {
+        let p = theme::current(ui.ctx());
+        let Some(pointer) = ui.ctx().pointer_interact_pos() else {
+            return;
+        };
+        let Some(from) = ids.iter().position(|id| id == row) else {
+            return;
+        };
+        // Before the first card whose middle is below the pointer.
+        let gap = cards
+            .iter()
+            .position(|c| pointer.y < c.center().y)
+            .unwrap_or(cards.len());
+        let moves = gap != from && gap != from + 1;
+        let released = ui.input(|i| i.pointer.any_released());
+        if self.sorted {
+            if released && moves && egui::DragAndDrop::take_payload::<CardDrag>(ui.ctx()).is_some()
+            {
+                self.actions.push(TableAction::ExplainSorted);
+            }
+            return;
+        }
+        if !moves {
+            return;
+        }
+        let y = match (
+            gap.checked_sub(1).and_then(|i| cards.get(i)),
+            cards.get(gap),
+        ) {
+            (Some(above), Some(below)) => (above.bottom() + below.top()) / 2.0,
+            (Some(above), None) => above.bottom() + CARD_GAP / 2.0,
+            (None, Some(below)) => below.top() - CARD_GAP / 2.0,
+            (None, None) => return,
+        };
+        let Some(card) = cards.first() else {
+            return;
+        };
+        ui.painter()
+            .hline(card.x_range(), y, egui::Stroke::new(2.0, p.accent));
+        if released && egui::DragAndDrop::take_payload::<CardDrag>(ui.ctx()).is_some() {
+            self.actions.push(TableAction::DropRows {
+                moving: vec![row.to_owned()],
+                shown: ids.to_vec(),
+                gap,
+            });
         }
     }
 
@@ -456,10 +540,10 @@ impl Board<'_> {
 
     /// A card: its name and the values shown on cards. Out of sight, it
     /// only takes its room (unless it is held, or its name is wanted).
-    fn card(&mut self, ui: &mut egui::Ui, index: usize, option: Option<&str>) {
+    fn card(&mut self, ui: &mut egui::Ui, index: usize, option: Option<&str>) -> egui::Rect {
         let p = theme::current(ui.ctx());
         let Some(row) = self.rows.get(index) else {
-            return;
+            return egui::Rect::NOTHING;
         };
         let row_id = row.id.clone();
         let lines = card_lines(&row_id, &self.shown, self.values);
@@ -474,7 +558,7 @@ impl Board<'_> {
         let naming = wanted || ui.memory(|m| m.has_focus(name_id));
         let held = ui.ctx().is_being_dragged(id);
         if !ui.is_rect_visible(rect) && !wanted && !naming && !held {
-            return;
+            return rect;
         }
 
         let response = ui.interact(rect, id, egui::Sense::click_and_drag());
@@ -489,7 +573,7 @@ impl Board<'_> {
             egui::WidgetInfo::labeled(egui::Role::Button, true, label)
         });
         // Under the pointer, also when it is on the card's «⋯».
-        let pointed = !self.dragging && ui.rect_contains_pointer(rect);
+        let pointed = self.dragging.is_none() && ui.rect_contains_pointer(rect);
         let card = CardLook {
             title: (!naming).then_some((title.as_str(), untitled)),
             lines: &lines,
@@ -554,7 +638,7 @@ impl Board<'_> {
 
         // «⋯» at the top right, by the name: the same menu (H11.1).
         if naming || held {
-            return;
+            return rect;
         }
         let side = icons::BUTTON;
         let at = egui::Rect::from_min_size(
@@ -582,6 +666,7 @@ impl Board<'_> {
                     .push(TableAction::Row(RowAction::Trash(row_id.clone())));
             }
         }
+        rect
     }
 
     /// A card's menu: the other columns it can move to, then the usual

@@ -6,7 +6,8 @@
 //!
 //! Undoable: cell values, row names, adding a row (undone by sending it to
 //! the trash), sending a row to the trash, adding and deleting properties,
-//! and the actions on several rows at once (H11.2), each as one step.
+//! moving rows by hand (H13.1), and the actions on several rows at once
+//! (H11.2), each as one step.
 //! Not undoable here: renaming or moving properties, options and views.
 //!
 //! Rows sent to the trash from the table or the board (menu, «⋯», Supr,
@@ -44,6 +45,12 @@ pub(super) enum TableOp {
     AddRows(Vec<String>),
     /// A value put in several cells at once (H11.2).
     Cells(Vec<CellChange>),
+    /// Rows moved by hand (H13.1): the part of the manual order that
+    /// changed, as it was and as it is (`view::changed_span`).
+    Order {
+        before: Vec<String>,
+        after: Vec<String>,
+    },
 }
 
 /// One cell changed by an action on several rows (H11.2).
@@ -220,6 +227,15 @@ impl SilexApp {
                     })
                     .collect();
                 self.store_cells(cells)?;
+            }
+            TableOp::Order { before, after } => {
+                let rows = if undo { before } else { after };
+                let database = self.database.as_ref().map(|d| d.id.clone());
+                if let Some(database) = database
+                    && self.db.arrange_rows(&database, rows)?
+                {
+                    self.reload_rows()?;
+                }
             }
             TableOp::AddProperty(property) | TableOp::DeleteProperty(property) => {
                 let delete = matches!(op, TableOp::AddProperty(_)) == undo;

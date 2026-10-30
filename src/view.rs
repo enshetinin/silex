@@ -279,6 +279,20 @@ impl ViewConfig {
             self.hidden.push(property.to_owned());
         }
     }
+
+    /// The sorts that apply: those on the name or on a live property.
+    fn live_sorts<'a>(&'a self, properties: &[Property]) -> Vec<&'a Sort> {
+        self.sorts
+            .iter()
+            .filter(|s| s.property == NAME || properties.iter().any(|p| p.id == s.property))
+            .collect()
+    }
+
+    /// Whether the view orders its rows by a sort: then they cannot be
+    /// moved by hand (H13.1). A sort on a deleted property does not count.
+    pub fn is_sorted(&self, properties: &[Property]) -> bool {
+        !self.live_sorts(properties).is_empty()
+    }
 }
 
 /// One cell as the rules see it: the row's title or a property's value.
@@ -475,11 +489,7 @@ pub fn visible_rows(
             })
         })
         .collect();
-    let sorts: Vec<&Sort> = config
-        .sorts
-        .iter()
-        .filter(|s| s.property == NAME || properties.iter().any(|p| p.id == s.property))
-        .collect();
+    let sorts = config.live_sorts(properties);
     if sorts.is_empty() {
         return shown;
     }
@@ -627,6 +637,80 @@ pub fn table_preview(
             .collect(),
         total: shown.len(),
     }
+}
+
+/// The manual order of a database's rows after moving `moving` to the
+/// gap `gap` of the list on show (`shown`, ids in the view's order,
+/// filtered: a table, or a board's column), H13.1. `all` is the manual
+/// order of every live row. The moved rows keep their order among
+/// themselves and go before the first row on show after the gap that is
+/// not moved, or else after the last one before it, so rows the view
+/// hides keep their place. `None` if nothing would change, or if nothing
+/// on show is left to place them by.
+pub fn drop_rows(
+    all: &[String],
+    shown: &[String],
+    moving: &[String],
+    gap: usize,
+) -> Option<Vec<String>> {
+    let moved = |id: &String| moving.contains(id);
+    let gap = gap.min(shown.len());
+    let before = shown[gap..].iter().find(|id| !moved(id));
+    let after = shown[..gap].iter().rev().find(|id| !moved(id));
+    // The moved rows, in their manual order.
+    let rows: Vec<String> = all.iter().filter(|id| moved(id)).cloned().collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let mut order: Vec<String> = all.iter().filter(|id| !moved(id)).cloned().collect();
+    let at = match (before, after) {
+        (Some(next), _) => order.iter().position(|id| id == next)?,
+        (None, Some(previous)) => order.iter().position(|id| id == previous)? + 1,
+        (None, None) => return None,
+    };
+    order.splice(at..at, rows);
+    (order != all).then_some(order)
+}
+
+/// The part of an order that changed between `before` and `after` (the
+/// same rows): what it was and what it is, without the rows that kept
+/// their place at either end. Undoing a move only needs this (H13.1).
+pub fn changed_span(before: &[String], after: &[String]) -> (Vec<String>, Vec<String>) {
+    let start = before.iter().zip(after).take_while(|(a, b)| a == b).count();
+    let end = before[start..]
+        .iter()
+        .rev()
+        .zip(after[start..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (
+        before[start..before.len() - end].to_vec(),
+        after[start..after.len() - end].to_vec(),
+    )
+}
+
+/// `all` with the rows of `wanted` put in that order, in the places those
+/// rows take in `all`; the other rows stay where they are. Rows of
+/// `wanted` not in `all` (trashed meanwhile) are left out. Applies a
+/// [`changed_span`] again, also after other rows came or went.
+pub fn arrange(all: &[String], wanted: &[String]) -> Vec<String> {
+    let index: std::collections::HashMap<&str, usize> = all
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let wanted: Vec<&String> = wanted
+        .iter()
+        .filter(|id| index.contains_key(id.as_str()) && seen.insert(id.as_str()))
+        .collect();
+    let mut places: Vec<usize> = wanted.iter().map(|id| index[id.as_str()]).collect();
+    places.sort_unstable();
+    let mut order = all.to_vec();
+    for (place, id) in places.into_iter().zip(wanted) {
+        order[place] = id.clone();
+    }
+    order
 }
 
 #[cfg(test)]
@@ -998,5 +1082,168 @@ mod tests {
             (empty.total, empty.rows.len(), empty.columns.len()),
             (0, 0, 5)
         );
+    }
+
+    fn order(text: &str) -> Vec<String> {
+        text.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn a_row_dropped_in_a_gap_goes_there() {
+        let all = order("a b c d");
+        // Down: between c and d.
+        assert_eq!(
+            drop_rows(&all, &all, &order("a"), 3),
+            Some(order("b c a d"))
+        );
+        // Up, to the top, and to the end.
+        assert_eq!(
+            drop_rows(&all, &all, &order("d"), 0),
+            Some(order("d a b c"))
+        );
+        assert_eq!(
+            drop_rows(&all, &all, &order("a"), 4),
+            Some(order("b c d a"))
+        );
+        // Its own place, on either side: nothing changes.
+        assert_eq!(drop_rows(&all, &all, &order("b"), 1), None);
+        assert_eq!(drop_rows(&all, &all, &order("b"), 2), None);
+        // A gap past the end is the end.
+        assert_eq!(
+            drop_rows(&all, &all, &order("a"), 99),
+            Some(order("b c d a"))
+        );
+    }
+
+    #[test]
+    fn rows_hidden_by_the_view_keep_their_place() {
+        // The view hides x and y.
+        let all = order("a x b y c");
+        let shown = order("a b c");
+        // Between a and b: before b, so after x.
+        assert_eq!(
+            drop_rows(&all, &shown, &order("c"), 1),
+            Some(order("a x c b y"))
+        );
+        // At the end of what is shown: after c, the last one shown.
+        assert_eq!(
+            drop_rows(&all, &shown, &order("a"), 3),
+            Some(order("x b y c a"))
+        );
+        // A board's column shows its rows in their manual order too.
+        assert_eq!(
+            drop_rows(&all, &order("x y"), &order("y"), 0),
+            Some(order("a y x b c"))
+        );
+    }
+
+    #[test]
+    fn several_rows_move_together_in_their_order() {
+        let all = order("a b c d e");
+        // a and c (chosen in that order or not) to the end.
+        assert_eq!(
+            drop_rows(&all, &all, &order("c a"), 5),
+            Some(order("b d e a c"))
+        );
+        // Dropped in a gap next to one of them: placed by the first row
+        // that is not moved.
+        assert_eq!(drop_rows(&all, &all, &order("b c"), 2), None,);
+        assert_eq!(
+            drop_rows(&all, &all, &order("a c"), 2),
+            Some(order("b a c d e"))
+        );
+        // Every row on show moved: nothing to place them by.
+        assert_eq!(drop_rows(&all, &order("b c"), &order("b c"), 0), None);
+        assert_eq!(drop_rows(&all, &all, &order("zz"), 0), None);
+    }
+
+    #[test]
+    fn the_changed_span_undoes_and_redoes_a_move() {
+        let before = order("a b c d e f");
+        let after = order("a d b c e f");
+        let (was, is) = changed_span(&before, &after);
+        assert_eq!((was.clone(), is.clone()), (order("b c d"), order("d b c")));
+        assert_eq!(arrange(&after, &was), before);
+        assert_eq!(arrange(&before, &is), after);
+        // Also after a row came and another went meanwhile.
+        let now = order("a d b z c f");
+        assert_eq!(arrange(&now, &was), order("a b c z d f"));
+        // Nothing changed: nothing to keep.
+        assert_eq!(changed_span(&before, &before), (vec![], vec![]));
+        // Repeated or unknown ids are left out.
+        assert_eq!(arrange(&order("a b c"), &order("c c q a")), order("c b a"));
+    }
+
+    /// Small deterministic generator (no new crates).
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % n as u64) as usize
+        }
+    }
+
+    #[test]
+    fn random_drops_keep_every_row_and_undo_exactly() {
+        let mut rng = Rng(0x5eed_1301);
+        for _ in 0..3000 {
+            let len = 1 + rng.next(12);
+            let all: Vec<String> = (0..len).map(|i| format!("r{i}")).collect();
+            let shown: Vec<String> = all.iter().filter(|_| rng.next(4) > 0).cloned().collect();
+            if shown.is_empty() {
+                continue;
+            }
+            let moving: Vec<String> = shown.iter().filter(|_| rng.next(3) == 0).cloned().collect();
+            let gap = rng.next(shown.len() + 1);
+            let Some(after) = drop_rows(&all, &shown, &moving, gap) else {
+                continue;
+            };
+            // The same rows, the moved ones together and in their order,
+            // the others in theirs.
+            let mut sorted = after.clone();
+            sorted.sort();
+            let mut expected = all.clone();
+            expected.sort();
+            assert_eq!(sorted, expected);
+            let first = after.iter().position(|id| moving.contains(id)).unwrap();
+            let together: Vec<String> = after[first..first + moving.len()].to_vec();
+            let in_order: Vec<String> = all
+                .iter()
+                .filter(|id| moving.contains(id))
+                .cloned()
+                .collect();
+            assert_eq!(together, in_order);
+            let rest = |order: &[String]| -> Vec<String> {
+                order
+                    .iter()
+                    .filter(|id| !moving.contains(id))
+                    .cloned()
+                    .collect()
+            };
+            assert_eq!(rest(&after), rest(&all));
+            // The span is enough to undo and redo it.
+            let (was, is) = changed_span(&all, &after);
+            assert_eq!(arrange(&after, &was), all);
+            assert_eq!(arrange(&all, &is), after);
+        }
+    }
+
+    #[test]
+    fn a_view_is_sorted_only_by_rules_that_apply() {
+        let properties = vec![property("autor", PropertyKind::Text)];
+        let sort = |property: &str| Sort {
+            property: property.into(),
+            direction: Direction::Ascending,
+        };
+        let mut config = ViewConfig::default();
+        assert!(!config.is_sorted(&properties));
+        config.sorts = vec![sort("borrada")];
+        assert!(!config.is_sorted(&properties));
+        config.sorts.push(sort("autor"));
+        assert!(config.is_sorted(&properties));
+        config.sorts = vec![sort(NAME)];
+        assert!(config.is_sorted(&properties));
     }
 }

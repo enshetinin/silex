@@ -240,6 +240,15 @@ pub(super) enum TableAction {
     RenameView(String, String),
     MoveView(String, Shift),
     DeleteView(String),
+    /// Rows dropped in the gap `gap` of `shown`, the rows of the table or
+    /// of a board column in the view's order (H13.1).
+    DropRows {
+        moving: Vec<String>,
+        shown: Vec<String>,
+        gap: usize,
+    },
+    /// Rows cannot be moved by hand in a sorted view: say why.
+    ExplainSorted,
 }
 
 impl SilexApp {
@@ -543,6 +552,8 @@ impl SilexApp {
                     text: format!("Fila «{title}» enviada a la papelera."),
                 });
             }
+            // In the view's order, and undoable here (H13.1).
+            TableAction::Row(RowAction::Reorder(id, shift)) => self.shift_row(&id, shift)?,
             TableAction::Row(other) => self.apply(other)?,
             TableAction::AddProperty(kind, name) => {
                 self.add_property(kind, &name)?;
@@ -613,6 +624,12 @@ impl SilexApp {
                         OptionColor::for_new_option(existing),
                     )?;
                     self.reload_properties()?;
+                }
+            }
+            TableAction::DropRows { moving, shown, gap } => self.drop_rows(&moving, &shown, gap)?,
+            TableAction::ExplainSorted => {
+                if let Some(by) = self.database.as_ref().and_then(DatabaseState::sorted_by) {
+                    self.notice = Some(sorted_explanation(&by));
                 }
             }
             TableAction::HideProperty(id) => {
@@ -773,7 +790,26 @@ impl SilexApp {
                         width,
                         overflow,
                     };
-                    self.table_rows(ui, state, range.clone(), columns, &mut actions, &mut cells);
+                    let top = self.table_rows(
+                        ui,
+                        state,
+                        range.clone(),
+                        columns,
+                        &mut actions,
+                        &mut cells,
+                    );
+                    // Rows dragged by their handle (H13.1).
+                    if let Some(drag) = egui::DragAndDrop::payload::<RowDrag>(ui.ctx())
+                        && let Some(top) = top
+                    {
+                        let at = TableDrop {
+                            top,
+                            clip: ui.clip_rect(),
+                            gutter_left: ui.clip_rect().left() - gutter_width(ui),
+                            row_height: ROW_HEIGHT,
+                        };
+                        drag_rows(ui, state, &drag, &at, &mut actions);
+                    }
                     range
                 })
             })
@@ -946,8 +982,10 @@ impl SilexApp {
         );
     }
 
-    /// The rows in `range` (the ones in sight): name and «Abrir», then a
-    /// cell per property. Notes which cell has the keyboard focus.
+    /// The rows in `range` (the ones in sight): their handle, name and
+    /// «Abrir», then a cell per property. Notes which cell has the keyboard
+    /// focus. Returns where the view's first row would be (none drawn:
+    /// `None`), for a row being dragged.
     fn table_rows(
         &self,
         ui: &mut egui::Ui,
@@ -956,8 +994,18 @@ impl SilexApp {
         columns: Columns,
         actions: &mut Vec<TableAction>,
         cells: &mut Vec<CellAction>,
-    ) {
+    ) -> Option<f32> {
         let p = theme::current(ui.ctx());
+        // Rows moved by hand (H13.1): only without a sort.
+        let sorted = state.sorted_by();
+        let dragging = egui::DragAndDrop::payload::<RowDrag>(ui.ctx());
+        let clip = ui.clip_rect();
+        let gutter = egui::Rect::from_x_y_ranges(
+            clip.left() - gutter_width(ui)..=clip.left(),
+            clip.y_range(),
+        );
+        let pointer = ui.ctx().pointer_hover_pos();
+        let mut top = None;
         let DatabaseState {
             rows,
             order,
@@ -981,13 +1029,14 @@ impl SilexApp {
         for (offset, &row_index) in order[range].iter().enumerate() {
             // `index` is the row's place in the view; `row_index` in `rows`.
             let index = first + offset;
-            let Some(row) = rows.get_mut(row_index) else {
+            let Some(row_id) = rows.get(row_index).map(|r| r.id.clone()) else {
                 continue;
             };
-            let name_id = row_name_id(&row.id);
+            let name_id = row_name_id(&row_id);
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(columns.width, ROW_HEIGHT), egui::Sense::hover());
-            let menu_id = row_menu_id(&row.id);
+            top.get_or_insert(rect.top() - index as f32 * ROW_HEIGHT);
+            let menu_id = row_menu_id(&row_id);
             let focused = ui.memory(|m| m.has_focus(name_id));
             let menu_focused = ui.memory(|m| m.has_focus(menu_id));
             if focused {
@@ -996,15 +1045,61 @@ impl SilexApp {
             let wanted = |column: usize| {
                 focus
                     .as_ref()
-                    .is_some_and(|(id, c)| *id == row.id && *c == column)
+                    .is_some_and(|(id, c)| *id == row_id && *c == column)
             };
-            let hot = ui.rect_contains_pointer(rect) || focused || menu_focused;
-            let chosen = selection.contains(&row.id);
+            // The row's handle sits in the gutter at its left, out of the
+            // rows' clip: the row is under the pointer there too.
+            let strip = egui::Rect::from_x_y_ranges(gutter.x_range(), rect.y_range());
+            let in_gutter = pointer.is_some_and(|at| {
+                strip.contains(at) && clip.y_range().contains(at.y) && dragging.is_none()
+            });
+            // While rows are dragged, the one under the pointer is only
+            // where the line goes.
+            let pointed = dragging.is_none() && ui.rect_contains_pointer(rect);
+            let hot = pointed || in_gutter || focused || menu_focused;
+            let chosen = selection.contains(&row_id);
+            let held = dragging.as_ref().is_some_and(|d| d.0.contains(&row_id));
             if chosen {
                 ui.painter().rect_filled(rect, 0.0, p.accent_soft);
             } else if hot {
                 ui.painter().rect_filled(rect, 0.0, p.subtle);
             }
+            // The rows being moved stay marked in their place.
+            if held {
+                ui.painter()
+                    .rect_filled(rect, 0.0, p.accent_soft.gamma_multiply(0.5));
+            }
+            // Made on every row, shown or not: a child `Ui` takes an
+            // automatic id, and the widgets after it must keep theirs (the
+            // keyboard focus is kept by id).
+            let mut gutter_ui = ui.new_child(egui::UiBuilder::new().max_rect(strip));
+            gutter_ui.set_clip_rect(gutter.intersect(ui.ctx().content_rect()));
+            if (hot && dragging.is_none()) || held {
+                let moving = || {
+                    if chosen {
+                        order
+                            .iter()
+                            .filter_map(|&i| rows.get(i))
+                            .filter(|r| selection.contains(&r.id))
+                            .map(|r| r.id.clone())
+                            .collect()
+                    } else {
+                        vec![row_id.clone()]
+                    }
+                };
+                let row = &rows[row_index];
+                row_handle(
+                    &mut gutter_ui,
+                    strip,
+                    row,
+                    moving,
+                    sorted.as_deref(),
+                    actions,
+                );
+            }
+            let Some(row) = rows.get_mut(row_index) else {
+                continue;
+            };
             ui.painter()
                 .hline(rect.x_range(), rect.bottom() - 0.5, (1.0, p.border));
 
@@ -1165,6 +1260,7 @@ impl SilexApp {
         if let Some((index, shift)) = clicked_box {
             click_box(rows, order, selection, select_anchor, index, shift);
         }
+        top
     }
 }
 

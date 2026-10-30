@@ -4141,3 +4141,68 @@ fn hoy_and_the_journal_template_work_with_real_clicks() -> anyhow::Result<()> {
     assert_accessible(&harness, "journal");
     Ok(())
 }
+
+// ---- H13.1: moving rows by hand ----
+
+/// Rayuela dragged by its handle, held just above the end of the table.
+fn drag_rayuela(harness: &mut Harness<'_, SilexApp>) {
+    let row = harness.get_by_label("Seleccionar «Rayuela»").rect();
+    harness.hover_at(row.center());
+    harness.run();
+    let handle = harness.get_by_label("Mover «Rayuela»").rect().center();
+    harness.hover_at(handle);
+    harness.run();
+    harness.drag_at(handle);
+    harness.run();
+    harness.hover_at(handle + egui::vec2(0.0, 24.0));
+    harness.run();
+    let last = harness.get_by_label("Seleccionar «Ficciones»").rect();
+    harness.hover_at(egui::pos2(last.center().x + 240.0, last.bottom() - 4.0));
+    harness.run();
+}
+
+#[test]
+fn database_row_drag() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_row_drag_light",
+        eframe::egui::Theme::Light,
+        drag_rayuela,
+    )
+}
+
+#[test]
+fn database_row_drag_dark() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_row_drag_dark",
+        eframe::egui::Theme::Dark,
+        drag_rayuela,
+    )
+}
+
+#[test]
+fn a_row_handle_has_a_name_and_is_not_a_tab_stop() -> anyhow::Result<()> {
+    let (app, _, rows) = database_app()?;
+    let mut harness = a11y_harness(app);
+    let row = harness.get_by_label("Seleccionar «Rayuela»").rect();
+    harness.hover_at(row.center());
+    harness.run();
+    assert!(harness.query_by_label("Mover «Rayuela»").is_some());
+    assert_accessible(&harness, "row handle");
+    // Not in the Tab order: «Subir» and «Bajar» in the row's menu are.
+    let handle = harness
+        .ctx
+        .read_response(egui::Id::unique(("silex-row-handle", rows[0].as_str())))
+        .expect("handle drawn");
+    assert!(!handle.sense.is_focusable());
+    Ok(())
+}
+
+#[test]
+fn relationship_graph_dark() -> anyhow::Result<()> {
+    snapshot_with("relationship_graph_dark", egui::Theme::Dark, |harness| {
+        *harness.state_mut() = links_app().expect("graph fixture");
+        harness.run();
+        harness.get_by_label("Grafo").click();
+        harness.run();
+    })
+}

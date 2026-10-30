@@ -512,7 +512,14 @@ impl SilexApp {
             .filter(|p| p.parent_id == page.parent_id)
             .map(|p| p.id.as_str())
             .collect();
-        let index = siblings.iter().position(|s| *s == id);
+        let mut index = siblings.iter().position(|s| *s == id);
+        let mut count = siblings.len();
+        // A row of the open database moves in the list it is shown in, the
+        // table or its board column (H13.1).
+        if let Some(shown) = self.database.as_ref().and_then(|d| d.shown_with(id)) {
+            index = shown.iter().position(|s| s == id);
+            count = shown.len();
+        }
         let is_favorite = self.favorites.iter().any(|p| p.id == id);
         let owned = || id.to_owned();
         let mut action = None;
@@ -573,7 +580,7 @@ impl SilexApp {
         }
         if ui
             .add_enabled(
-                index.is_some_and(|i| i + 1 < siblings.len()),
+                index.is_some_and(|i| i + 1 < count),
                 egui::Button::new("Bajar"),
             )
             .clicked()

@@ -946,6 +946,71 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Puts the live rows of `wanted` in that order, in the places they take
+    /// in the database's manual order; the other rows keep theirs (H13.1:
+    /// a row dragged in the table or the board, or that move undone).
+    /// A row in the trash goes along with the live row before it, so once
+    /// restored it is back next to it. Ids that are not live rows of the
+    /// database are left out. Every row is renumbered 0..n in one
+    /// transaction, which also repairs duplicate `sort_order`s. Returns
+    /// whether the order changed.
+    pub fn arrange_rows(&mut self, database_id: &str, wanted: &[String]) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        ensure!(
+            page_kind(&tx, database_id)? == Some(PageKind::Database),
+            "La base de datos no existe o está en la papelera"
+        );
+        // Every row, also the trashed ones, in the order of `database_rows`.
+        let rows: Vec<(String, i64, bool)> = tx
+            .prepare(
+                "SELECT id, sort_order, deleted_at IS NULL FROM pages WHERE parent_id = ?1
+                 ORDER BY sort_order, created_at, id",
+            )?
+            .query_map([database_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        // The live rows, and the trashed ones after each (or at the start).
+        let mut live = Vec::new();
+        let mut trailing: HashMap<Option<&str>, Vec<&str>> = HashMap::new();
+        let mut last_live = None;
+        for (id, _, is_live) in &rows {
+            if *is_live {
+                live.push(id.clone());
+                last_live = Some(id.as_str());
+            } else {
+                trailing.entry(last_live).or_default().push(id);
+            }
+        }
+        let known: HashSet<&str> = live.iter().map(String::as_str).collect();
+        let wanted: Vec<String> = wanted
+            .iter()
+            .filter(|id| known.contains(id.as_str()))
+            .cloned()
+            .collect();
+        let arranged = crate::view::arrange(&live, &wanted);
+        if arranged == live {
+            return Ok(false);
+        }
+        let mut order: Vec<&str> = trailing.get(&None).cloned().unwrap_or_default();
+        for id in &arranged {
+            order.push(id);
+            order.extend(trailing.get(&Some(id.as_str())).into_iter().flatten());
+        }
+        let numbers: HashMap<&str, i64> = rows
+            .iter()
+            .map(|(id, number, _)| (id.as_str(), *number))
+            .collect();
+        {
+            let mut update = tx.prepare("UPDATE pages SET sort_order = ?2 WHERE id = ?1")?;
+            for (position, id) in order.iter().enumerate() {
+                if numbers.get(id) != Some(&(position as i64)) {
+                    update.execute(params![id, position as i64])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// What the card of database `id` shows in a page (H12.11): the first
     /// `max` rows of the view last open in it (or its first), with their
     /// values. `None` if `id` is not a live database. Without filters or
@@ -2039,6 +2104,20 @@ impl Database {
         tx.execute("DELETE FROM settings WHERE key = ?1", [COMPACTING])?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Directed links between live, non-template pages, without duplicates.
+    pub fn graph_edges(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT b.page_id, b.link_page_id FROM blocks b
+             JOIN pages s ON s.id = b.page_id JOIN pages t ON t.id = b.link_page_id
+             WHERE s.deleted_at IS NULL AND t.deleted_at IS NULL
+             AND s.template_at IS NULL AND t.template_at IS NULL
+             AND s.id <> t.id ORDER BY b.page_id, b.link_page_id",
+        )?;
+        Ok(stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// The pages the links of `page_id` point at, live or in the trash

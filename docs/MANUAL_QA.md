@@ -535,3 +535,17 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Estrecha la ventana: las columnas que no caben desaparecen de la tarjeta, sin solaparse; los textos largos se cortan con «…».
 - Clic, o Tab hasta la tarjeta e Intro: abre la base. Con VoiceOver se anuncia «Base de datos «Lecturas», 7 filas. Abrir».
 - Tema oscuro: se lee bien y el borde se marca al pasar el ratón.
+
+## 58. Reordenar filas y tarjetas (H13.1)
+- En una tabla sin orden, pasa el ratón por una fila: a su izquierda, en el margen, aparece un asa ⋮⋮. Arrástrala: la fila se marca en su sitio, su nombre sigue al puntero y una línea azul indica dónde irá. Suéltala: la fila queda ahí.
+- Cierra y abre la base (y reinicia la app): el orden se conserva. La tarjeta de la base en una página enseña el orden nuevo.
+- Cmd/Ctrl+Z (sin estar escribiendo en una celda) deshace el movimiento; Cmd/Ctrl+Mayús+Z lo rehace.
+- Empieza a arrastrar y pulsa Esc: no se mueve nada. Suelta la fila en su sitio o fuera de la tabla: tampoco.
+- Elige dos filas con su casilla y arrastra una de ellas: van las dos juntas, en su orden, y siguen elegidas.
+- Con muchas filas, arrastra hacia el borde de abajo o de arriba: la tabla se desplaza.
+- Con un filtro que oculta filas, mueve una: al quitar el filtro, las ocultas siguen donde estaban.
+- Añade un orden («Ordenar»): el asa no arrastra; al pasar el ratón explica por qué, y un clic da el aviso «Esta vista está ordenada por «…». Para mover las filas a mano, quita el orden en «Ordenar».».
+- Menú «⋯» de una fila → «Subir» / «Bajar»: la fila se mueve un puesto en lo que se ve (desactivados en el borde). Con un orden activo, dan el mismo aviso. Por teclado: Tab hasta «⋯», Intro, flechas.
+- En el tablero, arrastra una tarjeta dentro de su columna: una línea indica dónde irá y queda ahí; a otra columna, la columna se ilumina y la tarjeta cambia de valor, como antes. Con un orden activo, soltarla en otro sitio de su columna da el aviso.
+- Manda una fila a la papelera, mueve otras y restáurala: vuelve junto a la fila que tenía delante.
+- Tema oscuro: el asa, la línea y la etiqueta se ven bien. Con VoiceOver, el asa se anuncia «Mover «…»» y no es una parada de Tab.

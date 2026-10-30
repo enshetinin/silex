@@ -147,7 +147,12 @@ pub(super) fn heading_space(kind: BlockKind) -> f32 {
 
 /// Indents a row (title, menus, buttons) to where block text starts.
 pub(super) fn gutter_space(ui: &mut egui::Ui) {
-    ui.add_space(GUTTER + ui.spacing().item_spacing.x);
+    ui.add_space(gutter_width(ui));
+}
+
+/// How far [`gutter_space`] indents: the handles' gutter and its spacing.
+pub(super) fn gutter_width(ui: &egui::Ui) -> f32 {
+    GUTTER + ui.spacing().item_spacing.x
 }
 
 /// Reserves the marker slot, as tall as the first line of text. Returns its

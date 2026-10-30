@@ -383,3 +383,146 @@ fn the_preview_follows_the_view_last_open() -> anyhow::Result<()> {
     assert!(db.database_preview(&base, 2)?.is_none());
     Ok(())
 }
+
+// ---- H13.1: rows in their manual order ----
+
+/// Temporary on-disk database; removes the file and its WAL/SHM even if the test fails.
+struct TempDb(std::path::PathBuf);
+
+impl TempDb {
+    fn new() -> Self {
+        Self(std::env::temp_dir().join(format!("silex-rows-{}.sqlite3", uuid::Uuid::new_v4())))
+    }
+}
+
+impl Drop for TempDb {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", self.0.display()));
+        }
+    }
+}
+
+#[test]
+fn rows_are_arranged_by_hand_and_the_order_is_kept() -> anyhow::Result<()> {
+    let file = TempDb::new();
+    let path = file.0.clone();
+    let mut db = Database::open(&path)?;
+    let base = db.create_database("Lecturas", None)?;
+    let rows: Vec<String> = ["Rayuela", "Pedro Páramo", "Ficciones", "Aleph"]
+        .into_iter()
+        .map(|t| db.create_row(&base, t))
+        .collect::<anyhow::Result<_>>()?;
+    // Aleph between Rayuela and Pedro Páramo: only the span that changed.
+    let span = [rows[3].clone(), rows[1].clone(), rows[2].clone()];
+    assert!(db.arrange_rows(&base, &span)?);
+    assert_eq!(
+        titles(&db.database_rows(&base)?),
+        ["Rayuela", "Aleph", "Pedro Páramo", "Ficciones"]
+    );
+    // The same order again changes nothing.
+    assert!(!db.arrange_rows(&base, &span)?);
+    // It is on disk.
+    drop(db);
+    let mut db = Database::open(&path)?;
+    assert_eq!(
+        titles(&db.database_rows(&base)?),
+        ["Rayuela", "Aleph", "Pedro Páramo", "Ficciones"]
+    );
+    // Undone with what the span was.
+    assert!(db.arrange_rows(&base, &rows[1..])?);
+    assert_eq!(
+        titles(&db.database_rows(&base)?),
+        ["Rayuela", "Pedro Páramo", "Ficciones", "Aleph"]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_trashed_row_comes_back_to_its_place_after_others_moved() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let rows: Vec<String> = ["A", "B", "C", "D"]
+        .into_iter()
+        .map(|t| db.create_row(&base, t))
+        .collect::<anyhow::Result<_>>()?;
+    db.trash_page(&rows[1])?;
+    // D to the top; B, in the trash, is left out of the order asked for.
+    let wanted = [
+        rows[3].clone(),
+        rows[1].clone(),
+        rows[0].clone(),
+        rows[2].clone(),
+    ];
+    assert!(db.arrange_rows(&base, &wanted)?);
+    assert_eq!(titles(&db.database_rows(&base)?), ["D", "A", "C"]);
+    // B went along with A, the row before it.
+    db.restore_page(&rows[1])?;
+    assert_eq!(titles(&db.database_rows(&base)?), ["D", "A", "B", "C"]);
+    // A trashed first row stays first.
+    db.trash_page(&rows[3])?;
+    assert!(db.arrange_rows(&base, &[rows[2].clone(), rows[0].clone()])?);
+    db.restore_page(&rows[3])?;
+    assert_eq!(titles(&db.database_rows(&base)?), ["D", "C", "B", "A"]);
+    Ok(())
+}
+
+#[test]
+fn rows_are_arranged_only_in_a_live_database_and_only_its_own() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let a = db.create_row(&base, "A")?;
+    let b = db.create_row(&base, "B")?;
+    let other = db.create_database("Recetas", None)?;
+    let x = db.create_row(&other, "X")?;
+    let page = db.create_page("Notas", None)?;
+    assert!(db.arrange_rows(&page, &[b.clone(), a.clone()]).is_err());
+    assert!(
+        db.arrange_rows("no-existe", &[b.clone(), a.clone()])
+            .is_err()
+    );
+    // Rows of another database, or unknown ids, are left out.
+    assert!(!db.arrange_rows(&base, &[x.clone(), "zz".into()])?);
+    assert!(db.arrange_rows(&base, &[x.clone(), b.clone(), a.clone()])?);
+    assert_eq!(titles(&db.database_rows(&base)?), ["B", "A"]);
+    assert_eq!(titles(&db.database_rows(&other)?), ["X"]);
+    db.trash_page(&base)?;
+    assert!(db.arrange_rows(&base, &[a, b]).is_err(), "in the trash");
+    Ok(())
+}
+
+#[test]
+fn arranging_rows_repairs_duplicate_numbers() -> anyhow::Result<()> {
+    let file = TempDb::new();
+    let path = file.0.clone();
+    let mut db = Database::open(&path)?;
+    let base = db.create_database("Lecturas", None)?;
+    let rows: Vec<String> = ["A", "B", "C"]
+        .into_iter()
+        .map(|t| db.create_row(&base, t))
+        .collect::<anyhow::Result<_>>()?;
+    drop(db);
+    // Two rows with the same number (an older Silex, a manual edit).
+    {
+        let conn = rusqlite::Connection::open(&path)?;
+        conn.execute(
+            "UPDATE pages SET sort_order = 0 WHERE parent_id = ?1",
+            [&base],
+        )?;
+    }
+    let mut db = Database::open(&path)?;
+    // Ties go by creation time and id: whatever the order is, reverse it.
+    let mut reversed: Vec<String> = db.database_rows(&base)?.into_iter().map(|p| p.id).collect();
+    assert_eq!(reversed.len(), rows.len());
+    reversed.reverse();
+    assert!(db.arrange_rows(&base, &reversed)?);
+    let now: Vec<String> = db.database_rows(&base)?.into_iter().map(|p| p.id).collect();
+    assert_eq!(now, reversed);
+    let conn = rusqlite::Connection::open(&path)?;
+    let numbers: Vec<i64> = conn
+        .prepare("SELECT sort_order FROM pages WHERE parent_id = ?1 ORDER BY sort_order")?
+        .query_map([&base], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    assert_eq!(numbers, [0, 1, 2]);
+    Ok(())
+}
