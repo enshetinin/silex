@@ -4405,3 +4405,114 @@ fn database_multi_select_cells() -> anyhow::Result<()> {
     harness.snapshot("database_multi_select_cells_light");
     Ok(())
 }
+
+/// A workspace like the owner's: two page trees, a database linked from a
+/// page and some pages without connections; the graph open.
+fn graph_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let tipografia = db.create_page("Tipografía", None)?;
+    for title in [
+        "Tipografía y sistemas tipográficos",
+        "Familia tipográfica",
+        "Cuerpo tipográfico, unidades e interlineado",
+        "Mapa de caracteres",
+        "Design with fonts",
+        "Universidad TT",
+    ] {
+        db.create_page(title, Some(&tipografia))?;
+    }
+    let prueba = db.create_page("Prueba de página", None)?;
+    for title in ["salchichas", "mayonesas", "pan", "humus"] {
+        db.create_page(title, Some(&prueba))?;
+    }
+    let anclada = db.create_database("BBDD anclada", None)?;
+    db.create_database("BBDD", None)?;
+    for title in ["Ideas", "Lista de recursos", "Tremenda nota"] {
+        db.create_page(title, None)?;
+    }
+    let link = Block {
+        id: "graph-link".into(),
+        page_id: prueba.clone(),
+        kind: BlockKind::PageLink,
+        content: String::new(),
+        checked: false,
+        position: 0,
+        indent: 0,
+        attachment: None,
+        link: Some(anclada),
+        marks: Vec::new(),
+    };
+    db.save_document(&prueba, "Prueba de página", &[link])?;
+    let mut app = SilexApp::new(db)?;
+    app.reload_pages()?;
+    app.open_page(prueba)?;
+    app.open_graph(&egui::Context::default())?;
+    Ok(app)
+}
+
+fn graph_snapshot(
+    name: &str,
+    theme: eframe::egui::Theme,
+    setup: impl FnOnce(&mut SilexApp),
+) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut app = graph_app()?;
+    setup(&mut app);
+    let mut harness = Harness::builder()
+        .with_size([1280.0, 800.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+/// The global graph with «Tipografía» selected: the inspector lists its
+/// subpages.
+fn select_tipografia(app: &mut SilexApp) {
+    let id = app
+        .pages
+        .iter()
+        .find(|p| p.title == "Tipografía")
+        .map(|p| p.id.clone());
+    if let (Some(graph), Some(id)) = (app.graph.as_mut(), id) {
+        graph.select_for_test(&id);
+    }
+}
+
+#[test]
+fn graph_global_dark() -> anyhow::Result<()> {
+    graph_snapshot(
+        "graph_global_dark",
+        eframe::egui::Theme::Dark,
+        select_tipografia,
+    )
+}
+
+#[test]
+fn graph_global_light() -> anyhow::Result<()> {
+    graph_snapshot("graph_global_light", eframe::egui::Theme::Light, |_| {})
+}
+
+#[test]
+fn graph_local_dark() -> anyhow::Result<()> {
+    graph_snapshot("graph_local_dark", eframe::egui::Theme::Dark, |app| {
+        let id = app
+            .pages
+            .iter()
+            .find(|p| p.title == "Prueba de página")
+            .map(|p| p.id.clone());
+        if let Some(id) = id {
+            let _ = app.open_local_graph(&id);
+        }
+        if let Some(graph) = app.graph.as_mut() {
+            graph.depth_for_test(2);
+        }
+    })
+}

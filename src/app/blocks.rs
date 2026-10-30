@@ -2668,6 +2668,20 @@ impl SilexApp {
                         extra = Some("outline");
                     }
                 }
+                // This page and what it connects to, in the graph.
+                if !template
+                    && icons::button(
+                        ui,
+                        true,
+                        icons::WAYPOINTS,
+                        p.text_muted,
+                        "Ver en el grafo local",
+                        None,
+                    )
+                    .clicked()
+                {
+                    extra = Some("local_graph");
+                }
                 let star_color = if is_favorite { p.accent } else { p.text_muted };
                 let star_tip = if is_favorite {
                     "Quitar de favoritos"
@@ -2787,6 +2801,10 @@ impl SilexApp {
             }
             Some("outline") => self.toggle_outline(&ui.ctx().clone()),
             Some("copy_markdown") => self.copy_page_as_markdown(ui.ctx()),
+            Some("local_graph") => {
+                let result = self.open_local_graph(page_id);
+                self.report(result);
+            }
             _ => {}
         }
         if let Some(action) = action {

@@ -244,6 +244,10 @@ pub const FUNNEL: &str = "\u{e0dc}"; // funnel
 pub const ARROWS_DOWN_UP: &str = "\u{e046}"; // arrow-down-up
 pub const EYE: &str = "\u{e0ba}"; // eye
 pub const EYE_SLASH: &str = "\u{e0bb}"; // eye-off
+pub const WAYPOINTS: &str = "\u{e542}"; // waypoints
+pub const SCAN: &str = "\u{e257}"; // scan
+pub const ROTATE_CCW: &str = "\u{e148}"; // rotate-ccw
+pub const PANEL_RIGHT: &str = "\u{e431}"; // panel-right
 
 /// Every icon above, for tests.
 #[cfg(test)]
@@ -319,4 +323,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("ARROWS_DOWN_UP", ARROWS_DOWN_UP),
     ("EYE", EYE),
     ("EYE_SLASH", EYE_SLASH),
+    ("WAYPOINTS", WAYPOINTS),
+    ("SCAN", SCAN),
+    ("ROTATE_CCW", ROTATE_CCW),
+    ("PANEL_RIGHT", PANEL_RIGHT),
 ];

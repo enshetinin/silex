@@ -6627,6 +6627,33 @@ fn a_card_dropped_within_its_column_changes_place() -> anyhow::Result<()> {
 }
 
 #[test]
+fn graph_draws_subpages_shelves_loose_pages_and_opens_local_view() -> Result<()> {
+    let db = Database::open_in_memory()?;
+    let tipo = db.create_page("Tipografía", None)?;
+    db.create_page("Familia", Some(&tipo))?;
+    let mapa = db.create_page("Mapa", Some(&tipo))?;
+    db.create_page("Suelta", None)?;
+    let mut app = SilexApp::new(db)?;
+    app.reload_pages()?;
+    app.open_page(tipo.clone())?;
+    app.open_graph(&egui::Context::default())?;
+    let graph = app.graph.as_ref().unwrap();
+    // No links, but the two subpages are lines; «Suelta» goes on the shelf.
+    assert_eq!(graph.edge_counts(), (0, 2));
+    assert_eq!(graph.shelf_titles(), ["Suelta"]);
+    assert!(!graph.is_local());
+    // From a page: the local graph, centred on it, with its neighbours.
+    app.open_local_graph(&mapa)?;
+    assert!(app.graph_active());
+    let graph = app.graph.as_mut().unwrap();
+    assert!(graph.is_local());
+    assert_eq!(graph.local_titles(), ["Mapa", "Tipografía"]);
+    graph.depth_for_test(2);
+    assert_eq!(graph.local_titles(), ["Mapa", "Tipografía", "Familia"]);
+    Ok(())
+}
+
+#[test]
 fn graph_tab_preserves_page_and_opens_links_in_another_tab() -> Result<()> {
     let db = Database::open_in_memory()?;
     let first = db.create_page("Primera", None)?;
