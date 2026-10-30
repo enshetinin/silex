@@ -41,6 +41,7 @@ impl SilexApp {
                 db_path,
                 dir.to_path_buf(),
                 self.title.clone(),
+                self.open_icon(),
                 self.blocks.clone(),
                 move || repaint.request_repaint(),
             )?;
@@ -50,8 +51,10 @@ impl SilexApp {
         }
         let path = match &self.database {
             Some(state) => {
+                let title =
+                    silex_desktop::markdown::titled(self.open_icon().as_deref(), &self.title);
                 let markdown = silex_desktop::markdown::database_to_markdown(
-                    &self.title,
+                    &title,
                     &state.properties,
                     &state.rows,
                     &state.values,
@@ -62,6 +65,7 @@ impl SilexApp {
                 &self.db,
                 dir,
                 &self.title,
+                self.open_icon().as_deref(),
                 &self.blocks,
             )?,
         };
@@ -286,8 +290,14 @@ impl SilexApp {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             match result.and_then(|page| {
-                self.db
-                    .create_page_with_blocks(&page.title, None, &page.blocks)
+                let id = self
+                    .db
+                    .create_page_with_blocks(&page.title, None, &page.blocks)?;
+                // A `# 🌾 Título` gives the page its icon (H12.8).
+                if let Some(icon) = &page.icon {
+                    self.db.set_page_icon(&id, Some(icon))?;
+                }
+                Ok(id)
             }) {
                 Ok(id) => created.push(id),
                 Err(err) => errors.push(format!("{name}: {err:#}")),

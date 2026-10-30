@@ -280,6 +280,14 @@ fn display_title(title: &str) -> &str {
 }
 
 impl SilexApp {
+    /// The open page's icon (H12.8), if it has one.
+    fn open_icon(&self) -> Option<String> {
+        self.selected
+            .as_ref()
+            .and_then(|id| self.page_icons.get(id))
+            .cloned()
+    }
+
     /// `title` with the page's emoji before it, if it has one (H12.8): for
     /// text that shows a page with no icon slot (breadcrumbs).
     fn titled(&self, id: &str, title: &str) -> String {

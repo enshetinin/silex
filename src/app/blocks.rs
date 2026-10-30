@@ -1840,7 +1840,8 @@ impl SilexApp {
         if self.selected.is_none() || self.database.is_some() {
             return;
         }
-        let markdown = silex_desktop::markdown::page_to_markdown(&self.title, &self.blocks);
+        let title = silex_desktop::markdown::titled(self.open_icon().as_deref(), &self.title);
+        let markdown = silex_desktop::markdown::page_to_markdown(&title, &self.blocks);
         ctx.copy_text(markdown);
         // Pasted back in Silex, it is Markdown, not this page's own copy.
         self.clip = None;

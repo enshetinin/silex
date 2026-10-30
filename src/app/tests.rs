@@ -6146,3 +6146,34 @@ fn the_icon_picker_sets_pastes_and_removes_the_icon() -> anyhow::Result<()> {
     assert!(app.db.page_icons()?.is_empty());
     Ok(())
 }
+
+// ---- Page icons in Markdown (H12.8b) ----
+
+#[test]
+fn an_imported_page_gets_the_icon_of_its_title_and_copies_it_back() -> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let tmp = TempFolder::new("silex-icon-import")?;
+    let file = tmp.0.join("pan.md");
+    std::fs::write(&file, "# 🍞 Pan casero\n\nharina\n")?;
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    let ctx = egui::Context::default();
+    drop_frame(&mut app, &ctx, &[file]);
+    let start = std::time::Instant::now();
+    while app.import_job.is_some() && start.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app_frame(&mut app, &ctx, vec![]);
+    }
+    assert_eq!(app.title, "Pan casero");
+    let page = app.selected.clone().expect("open");
+    assert_eq!(app.page_icons.get(&page).map(String::as_str), Some("🍞"));
+    app.run_command(&ctx, Command::CopyMarkdown)?;
+    let copied: Vec<String> = app_frame_commands(&mut app, &ctx, vec![])
+        .iter()
+        .filter_map(|c| match c {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(copied, ["# 🍞 Pan casero\n\nharina\n"]);
+    Ok(())
+}

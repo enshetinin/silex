@@ -7,4 +7,4 @@ mod export;
 mod import;
 
 pub use export::{FileLink, database_to_markdown, page_to_markdown, page_to_markdown_with};
-pub use import::{ImportedPage, looks_like_markdown, markdown_to_blocks, markdown_to_page};
+pub use import::{ImportedPage, looks_like_markdown, markdown_to_blocks, markdown_to_page, titled};

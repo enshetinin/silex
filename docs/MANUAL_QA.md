@@ -496,3 +496,9 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Duplica la página o guárdala como plantilla y crea otra desde ella: llevan el icono.
 - Una página sin icono no se mueve de sitio (el título está donde siempre).
 - En Windows y en Linux: los emojis se ven en color (en Linux, si está instalada una fuente de emojis como Noto Color Emoji; si no, cuadros).
+
+## 54. Icono de página en Markdown (H12.8b)
+- Da un icono a una página y expórtala a Markdown: el archivo se llama como el título (sin el emoji) y dentro empieza por `# 🌾 Título`. En GitHub u Obsidian se ve el emoji delante.
+- «Exportar todo el espacio»: las páginas y bases de datos con icono lo llevan delante de su título; las que no, igual que antes.
+- «Copiar como Markdown» de una página con icono: empieza por `# 🌾 Título`.
+- Importa (arrastrándolo) un `.md` que empiece por `# 🍞 Pan casero`: la página se llama «Pan casero» y tiene 🍞 de icono. Con `# 🍞Pan` (sin espacio) o `# Pan 🍞`, el emoji se queda en el título y no hay icono.

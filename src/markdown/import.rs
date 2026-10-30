@@ -11,6 +11,8 @@ use crate::model::{BlockKind, MAX_INDENT, NewBlock};
 pub struct ImportedPage {
     pub title: String,
     pub blocks: Vec<NewBlock>,
+    /// The emoji the `# Title` started with (H12.8), as its icon.
+    pub icon: Option<String>,
 }
 
 /// Where the text being collected will go.
@@ -56,13 +58,38 @@ enum Open {
 ///   (`> [!info]` on a line of its own) becomes callouts (H12.3).
 pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
     let mut blocks = markdown_to_blocks(source);
-    let title = match blocks.first() {
+    let (title, icon) = match blocks.first() {
         Some(first) if first.kind == BlockKind::Heading1 && first.indent == 0 => {
-            blocks.remove(0).content
+            split_icon(&blocks.remove(0).content)
         }
-        _ => fallback_title.to_owned(),
+        _ => (fallback_title.to_owned(), None),
     };
-    ImportedPage { title, blocks }
+    ImportedPage {
+        title,
+        blocks,
+        icon,
+    }
+}
+
+/// A `# Title` that starts with an emoji and a space (or is just one) is
+/// the page's icon and title (H12.8), as export writes them. An emoji
+/// written right against the text stays in the title.
+fn split_icon(title: &str) -> (String, Option<String>) {
+    match crate::emoji::leading_emoji(title) {
+        Some((emoji, rest)) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
+            (rest.trim_start().to_owned(), Some(emoji.to_owned()))
+        }
+        _ => (title.to_owned(), None),
+    }
+}
+
+/// The title line export writes for a page (H12.8): its emoji, if it has
+/// one, then its title.
+pub fn titled(icon: Option<&str>, title: &str) -> String {
+    match icon {
+        Some(icon) => format!("{icon} {title}"),
+        None => title.to_owned(),
+    }
 }
 
 /// The blocks of some Markdown, as [`markdown_to_page`] reads them, but a

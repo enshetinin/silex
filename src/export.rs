@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use crate::{
     attachment::FileKind,
     db::Database,
-    markdown::{FileLink, database_to_markdown, page_to_markdown, page_to_markdown_with},
+    markdown::{FileLink, database_to_markdown, page_to_markdown, page_to_markdown_with, titled},
     model::{Block, BlockKind, PageKind, build_tree},
     safe_path,
 };
@@ -36,9 +36,16 @@ pub fn export_root() -> Result<PathBuf> {
 }
 
 /// Writes one page as Markdown into `dir` (created if needed), named after
-/// its title and never overwriting an existing file. Returns the file path.
-pub fn export_page(dir: &Path, title: &str, blocks: &[Block]) -> Result<PathBuf> {
-    export_markdown(dir, title, &page_to_markdown(title, blocks))
+/// its title and never overwriting an existing file. Its icon, if it has
+/// one, goes before the title inside (`# 🌾 Título`, H12.8), not in the
+/// file name. Returns the file path.
+pub fn export_page(
+    dir: &Path,
+    title: &str,
+    icon: Option<&str>,
+    blocks: &[Block],
+) -> Result<PathBuf> {
+    export_markdown(dir, title, &page_to_markdown(&titled(icon, title), blocks))
 }
 
 /// [`export_page`] for a page that may have attachments (ADR 0007): they
@@ -49,10 +56,11 @@ pub fn export_page_with_files(
     db: &Database,
     dir: &Path,
     title: &str,
+    icon: Option<&str>,
     blocks: &[Block],
 ) -> Result<PathBuf> {
     if !blocks.iter().any(|b| b.kind == BlockKind::File) {
-        return export_page(dir, title, blocks);
+        return export_page(dir, title, icon, blocks);
     }
     fs::create_dir_all(dir)
         .with_context(|| format!("No se puede crear la carpeta {}", dir.display()))?;
@@ -71,7 +79,7 @@ pub fn export_page_with_files(
         };
         let path = safe_path::join_inside(dir, &[&format!("{stem}.md")])?;
         // A page alone: the pages it links to are not exported (ADR 0008).
-        let markdown = page_to_markdown_with(title, blocks, &files, &HashMap::new());
+        let markdown = page_to_markdown_with(&titled(icon, title), blocks, &files, &HashMap::new());
         write_atomic(&path, markdown.as_bytes())?;
         Ok(path)
     })();
@@ -262,6 +270,7 @@ pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
     remove_stale_temporaries(root, STALE_AFTER);
     let stamp = db.utc_stamp()?;
     let pages = db.list_pages()?;
+    let icons = db.page_icons()?;
     let everything: HashSet<String> = pages.iter().map(|p| p.id.clone()).collect();
     // Depth-first rows with depth; never loops, orphans come at the root.
     let rows = build_tree(&pages, &everything);
@@ -289,12 +298,14 @@ pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
             fs::create_dir_all(&folder)
                 .with_context(|| format!("No se puede crear {}", folder.display()))?;
             let file = safe_path::join_inside(&folder, &[&format!("{}.md", planned.stem)])?;
+            // Its icon before its title inside the file (H12.8).
+            let title = titled(icons.get(&page.id).map(String::as_str), &page.title);
             let markdown = match (&page.kind, &planned.blocks) {
                 // Its rows follow as subpages, in the folder below.
                 (PageKind::Database, _) => {
                     let id = &page.id;
                     database_to_markdown(
-                        &page.title,
+                        &title,
                         &db.database_properties(id)?,
                         &db.database_rows(id)?,
                         &db.database_values(id)?,
@@ -314,7 +325,7 @@ pub fn export_workspace(db: &Database, root: &Path) -> Result<WorkspaceExport> {
                             Some((id.clone(), relative_link(&planned.folder, to)))
                         })
                         .collect();
-                    page_to_markdown_with(&page.title, blocks, &files, &links)
+                    page_to_markdown_with(&title, blocks, &files, &links)
                 }
             };
             write_atomic(&file, markdown.as_bytes())?;
@@ -520,12 +531,13 @@ impl PageExportJob {
         db_path: PathBuf,
         dir: PathBuf,
         title: String,
+        icon: Option<String>,
         blocks: Vec<Block>,
         on_done: impl FnOnce() + Send + 'static,
     ) -> Result<Self> {
         Self::start(
             db_path,
-            move |db| export_page_with_files(db, &dir, &title, &blocks),
+            move |db| export_page_with_files(db, &dir, &title, icon.as_deref(), &blocks),
             on_done,
         )
     }

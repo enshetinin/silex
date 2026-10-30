@@ -304,7 +304,7 @@ fn links_export_as_relative_links_in_the_workspace_and_text_alone() -> anyhow::R
 
         // A page alone: its links are just titles.
         let blocks = db.list_blocks(&diario)?;
-        let alone = export_page_with_files(&db, &tmp.join("sola"), "Diario", &blocks)?;
+        let alone = export_page_with_files(&db, &tmp.join("sola"), "Diario", None, &blocks)?;
         let text = std::fs::read_to_string(alone)?;
         assert!(text.contains(r"Pan \[de\] centeno"), "{text}");
         assert!(!text.contains("](<"), "{text}");

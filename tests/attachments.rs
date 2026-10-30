@@ -245,7 +245,7 @@ fn file_blocks_export_as_links_next_to_their_page() -> anyhow::Result<()> {
     let out = tmp.0.join("Exportaciones");
     fs::create_dir_all(out.join("Facturas (adjuntos)"))?;
     fs::write(out.join("Facturas (adjuntos)").join("mío.txt"), "mío")?;
-    let md = export_page_with_files(&db, &out, "Facturas", &blocks)?;
+    let md = export_page_with_files(&db, &out, "Facturas", None, &blocks)?;
     assert_eq!(md, out.join("Facturas.md"));
     let text = fs::read_to_string(&md)?;
     assert!(
@@ -267,7 +267,7 @@ fn file_blocks_export_as_links_next_to_their_page() -> anyhow::Result<()> {
         "mío"
     );
     // Exporting again never overwrites.
-    let again = export_page_with_files(&db, &out, "Facturas", &blocks)?;
+    let again = export_page_with_files(&db, &out, "Facturas", None, &blocks)?;
     assert_eq!(again, out.join("Facturas (2).md"));
     assert!(
         out.join("Facturas (2) (adjuntos)")
@@ -299,8 +299,8 @@ fn a_page_without_files_exports_as_before() -> anyhow::Result<()> {
     let tmp = TempDir::new()?;
     let db = Database::open_in_memory()?;
     let blocks = vec![block("p", BlockKind::Paragraph, "Hola", None)];
-    let with = export_page_with_files(&db, &tmp.0.join("a"), "Nota", &blocks)?;
-    let without = export_page(&tmp.0.join("b"), "Nota", &blocks)?;
+    let with = export_page_with_files(&db, &tmp.0.join("a"), "Nota", None, &blocks)?;
+    let without = export_page(&tmp.0.join("b"), "Nota", None, &blocks)?;
     assert_eq!(fs::read(with)?, fs::read(without)?);
     assert_eq!(fs::read_dir(tmp.0.join("a"))?.count(), 1, "no folder");
     Ok(())
@@ -484,6 +484,7 @@ fn a_page_with_files_exports_on_its_own_thread() -> anyhow::Result<()> {
         tmp.db(),
         out.clone(),
         "Facturas".into(),
+        None,
         blocks.clone(),
         move || {
             let _ = done.send(());
@@ -501,6 +502,7 @@ fn a_page_with_files_exports_on_its_own_thread() -> anyhow::Result<()> {
         tmp.0.join("no-existe").join("silex.sqlite3"),
         out,
         "Facturas".into(),
+        None,
         blocks,
         || {},
     )?;

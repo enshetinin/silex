@@ -207,3 +207,26 @@ fn background_job_exports_from_its_own_connection() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// H12.8b: a page's icon is written before its title inside the file, not
+/// in its name; databases too.
+#[test]
+fn icons_go_before_the_title_inside_the_files() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let mut db = Database::open_in_memory()?;
+    let pan = page(&mut db, "Pan", None, "harina")?;
+    db.set_page_icon(&pan, Some("🍞"))?;
+    page(&mut db, "Sin icono", None, "nada")?;
+    let table = db.create_database("Tareas", None)?;
+    db.set_page_icon(&table, Some("✅"))?;
+    let out = export_workspace(&db, &tmp.0)?;
+    let files = tree(&out.dir)?;
+    assert!(files.contains(&"Pan.md".to_owned()), "{files:?}");
+    let pan_md = fs::read_to_string(out.dir.join("Pan.md"))?;
+    assert!(pan_md.starts_with("# 🍞 Pan\n"), "{pan_md}");
+    let plain = fs::read_to_string(out.dir.join("Sin icono.md"))?;
+    assert!(plain.starts_with("# Sin icono\n"), "{plain}");
+    let tasks = fs::read_to_string(out.dir.join("Tareas.md"))?;
+    assert!(tasks.starts_with("# ✅ Tareas\n"), "{tasks}");
+    Ok(())
+}

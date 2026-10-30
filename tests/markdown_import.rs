@@ -317,3 +317,36 @@ fn details_from_github_become_toggles_and_other_html_stays_text() {
     );
     assert_eq!(page.blocks[1].marks.len(), 1, "formatting inside is read");
 }
+
+/// H12.8b: a `# Title` that starts with an emoji and a space gives the
+/// page its icon; export writes it there, so it comes back.
+#[test]
+fn an_emoji_before_the_title_is_the_page_icon() {
+    use silex_desktop::markdown::titled;
+    let cases = [
+        ("# 🌾 Recetas de pan", "Recetas de pan", Some("🌾")),
+        ("# 👨‍👩‍👧 Familia", "Familia", Some("👨‍👩‍👧")),
+        ("# 🇪🇸", "", Some("🇪🇸")),
+        ("# 🌾Recetas", "🌾Recetas", None),
+        ("# Recetas 🌾", "Recetas 🌾", None),
+        ("# 12 recetas", "12 recetas", None),
+    ];
+    for (source, title, icon) in cases {
+        let page = markdown_to_page(source, "archivo");
+        assert_eq!(page.title, title, "{source}");
+        assert_eq!(page.icon.as_deref(), icon, "{source}");
+    }
+    // A file without a `# Title`: its name, and no icon.
+    assert_eq!(markdown_to_page("texto", "🌾 nombre").icon, None);
+    // Round trip.
+    let blocks = vec![nb(BlockKind::Paragraph, 0, false, "texto")];
+    let markdown = page_to_markdown(&titled(Some("📒"), "Diario"), &to_blocks(&blocks));
+    assert!(markdown.starts_with("# 📒 Diario\n"), "{markdown}");
+    let back = markdown_to_page(&markdown, "x");
+    assert_eq!(
+        (back.title.as_str(), back.icon.as_deref()),
+        ("Diario", Some("📒"))
+    );
+    assert_eq!(back.blocks, blocks);
+    assert_eq!(titled(None, "Diario"), "Diario");
+}
