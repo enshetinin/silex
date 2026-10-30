@@ -456,3 +456,12 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - «×» del panel, el botón otra vez o «Mostrar u ocultar el índice» en Cmd/Ctrl+K: se oculta. Cierra y abre la app: sigue como lo dejaste. El estado de guardado no cambia.
 - No aparece en una base de datos, ni con una página abierta al lado, ni si la ventana es muy estrecha (vuelve al ensancharla).
 - Con VoiceOver, cada entrada se anuncia con el texto de su título.
+
+## 50. Mover bloques a otra página (H12.6a, ADR 0017)
+- En el «…» de un bloque, «Mover a…»: se abre «Mover a una página». Escribe parte del título de otra página e Intro: el bloque desaparece de aquí y aparece al final de esa página. Un aviso dice cuántos bloques y adónde.
+- Selecciona varios bloques (Esc, Mayús+↓) y usa «Mover a…» en el «…» de uno de ellos, o «Mover a otra página…» en Cmd/Ctrl+K: se mueven todos, en su orden y con su sangría. Un desplegable lleva su contenido.
+- En el buscador no salen la página abierta ni las bases de datos.
+- Cmd/Ctrl+Z: los bloques vuelven a su sitio y salen de la otra página. Cmd/Ctrl+Mayús+Z: se van otra vez.
+- Mueve un bloque, abre la página de destino en otra pestaña (Cmd/Ctrl+clic), cambia su texto, vuelve a la primera pestaña y pulsa Cmd/Ctrl+Z: vuelve con el texto cambiado. En la pestaña de destino ya no hay nada que deshacer de antes.
+- Con la página de destino abierta al lado (Alt+clic), al mover se ve llegar el bloque.
+- Un bloque con un archivo o un enlace a otra página se mueve y sigue abriendo su archivo o su página; la búsqueda lo encuentra en la página nueva.

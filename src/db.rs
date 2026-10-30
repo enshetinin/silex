@@ -1284,6 +1284,66 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Moves blocks to the end of page `to`, in the order given, in one
+    /// transaction (ADR 0017). Their ids stay, and with them their search
+    /// index, attachments and links. Ids not found are skipped. Returns the
+    /// pages they were in, other than `to`. `to` must be a page (not a
+    /// database), also one in the trash (undoing and redoing a move).
+    pub fn move_blocks(&mut self, ids: &[String], to: &str) -> Result<Vec<String>> {
+        let tx = self.conn.transaction()?;
+        let kind: Option<String> = tx
+            .query_row("SELECT kind FROM pages WHERE id = ?1", [to], |r| r.get(0))
+            .optional()?;
+        ensure!(
+            kind.as_deref() == Some(PageKind::Page.as_str()),
+            "Los bloques solo se pueden mover a una página"
+        );
+        let mut position: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM blocks WHERE page_id = ?1",
+            [to],
+            |r| r.get(0),
+        )?;
+        let mut from = Vec::new();
+        for id in ids {
+            let page: Option<String> = tx
+                .query_row("SELECT page_id FROM blocks WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            let Some(page) = page else {
+                continue;
+            };
+            tx.execute(
+                "UPDATE blocks SET page_id = ?2, position = ?3,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1",
+                params![id, to, position],
+            )?;
+            position += 1;
+            if page != to && !from.contains(&page) {
+                from.push(page);
+            }
+        }
+        tx.commit()?;
+        Ok(from)
+    }
+
+    /// The blocks with these ids as stored now, in whatever page they are.
+    pub fn blocks_by_ids(&self, ids: &[String]) -> Result<Vec<Block>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, page_id, kind, content, checked, position, indent, attachment_id,
+                    link_page_id, marks
+             FROM blocks WHERE id = ?1",
+        )?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(block) = stmt.query_row([id], read_block).optional()? {
+                out.push(block);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn add_block(&self, page_id: &str, kind: BlockKind) -> Result<String> {
         ensure!(
             !matches!(kind, BlockKind::File | BlockKind::PageLink),

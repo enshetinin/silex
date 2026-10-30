@@ -25,6 +25,9 @@ pub enum Command {
     Link,
     /// Shows or hides the page's outline (H12.5).
     ToggleOutline,
+    /// «Mover a otra página…»: the selected blocks, or the last block
+    /// edited (ADR 0017).
+    MoveBlocks,
     AddFavorite,
     RemoveFavorite,
     ExportPage,
@@ -81,6 +84,8 @@ pub struct PaletteContext {
     /// A block of the open page that takes formatting was the last one
     /// edited (ADR 0015).
     pub format_block: bool,
+    /// Blocks are selected, or one was edited last (ADR 0017).
+    pub blocks_target: bool,
     pub settings: Settings,
 }
 
@@ -89,7 +94,7 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 38] = [
+    pub const ALL: [Command; 39] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
@@ -105,6 +110,7 @@ impl Command {
         Command::Format(Format::Strike),
         Command::Link,
         Command::ToggleOutline,
+        Command::MoveBlocks,
         Command::AddFavorite,
         Command::RemoveFavorite,
         Command::ExportPage,
@@ -143,6 +149,7 @@ impl Command {
             Command::Format(format) => format.label(),
             Command::Link => "Enlace…",
             Command::ToggleOutline => "Mostrar u ocultar el índice",
+            Command::MoveBlocks => "Mover a otra página…",
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
@@ -186,6 +193,7 @@ impl Command {
             Command::Format(Format::Code) => &["formato", "monoespaciada", "codigo", "code"],
             Command::Format(Format::Strike) => &["formato", "tachar", "rayado", "strikethrough"],
             Command::Link => &["formato", "url", "web", "vinculo", "hipervinculo", "link"],
+            Command::MoveBlocks => &["mover", "bloques", "trasladar", "llevar", "move"],
             Command::ToggleOutline => &[
                 "indice",
                 "titulos",
@@ -256,6 +264,7 @@ impl Command {
             | Command::ReplaceInPage => cx.page_open && !cx.database_open,
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
             Command::ToggleOutline => cx.page_open && !cx.database_open,
+            Command::MoveBlocks => cx.page_open && !cx.database_open && cx.blocks_target,
             Command::Format(_) | Command::Link => {
                 cx.page_open && !cx.database_open && cx.format_block
             }
@@ -357,8 +366,26 @@ mod tests {
             export_running: false,
             csv_export_running: false,
             format_block: false,
+            blocks_target: false,
             settings: Settings::default(),
         }
+    }
+
+    #[test]
+    fn moving_blocks_is_offered_with_blocks_to_move() {
+        assert!(!Command::MoveBlocks.available(&cx()));
+        let editing = PaletteContext {
+            blocks_target: true,
+            ..cx()
+        };
+        assert_eq!(
+            matching_commands("mover a", &editing),
+            [Command::MoveBlocks]
+        );
+        assert!(!Command::MoveBlocks.available(&PaletteContext {
+            database_open: true,
+            ..editing
+        }));
     }
 
     #[test]

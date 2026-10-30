@@ -96,6 +96,8 @@ pub(super) enum BlockAction {
     Link,
     /// The arrow of a toggle: fold or open it (ADR 0016).
     ToggleFold,
+    /// «Mover a…» (ADR 0017): the block, or the selection it is in.
+    MoveTo,
 }
 
 /// What a block reported while being drawn.
@@ -800,6 +802,7 @@ fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<
                 (icons::ARROW_UP, " Mover arriba", BlockAction::MoveUp),
                 (icons::ARROW_DOWN, " Mover abajo", BlockAction::MoveDown),
                 (icons::COPY, " Duplicar", BlockAction::Duplicate),
+                (icons::ARROW_RIGHT, " Mover a…", BlockAction::MoveTo),
             ] {
                 if ui.button((icons::icon(icon), label)).clicked() {
                     action = Some(chosen);
@@ -1843,6 +1846,15 @@ impl SilexApp {
             BlockAction::ToggleFold => {
                 let folded = self.folds.is_folded(id);
                 self.set_folded(id, !folded);
+                return;
+            }
+            BlockAction::MoveTo => {
+                // The selection, if this block is in it.
+                let (first, last) = self
+                    .selection_range()
+                    .filter(|(a, b)| (*a..=*b).contains(&index))
+                    .unwrap_or((index, index));
+                self.open_move_picker(first, last);
                 return;
             }
             BlockAction::OpenFile | BlockAction::SaveFile | BlockAction::RevealFile => {

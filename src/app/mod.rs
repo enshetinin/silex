@@ -26,6 +26,7 @@ pub mod icons;
 mod inline;
 mod jobs;
 mod links;
+mod move_blocks;
 mod outline;
 mod page_history;
 mod palette;

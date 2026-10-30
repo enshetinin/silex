@@ -28,10 +28,23 @@ pub enum EditKind {
     Other,
 }
 
+/// Blocks a step moved to another page (ADR 0017): undoing it brings them
+/// back from wherever they are; redoing it sends them to `to` again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Moved {
+    /// The blocks, in their order.
+    pub ids: Vec<String>,
+    /// The page they went to.
+    pub to: String,
+}
+
+/// A step: the state on one side of it, and what it did to other pages.
+type Step = (Snapshot, Option<Moved>);
+
 #[derive(Debug, Default)]
 pub struct History {
-    undo: Vec<Snapshot>,
-    redo: Vec<Snapshot>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
     last: Option<(EditKind, Instant)>,
 }
 
@@ -45,28 +58,52 @@ impl History {
                 *k == kind && now.saturating_duration_since(*at) < GROUP_GAP
             });
         if !continues_typing {
-            self.undo.push(before);
-            if self.undo.len() > MAX_STEPS {
-                self.undo.remove(0);
-            }
+            self.push((before, None));
         }
         self.last = Some((kind, now));
     }
 
+    /// Records a step that moved blocks to another page (ADR 0017), always
+    /// a step of its own.
+    pub fn record_move(&mut self, before: Snapshot, moved: Moved) {
+        self.redo.clear();
+        self.push((before, Some(moved)));
+        self.last = None;
+    }
+
+    fn push(&mut self, step: Step) {
+        self.undo.push(step);
+        if self.undo.len() > MAX_STEPS {
+            self.undo.remove(0);
+        }
+    }
+
     /// Returns the state to go back to; `current` becomes redoable.
     pub fn undo(&mut self, current: Snapshot) -> Option<Snapshot> {
-        let previous = self.undo.pop()?;
-        self.redo.push(current);
-        self.last = None;
-        Some(previous)
+        self.undo_step(current).map(|(snapshot, _)| snapshot)
     }
 
     /// Returns the state to go forward to; `current` becomes undoable.
     pub fn redo(&mut self, current: Snapshot) -> Option<Snapshot> {
-        let next = self.redo.pop()?;
-        self.undo.push(current);
+        self.redo_step(current).map(|(snapshot, _)| snapshot)
+    }
+
+    /// [`History::undo`], with the blocks the step moved to another page,
+    /// if it did. [`History::redo_step`] with what it returned puts things
+    /// back as they were (when undoing it could not be done).
+    pub fn undo_step(&mut self, current: Snapshot) -> Option<(Snapshot, Option<Moved>)> {
+        let (previous, moved) = self.undo.pop()?;
+        self.redo.push((current, moved.clone()));
         self.last = None;
-        Some(next)
+        Some((previous, moved))
+    }
+
+    /// [`History::redo`], with the blocks the step moved to another page.
+    pub fn redo_step(&mut self, current: Snapshot) -> Option<(Snapshot, Option<Moved>)> {
+        let (next, moved) = self.redo.pop()?;
+        self.undo.push((current, moved.clone()));
+        self.last = None;
+        Some((next, moved))
     }
 
     pub fn can_undo(&self) -> bool {
@@ -83,7 +120,7 @@ impl History {
         self.undo
             .iter()
             .chain(&self.redo)
-            .flat_map(|snapshot| &snapshot.blocks)
+            .flat_map(|(snapshot, _)| &snapshot.blocks)
             .filter_map(|block| block.attachment.clone())
             .collect()
     }

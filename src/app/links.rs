@@ -42,8 +42,10 @@ pub(super) struct LinkPicker {
     pub(super) after: Option<String>,
     /// «[[» or «/enlace» left this block empty: the link takes its place.
     pub(super) replace: Option<String>,
+    /// Not a link: these blocks are moved to the page chosen (ADR 0017).
+    pub(super) moving: Option<Vec<String>>,
     /// Focus its field on the next frame.
-    opening: bool,
+    pub(super) opening: bool,
 }
 
 /// Links of the open page.
@@ -459,8 +461,11 @@ impl SilexApp {
         };
         let p = theme::current(ctx);
         let exclude = self.selected.clone();
+        let moving = picker.moving.is_some();
+        // Blocks only go to pages (a database shows its table).
         let matches: Vec<Page> = picker_matches(&self.pages, &picker.query, exclude.as_deref())
             .into_iter()
+            .filter(|p| !moving || p.kind == PageKind::Page)
             .cloned()
             .collect();
         use egui::{Key, Modifiers as M};
@@ -479,7 +484,11 @@ impl SilexApp {
         let pages = &self.pages;
         let response = egui::Modal::new(egui::Id::unique("silex_link_picker")).show(ctx, |ui| {
             ui.set_width(460.0);
-            ui.heading("Enlazar a una página");
+            ui.heading(if moving {
+                "Mover a una página"
+            } else {
+                "Enlazar a una página"
+            });
             ui.add_space(theme::space::SM);
             let field = framed(
                 ui,
@@ -489,7 +498,11 @@ impl SilexApp {
                     )
                     .desired_width(f32::INFINITY),
             )
-            .accessible_name("Página a enlazar");
+            .accessible_name(if moving {
+                "Página a la que mover"
+            } else {
+                "Página a enlazar"
+            });
             if std::mem::take(&mut picker.opening) {
                 field.request_focus();
             }
@@ -519,14 +532,24 @@ impl SilexApp {
                 });
             ui.add_space(theme::space::SM);
             ui.label(
-                egui::RichText::new("↑ ↓ para moverte · Intro para enlazar · Esc para cerrar")
-                    .small()
-                    .color(p.text_muted),
+                egui::RichText::new(if moving {
+                    "↑ ↓ para moverte · Intro para mover los bloques al final · Esc para cerrar"
+                } else {
+                    "↑ ↓ para moverte · Intro para enlazar · Esc para cerrar"
+                })
+                .small()
+                .color(p.text_muted),
             );
         });
         close |= response.should_close();
         if let Some(page) = chosen {
-            self.insert_link(&picker, &page);
+            match &picker.moving {
+                Some(ids) => {
+                    let result = self.move_blocks_to(ids, &page);
+                    self.report(result);
+                }
+                None => self.insert_link(&picker, &page),
+            }
         } else if !close {
             self.links.picker = Some(picker);
         }

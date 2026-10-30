@@ -162,6 +162,7 @@ Cada decisión irreversible (formato de documento, sincronización, cifrado, edi
 - `0014-releases.md`: versiones con etiqueta `vX.Y.Z`, borrador de release con los paquetes y «Buscar actualizaciones» sin red.
 - `0015-inline-formatting.md`: formato en línea como tramos en `blocks.marks`, pintados sobre el mismo texto.
 - `0016-toggle-blocks.md`: bloque desplegable; su contenido es la sangría, plegar es estado de vista en `settings` y en Markdown es `<details>`.
+- `0017-move-blocks.md`: mover bloques entre páginas cambiando `page_id`, con un deshacer que los trae de vuelta desde donde estén.
 - `0006-databases.md`: bases de datos como páginas, filas como subpáginas, propiedades tipadas en tablas propias y vistas con configuración JSON (Hito 6).
 
 ## Rendimiento (H9.3b)

@@ -42,15 +42,35 @@ impl SilexApp {
 
     pub(super) fn undo(&mut self) {
         let current = self.snapshot();
-        if let Some(previous) = self.history.undo(current.clone()) {
+        let Some((previous, moved)) = self.history.undo_step(current.clone()) else {
+            return;
+        };
+        // A step that moved blocks to another page (ADR 0017).
+        let Some(moved) = moved else {
             self.apply_snapshot(previous, &current);
+            return;
+        };
+        if let Err(err) = self.undo_move(previous.clone(), &current, &moved) {
+            // Nothing changed: the step stays to undo.
+            self.history.redo_step(previous);
+            self.notice = Some(format!("No se pudieron devolver los bloques: {err:#}"));
         }
     }
 
     pub(super) fn redo(&mut self) {
         let current = self.snapshot();
-        if let Some(next) = self.history.redo(current.clone()) {
+        let Some((next, moved)) = self.history.redo_step(current.clone()) else {
+            return;
+        };
+        let Some(moved) = moved else {
             self.apply_snapshot(next, &current);
+            return;
+        };
+        if let Err(err) = self.redo_move(next.clone(), &current, &moved) {
+            self.history.undo_step(next);
+            self.notice = Some(format!(
+                "No se pudieron volver a mover los bloques: {err:#}"
+            ));
         }
     }
 

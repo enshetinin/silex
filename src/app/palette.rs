@@ -41,6 +41,7 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::Format(format) => super::inline::icon(format),
         Command::Link => icons::LINK,
         Command::ToggleOutline => icons::TABLE_OF_CONTENTS,
+        Command::MoveBlocks => icons::ARROW_RIGHT,
     }
 }
 
@@ -85,6 +86,7 @@ impl SilexApp {
                     .iter()
                     .any(|b| &b.id == id && b.kind.takes_marks())
             }),
+            blocks_target: self.selection.is_some() || self.format_target.is_some(),
             settings: self.settings,
         }
     }
@@ -114,6 +116,16 @@ impl SilexApp {
                 }
             }
             (Command::ToggleOutline, Some(_)) => self.toggle_outline(ctx),
+            (Command::MoveBlocks, Some(_)) => {
+                let target = self.selection_range().or_else(|| {
+                    let (id, _, _) = self.format_target.as_ref()?;
+                    let index = self.blocks.iter().position(|b| &b.id == id)?;
+                    Some((index, index))
+                });
+                if let Some((first, last)) = target {
+                    self.open_move_picker(first, last);
+                }
+            }
             (Command::Link, Some(_)) => {
                 if let Some((id, _, _)) = self.format_target.clone() {
                     self.open_link_edit(ctx, &id, true);

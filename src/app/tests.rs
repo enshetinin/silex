@@ -5693,3 +5693,159 @@ fn going_to_a_heading_opens_what_hides_it_and_focuses_it() -> anyhow::Result<()>
     assert_eq!(app.outline_current.as_deref(), Some(heading.as_str()));
     Ok(())
 }
+
+// ---- Moving blocks to another page (H12.6a, ADR 0017) ----
+
+/// A second page, «Destino», with one block.
+fn add_destination(app: &mut SilexApp) -> anyhow::Result<String> {
+    let dest = app.db.create_page("Destino", None)?;
+    let id = app.db.add_block(&dest, Par)?;
+    let mut blocks = app.db.list_blocks(&dest)?;
+    blocks[0].content = "ya estaba".into();
+    assert_eq!(blocks[0].id, id);
+    app.db.save_document(&dest, "Destino", &blocks)?;
+    app.reload_pages()?;
+    Ok(dest)
+}
+
+fn stored_texts(app: &SilexApp, page: &str) -> anyhow::Result<Vec<String>> {
+    Ok(app
+        .db
+        .list_blocks(page)?
+        .into_iter()
+        .map(|b| b.content)
+        .collect())
+}
+
+#[test]
+fn a_block_moves_with_the_picker_and_undo_and_redo_follow_it() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno"), (Par, 0, "dos"), (Par, 0, "tres")], 0, 0)?;
+    let origin = app.selected.clone().expect("page");
+    let dest = add_destination(&mut app)?;
+    let second = app.blocks[1].id.clone();
+    app.block_action(BlockAction::MoveTo, &second);
+    assert_eq!(
+        app.links.picker.as_ref().and_then(|p| p.moving.clone()),
+        Some(vec![second.clone()])
+    );
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("dest"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.links.picker.is_none());
+    let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(texts, ["uno", "tres"]);
+    assert_eq!(stored_texts(&app, &origin)?, ["uno", "tres"]);
+    assert_eq!(
+        stored_texts(&app, &dest)?,
+        ["ya estaba", "dos"],
+        "at the end"
+    );
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Se movió 1 bloque a «Destino»")),
+        "{:?}",
+        app.notice
+    );
+    // Cmd+Z brings it back, out of the other page.
+    app.undo();
+    let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(texts, ["uno", "dos", "tres"]);
+    assert_eq!(stored_texts(&app, &origin)?, ["uno", "dos", "tres"]);
+    assert_eq!(stored_texts(&app, &dest)?, ["ya estaba"]);
+    assert_eq!(app.blocks[1].id, second, "the same block");
+    // Cmd+Mayús+Z sends it again.
+    app.redo();
+    assert_eq!(stored_texts(&app, &origin)?, ["uno", "tres"]);
+    assert_eq!(stored_texts(&app, &dest)?, ["ya estaba", "dos"]);
+    Ok(())
+}
+
+#[test]
+fn undo_brings_the_blocks_back_with_what_was_written_in_them_there() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno"), (Par, 0, "dos")], 0, 0)?;
+    let origin = app.selected.clone().expect("page");
+    let dest = add_destination(&mut app)?;
+    let page = app.find_page(&dest).cloned().expect("dest");
+    let ids = vec![app.blocks[1].id.clone()];
+    app.move_blocks_to(&ids, &page)?;
+    // Written in the other page, in its own tab.
+    app.open_in_new_tab(&dest)?;
+    app_frame(&mut app, &ctx, vec![]);
+    let moved = app
+        .blocks
+        .iter()
+        .position(|b| b.id == ids[0])
+        .expect("moved");
+    app.blocks[moved].content = "dos, editado allí".into();
+    app.mark_dirty();
+    assert!(app.history.can_undo());
+    app.save_now()?;
+    // Back to the first tab: undo brings it with the edit.
+    app.select_tab(0)?;
+    app_frame(&mut app, &ctx, vec![]);
+    app.undo();
+    assert_eq!(stored_texts(&app, &origin)?, ["uno", "dos, editado allí"]);
+    assert_eq!(stored_texts(&app, &dest)?, ["ya estaba"]);
+    // The other page's undo no longer matches it: it is gone.
+    app.select_tab(1)?;
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(!app.history.can_undo());
+    Ok(())
+}
+
+#[test]
+fn a_selected_toggle_moves_with_its_content_and_databases_are_not_offered() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (Par, 0, "antes"),
+            (TOG, 0, "Detalles"),
+            (Par, 1, "dentro"),
+            (Par, 0, "después"),
+        ],
+        1,
+        0,
+    )?;
+    let dest = add_destination(&mut app)?;
+    app.db.create_database("Tabla destino", None)?;
+    app.reload_pages()?;
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    let toggle = app.blocks[1].id.clone();
+    app.block_action(BlockAction::MoveTo, &toggle);
+    assert_eq!(
+        app.links
+            .picker
+            .as_ref()
+            .and_then(|p| p.moving.as_ref())
+            .map(Vec::len),
+        Some(2),
+        "the toggle and what it holds"
+    );
+    // A database is not a place for blocks.
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("tabla"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.links.picker.is_some(), "nothing to choose");
+    if let Some(picker) = app.links.picker.as_mut() {
+        picker.query = "destino".into();
+    }
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(texts, ["antes", "después"]);
+    let moved: Vec<(String, u8)> = app
+        .db
+        .list_blocks(&dest)?
+        .into_iter()
+        .map(|b| (b.content, b.indent))
+        .collect();
+    assert_eq!(
+        moved,
+        [
+            ("ya estaba".into(), 0),
+            ("Detalles".into(), 0),
+            ("dentro".into(), 1)
+        ]
+    );
+    Ok(())
+}
