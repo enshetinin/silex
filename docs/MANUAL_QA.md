@@ -485,3 +485,14 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Pegado dentro de un bloque de código: el texto entra tal cual.
 - «…» de la página → «Copiar como Markdown» (o Cmd/Ctrl+K «Copiar la página como Markdown») y pega en otro editor: la página con su título, con formato, listas, avisos y desplegables en Markdown. Pegado otra vez en Silex, vuelve como bloques.
 - «Atajos de teclado» lista Cmd/Ctrl+Mayús+V.
+
+## 53. Icono de página (H12.8a)
+- Al abrir con una base de la versión anterior se crea una copia y todo sigue igual.
+- Pasa el ratón por el título de una página: aparece «Añadir icono» encima. Clic: se abre «Icono de la página». Escribe «pan» (o «café», sin acento también): salen esos emojis; Intro o un clic elige. El emoji aparece grande sobre el título y pequeño en la barra lateral, las pestañas, las migas de arriba, favoritos, tarjetas de enlace y los buscadores. Los emojis se ven en color.
+- Pega un emoji cualquiera en el buscador del selector (por ejemplo 🦀) e Intro: ese es el icono. Escribe una palabra sin resultados: Intro no hace nada.
+- Clic en el icono grande → «Quitar icono»: vuelve el icono normal.
+- Cmd/Ctrl+K «Cambiar el icono de la página…» abre el selector con el teclado. Con VoiceOver, cada emoji se anuncia («Icono: pan»…).
+- El estado de guardado no cambia y Cmd/Ctrl+Z no deshace el icono.
+- Duplica la página o guárdala como plantilla y crea otra desde ella: llevan el icono.
+- Una página sin icono no se mueve de sitio (el título está donde siempre).
+- En Windows y en Linux: los emojis se ven en color (en Linux, si está instalada una fuente de emojis como Noto Color Emoji; si no, cuadros).

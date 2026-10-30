@@ -136,6 +136,8 @@ struct RowParts<'a> {
     /// Reserve room for a caret (tree rows) so titles line up.
     caret_slot: bool,
     icon: &'a str,
+    /// The page's emoji, shown instead of `icon` (H12.8).
+    emoji: Option<&'a str>,
     label: &'a str,
     /// Muted text at the right (e.g. a count).
     trailing: Option<String>,
@@ -152,6 +154,7 @@ impl<'a> RowParts<'a> {
             caret: None,
             caret_slot: false,
             icon,
+            emoji: None,
             label,
             trailing,
             selected: false,
@@ -255,11 +258,13 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
         }
         x += CARET_SLOT;
     }
-    ui.painter().text(
+    icons::paint_page_icon(
+        ui.painter(),
         egui::pos2(x, cy),
         egui::Align2::LEFT_CENTER,
+        parts.emoji,
         parts.icon,
-        icons::font(theme::icon::MD),
+        theme::icon::MD,
         if parts.selected {
             p.sidebar_selected_text
         } else {
@@ -402,6 +407,7 @@ impl SilexApp {
             caret: (arrows && row.has_children).then(|| self.expanded.contains(&id)),
             caret_slot: arrows,
             icon,
+            emoji: self.page_icons.get(&id).map(String::as_str),
             label: display_title(&row.page.title),
             trailing: None,
             selected: self.selected.as_deref() == Some(id.as_str()),

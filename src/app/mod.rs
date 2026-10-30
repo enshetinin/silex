@@ -22,6 +22,7 @@ mod duplicate;
 mod files;
 mod find;
 mod frame;
+mod icon_picker;
 pub mod icons;
 mod inline;
 mod jobs;
@@ -151,6 +152,13 @@ pub struct SilexApp {
     format_target: Option<(String, usize, usize)>,
     /// The field giving a web link its URL, while open (H12.1d).
     link_edit: Option<web_links::LinkEdit>,
+    /// The emoji of the pages that have one (H12.8), by page id.
+    page_icons: std::collections::HashMap<String, String>,
+    /// The icon picker, while open (H12.8).
+    icon_picker: Option<icon_picker::IconPicker>,
+    /// The pointer was over the page's title last frame: «Añadir icono»
+    /// shows (H12.8).
+    title_hovered: bool,
     /// The folded toggles (ADR 0016): view state, kept in `settings`.
     folds: silex_desktop::folds::Folds,
     /// `folds` as last stored, to save only when it changes.
@@ -271,6 +279,17 @@ fn display_title(title: &str) -> &str {
     }
 }
 
+impl SilexApp {
+    /// `title` with the page's emoji before it, if it has one (H12.8): for
+    /// text that shows a page with no icon slot (breadcrumbs).
+    fn titled(&self, id: &str, title: &str) -> String {
+        match self.page_icons.get(id) {
+            Some(icon) => format!("{icon} {title}"),
+            None => title.to_owned(),
+        }
+    }
+}
+
 /// Longest title a sentence in a dialog or a notice quotes whole.
 const SHORT_TITLE: usize = 80;
 
@@ -340,6 +359,9 @@ impl SilexApp {
             typing_format: None,
             format_target: None,
             link_edit: None,
+            page_icons: std::collections::HashMap::new(),
+            icon_picker: None,
+            title_hovered: false,
             folds: silex_desktop::folds::Folds::default(),
             saved_folds: String::new(),
             outline_current: None,
@@ -564,6 +586,7 @@ impl SilexApp {
     fn reload_pages(&mut self) -> Result<()> {
         self.pages = self.db.list_pages()?;
         self.templates.list = self.db.list_templates()?;
+        self.page_icons = self.db.page_icons()?;
         self.close_tabs_not_live();
         self.save_tabs();
         self.refresh_side();
@@ -748,7 +771,8 @@ impl SilexApp {
         // consume_shortcut would take Cmd+Opción+F as Cmd+F.
         let find_dialog = self.links.picker.is_some()
             || self.page_history.is_some()
-            || self.templates.picker.is_some();
+            || self.templates.picker.is_some()
+            || self.icon_picker.is_some();
         if !find_dialog {
             if pressed(replace_shortcut(ctx)) || pressed(Sc::new(M::COMMAND | M::ALT, Key::F)) {
                 self.open_find(ctx, true);
@@ -760,7 +784,8 @@ impl SilexApp {
         // a new tab: the search window, to choose its page.
         let dialog = self.links.picker.is_some()
             || self.page_history.is_some()
-            || self.templates.picker.is_some();
+            || self.templates.picker.is_some()
+            || self.icon_picker.is_some();
         if !dialog && pressed(Sc::new(M::COMMAND, Key::T)) {
             self.open_search(ctx);
             if let Some(window) = &mut self.search {
@@ -961,6 +986,7 @@ impl SilexApp {
             && self.links.picker.is_none()
             && self.page_history.is_none()
             && self.templates.picker.is_none()
+            && self.icon_picker.is_none()
             && self.link_edit.is_none()
         {
             self.take_pasted_image(&ctx);
@@ -1011,6 +1037,7 @@ impl SilexApp {
         self.duplicate_dialog(&ctx);
         self.free_space_dialog(&ctx);
         self.link_picker(&ctx);
+        self.icon_picker(&ctx);
         self.link_restore_dialog(&ctx);
         self.template_picker(&ctx);
         self.synced_warning_dialog(&ctx);

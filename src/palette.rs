@@ -32,6 +32,8 @@ pub enum Command {
     ToSubpage,
     /// The open page as Markdown on the clipboard (H12.7).
     CopyMarkdown,
+    /// The icon picker of the open page (H12.8).
+    PageIcon,
     AddFavorite,
     RemoveFavorite,
     ExportPage,
@@ -98,13 +100,14 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 41] = [
+    pub const ALL: [Command; 42] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
         Command::NewRow,
         Command::NewFromTemplate,
         Command::RenamePage,
+        Command::PageIcon,
         Command::DuplicatePage,
         Command::FindInPage,
         Command::ReplaceInPage,
@@ -158,6 +161,7 @@ impl Command {
             Command::MoveBlocks => "Mover a otra página…",
             Command::ToSubpage => "Convertir en subpágina",
             Command::CopyMarkdown => "Copiar la página como Markdown",
+            Command::PageIcon => "Cambiar el icono de la página…",
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
@@ -204,6 +208,7 @@ impl Command {
             Command::MoveBlocks => &["mover", "bloques", "trasladar", "llevar", "move"],
             Command::ToSubpage => &["subpagina", "pagina", "nueva", "extraer", "page"],
             Command::CopyMarkdown => &["md", "portapapeles", "texto", "copy", "markdown"],
+            Command::PageIcon => &["emoji", "icono", "imagen", "simbolo", "icon"],
             Command::ToggleOutline => &[
                 "indice",
                 "titulos",
@@ -276,6 +281,7 @@ impl Command {
             Command::ToggleOutline => cx.page_open && !cx.database_open,
             Command::MoveBlocks => cx.page_open && !cx.database_open && cx.blocks_target,
             Command::CopyMarkdown => cx.page_open && !cx.database_open,
+            Command::PageIcon => cx.page_open,
             // A template has no subpages (ADR 0010).
             Command::ToSubpage => {
                 cx.page_open && !cx.database_open && cx.blocks_target && !cx.template_open
@@ -405,6 +411,16 @@ mod tests {
         assert!(!Command::MoveBlocks.available(&PaletteContext {
             database_open: true,
             ..editing
+        }));
+    }
+
+    #[test]
+    fn the_page_icon_can_be_changed_from_the_palette() {
+        assert_eq!(matching_commands("emoji", &cx()), [Command::PageIcon]);
+        assert!(matching_commands("icono", &cx()).contains(&Command::PageIcon));
+        assert!(!Command::PageIcon.available(&PaletteContext {
+            page_open: false,
+            ..cx()
         }));
     }
 

@@ -5,6 +5,7 @@ pub mod attachment;
 pub mod csv;
 pub mod db;
 pub mod editor;
+pub mod emoji;
 pub mod export;
 pub mod folds;
 pub mod history;

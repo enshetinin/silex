@@ -146,11 +146,13 @@ impl SilexApp {
                 } else {
                     icons::PAGE
                 };
-                let at = ui.painter().text(
+                let at = icons::paint_page_icon(
+                    ui.painter(),
                     egui::pos2(rect.left() + 8.0, rect.center().y),
                     egui::Align2::LEFT_CENTER,
+                    self.page_icons.get(id).map(String::as_str),
                     icon,
-                    icons::font(theme::icon::MD),
+                    theme::icon::MD,
                     p.text_muted,
                 );
                 // «×» on the active tab and under the pointer.

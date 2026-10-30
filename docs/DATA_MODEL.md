@@ -104,8 +104,13 @@
 - **Plegado no está en `blocks`:** es estado de vista, en `settings` con la clave `folded_blocks` (lista JSON de ids, `src/folds.rs`). Un valor dañado se lee como «nada plegado». Al arrancar se olvidan los ids que ya no son desplegables.
 - Probado: v11→v12 y v1→v12 conservando los `rowid`, el formato, el separador y su regla, la búsqueda, las versiones y las plantillas; un fallo a mitad que deja la v11 intacta; una copia v11 restaurada y actualizada; el plegado guardado y releído al reabrir.
 
+## Versión 13 — icono de página (`0013_page_icon.sql`, H12.8)
+- `pages.icon TEXT NULL` con `CHECK (icon IS NULL OR length(icon) BETWEEN 1 AND 16)`: un emoji delante del título. `NULL` es «sin icono» (se ve el de página o tabla), y así quedan todas las páginas existentes. Solo añade la columna.
+- Rust solo guarda un emoji (`emoji::is_icon`: con su tono, ZWJ, bandera o tecla). Duplicar, guardar como plantilla y crear desde plantilla lo copian. Cambiarlo no es un paso de Cmd+Z (como marcar favorito).
+- Probado: v12→v13 y v1→v13 sin reconstruir y conservando la búsqueda, los desplegables y las plantillas; un fallo (una columna `icon` puesta por otra herramienta) que deja la v12 intacta; una copia v12 restaurada y actualizada; el `CHECK`.
+
 ## Evolución
-- Las migraciones publicadas (`0001`…`0012`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
+- Las migraciones publicadas (`0001`…`0013`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).
 - Antes de actualizar una base existente en disco se crea una copia verificada con el esquema antiguo. Si esa copia falla, no se migra.
 - Las copias de esquemas anteriores son válidas: la verificación acepta `1..=LATEST` y la restauración actualiza la base después de restaurar.

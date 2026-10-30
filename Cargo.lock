@@ -3174,6 +3174,7 @@ dependencies = [
  "directories",
  "eframe",
  "egui_kittest",
+ "egui_system_font_provider",
  "image",
  "pulldown-cmark",
  "rfd",

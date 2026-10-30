@@ -25,6 +25,8 @@ pub(super) enum LinkState {
         title: String,
         kind: PageKind,
         path: String,
+        /// Its emoji (H12.8).
+        icon: Option<String>,
     },
     /// In the trash: opening it offers to restore it.
     Trashed { title: String },
@@ -77,6 +79,7 @@ fn page_path(pages: &[Page], id: &str) -> String {
 pub(super) fn link_state(
     pages: &[Page],
     targets: &HashMap<String, LinkTarget>,
+    icons: &HashMap<String, String>,
     block: &Block,
 ) -> LinkState {
     let Some(id) = block.link.as_deref() else {
@@ -87,6 +90,7 @@ pub(super) fn link_state(
             title: page.title.clone(),
             kind: page.kind,
             path: page_path(pages, id),
+            icon: icons.get(id).cloned(),
         };
     }
     match targets.get(id) {
@@ -160,12 +164,18 @@ pub(super) fn link_card(
         LinkState::Gone => icons::LINK,
         _ => icons::PAGE,
     };
+    let emoji = match state {
+        LinkState::Live { icon, .. } => icon.as_deref(),
+        _ => None,
+    };
     let muted = !matches!(state, LinkState::Live { .. });
-    let at = ui.painter().text(
+    let at = icons::paint_page_icon(
+        ui.painter(),
         egui::pos2(rect.left() + 8.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
+        emoji,
         icon,
-        icons::font(theme::icon::MD),
+        theme::icon::MD,
         p.text_muted,
     );
     let mut job = egui::text::LayoutJob::default();
@@ -223,6 +233,7 @@ pub(super) fn backlink_rows<'a>(pages: &'a [Page], ids: &[String]) -> Vec<(&'a P
 fn page_row(
     ui: &mut egui::Ui,
     page: &Page,
+    emoji: Option<&str>,
     path: &str,
     selected: bool,
     role: egui::Role,
@@ -244,11 +255,13 @@ fn page_row(
     } else {
         icons::PAGE
     };
-    let at = ui.painter().text(
+    let at = icons::paint_page_icon(
+        ui.painter(),
         egui::pos2(rect.left() + 8.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
+        emoji,
         icon,
-        icons::font(theme::icon::MD),
+        theme::icon::MD,
         p.text_muted,
     );
     let mut job = egui::text::LayoutJob::default();
@@ -324,7 +337,8 @@ impl SilexApp {
                 });
                 ui.add_space(theme::space::XS);
                 for (page, path) in &rows {
-                    if page_row(ui, page, path, false, egui::Role::Link)
+                    let emoji = self.page_icons.get(&page.id).map(String::as_str);
+                    if page_row(ui, page, emoji, path, false, egui::Role::Link)
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {
@@ -342,7 +356,7 @@ impl SilexApp {
         let Some(link) = self.blocks.iter().find(|b| b.id == block) else {
             return Ok(());
         };
-        match link_state(&self.pages, &self.links.targets, link) {
+        match link_state(&self.pages, &self.links.targets, &self.page_icons, link) {
             LinkState::Live { .. } => {
                 if let Some(target) = link.link.clone() {
                     self.open_clicked(target)?;
@@ -482,6 +496,7 @@ impl SilexApp {
             .flatten();
         let mut close = take_exact_key(ctx, Key::Escape, M::NONE);
         let pages = &self.pages;
+        let page_icons = &self.page_icons;
         let response = egui::Modal::new(egui::Id::unique("silex_link_picker")).show(ctx, |ui| {
             ui.set_width(460.0);
             ui.heading(if moving {
@@ -520,8 +535,14 @@ impl SilexApp {
                 .show(ui, |ui| {
                     for (i, page) in matches.iter().enumerate() {
                         let path = page_path(pages, &page.id);
-                        let row =
-                            page_row(ui, page, &path, i == picker.selected, egui::Role::Button);
+                        let row = page_row(
+                            ui,
+                            page,
+                            page_icons.get(&page.id).map(String::as_str),
+                            &path,
+                            i == picker.selected,
+                            egui::Role::Button,
+                        );
                         if i == picker.selected {
                             row.scroll_to_me(None);
                         }
@@ -681,6 +702,7 @@ mod tests {
             link: link.map(str::to_owned),
             marks: Vec::new(),
         };
+        let icons = HashMap::from([("2".to_owned(), "🍞".to_owned())]);
         let mut targets = HashMap::new();
         targets.insert(
             "9".to_owned(),
@@ -692,23 +714,27 @@ mod tests {
             },
         );
         assert_eq!(
-            link_state(&pages, &targets, &block(Some("2"))),
+            link_state(&pages, &targets, &icons, &block(Some("2"))),
             LinkState::Live {
                 title: "Pan".into(),
                 kind: PageKind::Page,
-                path: "Recetas".into()
+                path: "Recetas".into(),
+                icon: Some("🍞".into())
             }
         );
         assert_eq!(
-            link_state(&pages, &targets, &block(Some("9"))),
+            link_state(&pages, &targets, &icons, &block(Some("9"))),
             LinkState::Trashed {
                 title: "Borrada".into()
             }
         );
         assert_eq!(
-            link_state(&pages, &targets, &block(Some("7"))),
+            link_state(&pages, &targets, &icons, &block(Some("7"))),
             LinkState::Gone
         );
-        assert_eq!(link_state(&pages, &targets, &block(None)), LinkState::Gone);
+        assert_eq!(
+            link_state(&pages, &targets, &icons, &block(None)),
+            LinkState::Gone
+        );
     }
 }

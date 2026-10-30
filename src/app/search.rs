@@ -277,6 +277,7 @@ impl SilexApp {
             .collect();
         let pending = window.worker.as_ref().is_some_and(SearchWorker::is_pending);
 
+        let page_icons = &self.page_icons;
         let id = egui::Id::unique("silex_search_window");
         let width = (ctx.content_rect().width() - 2.0 * theme::space::XL).clamp(240.0, WIDTH);
         let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, [0.0, TOP]);
@@ -340,7 +341,8 @@ impl SilexApp {
                             window.recent.iter().zip(&recent_paths).enumerate()
                         {
                             let selected = index == window.selected;
-                            let row = result_row(ui, p, hit, path, selected);
+                            let emoji = page_icons.get(&hit.page.id).map(String::as_str);
+                            let row = result_row(ui, p, hit, emoji, path, selected);
                             if row.clicked() {
                                 open = Some(index);
                             }
@@ -382,7 +384,8 @@ impl SilexApp {
                         for (offset, (hit, path)) in window.results.iter().zip(&paths).enumerate() {
                             let index = first_page + offset;
                             let selected = index == window.selected;
-                            let row = result_row(ui, p, hit, path, selected);
+                            let emoji = page_icons.get(&hit.page.id).map(String::as_str);
+                            let row = result_row(ui, p, hit, emoji, path, selected);
                             if row.clicked() {
                                 open = Some(index);
                             }
@@ -605,6 +608,7 @@ fn result_row(
     ui: &mut egui::Ui,
     p: &theme::Palette,
     hit: &SearchHit,
+    emoji: Option<&str>,
     path: &str,
     selected: bool,
 ) -> egui::Response {
@@ -636,11 +640,13 @@ fn result_row(
     let painter = ui.painter_at(row);
     let left = row.left() + theme::space::SM;
     let top = row.top() + ROW_PADDING;
-    painter.text(
+    icons::paint_page_icon(
+        &painter,
         egui::pos2(left, top + title_line / 2.0),
         egui::Align2::LEFT_CENTER,
+        emoji,
         icons::PAGE,
-        icons::font(theme::icon::MD),
+        theme::icon::MD,
         if selected {
             p.accent_strong
         } else {

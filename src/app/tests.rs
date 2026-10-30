@@ -6107,3 +6107,42 @@ fn copy_as_markdown_puts_the_page_on_the_clipboard() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---- Page icons (H12.8) ----
+
+#[test]
+fn the_icon_picker_sets_pastes_and_removes_the_icon() -> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let (mut app, ctx) = editor_app(&[(Par, 0, "texto")], 0, 0)?;
+    let page = app.selected.clone().expect("page");
+    app.run_command(&ctx, Command::PageIcon)?;
+    assert!(app.icon_picker.is_some());
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("trigo"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.icon_picker.is_none());
+    assert_eq!(app.page_icons.get(&page).map(String::as_str), Some("🌾"));
+    assert_eq!(
+        app.db.page_icons()?.get(&page).map(String::as_str),
+        Some("🌾")
+    );
+    assert!(app.save.can_close(), "not an edit of the document");
+    // Any emoji can be pasted; text that is not one gives nothing.
+    app.open_icon_picker(&page);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![paste("🦀")]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(app.page_icons.get(&page).map(String::as_str), Some("🦀"));
+    app.open_icon_picker(&page);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("zzz"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.icon_picker.is_some(), "nothing to choose");
+    assert_eq!(app.page_icons.get(&page).map(String::as_str), Some("🦀"));
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.icon_picker.is_none());
+    // Removed: back to no icon.
+    app.set_page_icon(&page, None)?;
+    assert!(app.db.page_icons()?.is_empty());
+    Ok(())
+}

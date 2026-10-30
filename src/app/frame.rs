@@ -40,8 +40,9 @@ impl SilexApp {
                         .into_iter()
                         .rev()
                         .filter_map(|id| {
-                            self.find_page(&id)
-                                .map(|page| (id.clone(), display_title(&page.title).to_owned()))
+                            self.find_page(&id).map(|page| {
+                                (id.clone(), self.titled(&id, display_title(&page.title)))
+                            })
                         })
                         .collect();
                     for (id, title) in &path {
@@ -66,7 +67,8 @@ impl SilexApp {
                     slash(ui, p);
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(display_title(&self.title)).color(p.text),
+                            egui::RichText::new(self.titled(&page_id, display_title(&self.title)))
+                                .color(p.text),
                         )
                         .truncate(),
                     );

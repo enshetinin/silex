@@ -37,6 +37,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (10, include_str!("db/migrations/0010_inline_marks.sql")),
     (11, include_str!("db/migrations/0011_divider_callout.sql")),
     (12, include_str!("db/migrations/0012_toggle.sql")),
+    (13, include_str!("db/migrations/0013_page_icon.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -272,6 +273,35 @@ impl Database {
              ON CONFLICT (key) DO UPDATE SET value = excluded.value",
             params![OPEN_TABS, json],
         )?;
+        Ok(())
+    }
+
+    /// The icon of every page that has one (H12.8), by page id: live, in
+    /// the trash and templates.
+    pub fn page_icons(&self) -> Result<HashMap<String, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, icon FROM pages WHERE icon IS NOT NULL")?;
+        let icons = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<HashMap<String, String>>>()?;
+        Ok(icons)
+    }
+
+    /// Sets the icon of page `id` (one emoji, see [`crate::emoji::is_icon`])
+    /// or removes it with `None`.
+    pub fn set_page_icon(&mut self, id: &str, icon: Option<&str>) -> Result<()> {
+        if let Some(icon) = icon {
+            ensure!(
+                crate::emoji::is_icon(icon),
+                "El icono de una página es un emoji"
+            );
+        }
+        let changed = self.conn.execute(
+            "UPDATE pages SET icon = ?2 WHERE id = ?1",
+            params![id, icon],
+        )?;
+        ensure!(changed == 1, "La página no existe");
         Ok(())
     }
 
@@ -585,6 +615,7 @@ impl Database {
             ),
             params![id, title],
         )?;
+        copy_icon(&tx, page_id, &id)?;
         copy_blocks(&tx, page_id, &id, None)?;
         tx.commit()?;
         Ok(id)
@@ -630,6 +661,7 @@ impl Database {
                                   WHERE parent_id IS ?3 AND template_at IS NULL))",
             params![id, crate::templates::fill_date(&title, today), parent],
         )?;
+        copy_icon(&tx, template_id, &id)?;
         copy_blocks(&tx, template_id, &id, Some(today))?;
         tx.commit()?;
         Ok(id)
@@ -2689,6 +2721,16 @@ type StoredValue = (
 /// `parent`, named `title` (its subpages keep theirs). `ids` maps the ids
 /// of copied properties and options to the new ones, for the views and
 /// values of the pages copied after them. Returns the new page's id.
+/// Gives page `to` the icon of page `from` (H12.8): duplicates and
+/// templates keep it.
+fn copy_icon(tx: &Connection, from: &str, to: &str) -> Result<()> {
+    tx.execute(
+        "UPDATE pages SET icon = (SELECT icon FROM pages WHERE id = ?1) WHERE id = ?2",
+        params![from, to],
+    )?;
+    Ok(())
+}
+
 fn copy_page_tree(
     tx: &Connection,
     from: &str,
@@ -2707,6 +2749,7 @@ fn copy_page_tree(
         "INSERT INTO pages (id, title, parent_id, kind, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![id, title, parent, kind, sort_order],
     )?;
+    copy_icon(tx, from, &id)?;
     copy_blocks(tx, from, &id, None)?;
     if kind == PageKind::Database.as_str() {
         copy_schema(tx, from, &id, ids)?;

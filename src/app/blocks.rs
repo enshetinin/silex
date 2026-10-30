@@ -240,6 +240,9 @@ fn empty_toggle_hint(ui: &mut egui::Ui, indent: u8) -> bool {
     .inner
 }
 
+/// Height of «Añadir icono», above the title of a page without an icon.
+const ADD_ICON_HEIGHT: f32 = 22.0;
+
 /// Height of a divider's row.
 const DIVIDER_HEIGHT: f32 = 24.0;
 /// Room for a callout's icon, left of its text.
@@ -2213,8 +2216,14 @@ impl SilexApp {
                                 .attachment
                                 .as_ref()
                                 .and_then(|a| self.files.previews.get(a)),
-                            link: (block.kind == BlockKind::PageLink)
-                                .then(|| link_state(&self.pages, &self.links.targets, block)),
+                            link: (block.kind == BlockKind::PageLink).then(|| {
+                                link_state(
+                                    &self.pages,
+                                    &self.links.targets,
+                                    &self.page_icons,
+                                    block,
+                                )
+                            }),
                             found: found_by_block.remove(&index).unwrap_or_default(),
                             reveal: reveal_block == Some(index),
                             link_edit: self
@@ -2456,7 +2465,61 @@ impl SilexApp {
     /// edit when it changed.
     fn page_title(&mut self, ui: &mut egui::Ui, page_id: &str) -> Option<EditKind> {
         let p = theme::current(ui.ctx());
-        ui.horizontal(|ui| {
+        // The page's icon above its title (H12.8): a click changes it.
+        // Without one, «Añadir icono» shows while the pointer is over the
+        // title (and Cmd+K «Cambiar el icono de la página…» always works).
+        let top = ui.cursor().top();
+        let icon = self.page_icons.get(page_id).cloned();
+        let mut pick = false;
+        match &icon {
+            Some(emoji) => {
+                ui.horizontal(|ui| {
+                    gutter_space(ui);
+                    pick = ui
+                        .add(
+                            egui::Button::new(egui::RichText::new(emoji).size(44.0))
+                                .frame_when_inactive(false),
+                        )
+                        .on_hover_text("Cambiar el icono")
+                        .accessible_name("Cambiar el icono de la página")
+                        .clicked();
+                });
+            }
+            None => {
+                // In the room above the title, taking none: pages without
+                // an icon keep their layout.
+                let color = if self.title_hovered {
+                    p.text_muted
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+                let left = ui.max_rect().left() + GUTTER + ui.spacing().item_spacing.x;
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(left - ui.spacing().button_padding.x, top - ADD_ICON_HEIGHT),
+                    egui::vec2(140.0, ADD_ICON_HEIGHT),
+                );
+                // A child Ui: `put` would move the title down.
+                let mut room = super::cells::inside(
+                    ui,
+                    rect,
+                    egui::Layout::left_to_right(egui::Align::Center),
+                );
+                pick = room
+                    .add(
+                        egui::Button::new((
+                            icons::icon(icons::SMILE_PLUS).color(color),
+                            egui::RichText::new(" Añadir icono").small().color(color),
+                        ))
+                        .frame_when_inactive(false),
+                    )
+                    .accessible_name("Añadir un icono a la página")
+                    .clicked();
+            }
+        }
+        if pick {
+            self.open_icon_picker(page_id);
+        }
+        let edit = ui.horizontal(|ui| {
             gutter_space(ui);
             let title = ui
                 .add(
@@ -2472,8 +2535,13 @@ impl SilexApp {
                 title.request_focus();
             }
             title.changed().then(|| EditKind::Text("title".into()))
-        })
-        .inner
+        });
+        let header = egui::Rect::from_x_y_ranges(
+            ui.max_rect().x_range(),
+            top - ADD_ICON_HEIGHT..=ui.cursor().top(),
+        );
+        self.title_hovered = ui.rect_contains_pointer(header);
+        edit.inner
     }
 
     /// Breadcrumbs on the left; save state, undo/redo, favorite and the

@@ -142,6 +142,24 @@ pub fn decoration(ui: &mut egui::Ui, icon: &str, size: f32, color: Color32) -> e
     response
 }
 
+/// A page's icon (H12.8): its emoji if it has one (from the system's emoji
+/// font, in color where there is one), else `icon` from the icon font.
+/// Returns where it was drawn.
+pub fn paint_page_icon(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    align: egui::Align2,
+    emoji: Option<&str>,
+    icon: &str,
+    size: f32,
+    color: Color32,
+) -> egui::Rect {
+    match emoji {
+        Some(emoji) => painter.text(pos, align, emoji, FontId::proportional(size - 1.0), color),
+        None => painter.text(pos, align, icon, font(size), color),
+    }
+}
+
 pub fn font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(FAMILY.into()))
 }
@@ -196,6 +214,7 @@ pub const INFO: &str = "\u{e0f9}"; // info
 pub const MINUS: &str = "\u{e11c}"; // minus
 pub const LIGHTBULB: &str = "\u{e1c2}"; // lightbulb
 pub const LIST_COLLAPSE: &str = "\u{e59b}"; // list-collapse
+pub const SMILE_PLUS: &str = "\u{e301}"; // face-slightly-smiling-plus
 pub const TABLE_OF_CONTENTS: &str = "\u{e61e}"; // table-of-contents
 pub const OPEN_EXTERNAL: &str = "\u{e0b9}"; // external-link
 pub const KEYBOARD: &str = "\u{e284}"; // keyboard
@@ -272,6 +291,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("MINUS", MINUS),
     ("LIGHTBULB", LIGHTBULB),
     ("LIST_COLLAPSE", LIST_COLLAPSE),
+    ("SMILE_PLUS", SMILE_PLUS),
     ("TABLE_OF_CONTENTS", TABLE_OF_CONTENTS),
     ("OPEN_EXTERNAL", OPEN_EXTERNAL),
     ("KEYBOARD", KEYBOARD),

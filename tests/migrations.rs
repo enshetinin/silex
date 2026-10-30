@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 12;
+const LATEST: i64 = 13;
 
 struct TempDir(PathBuf);
 
@@ -1404,7 +1404,7 @@ mod v12 {
 
     /// A database exactly as Silex v11 left it (v10 content plus a
     /// divider at the end of `p2`).
-    fn write_v11_database(path: &Path) -> anyhow::Result<()> {
+    pub(super) fn write_v11_database(path: &Path) -> anyhow::Result<()> {
         write_v10_database(path)?;
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA_V11)?;
@@ -1544,6 +1544,101 @@ mod v12 {
         drop(db);
         let db = Database::open(tmp.db())?;
         assert_eq!(db.folded_blocks()?, Some(format!(r#"["{toggle}"]"#)));
+        Ok(())
+    }
+}
+
+mod v13 {
+    use super::v12::write_v11_database;
+    use super::*;
+
+    const SCHEMA_V12: &str = include_str!("../src/db/migrations/0012_toggle.sql");
+
+    /// A database exactly as Silex v12 left it (v11 content plus a toggle).
+    fn write_v12_database(path: &Path) -> anyhow::Result<()> {
+        write_v11_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V12)?;
+        conn.execute_batch(
+            "INSERT INTO blocks (id, page_id, kind, content, position)
+                 VALUES ('tog', 'p2', 'toggle', 'Más', 100);
+             PRAGMA user_version = 12;",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn v12_database_gets_page_icons_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v12_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(has_column(&tmp.db(), "pages", "icon")?);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before, "no rebuild");
+        assert!(db.page_icons()?.is_empty(), "no page has one yet");
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert!(db.is_template("p3")?);
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v12 copy first"
+        );
+        db.set_page_icon("p2", Some("🌾"))?;
+        assert_eq!(db.page_icons()?.get("p2").map(String::as_str), Some("🌾"));
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        // The CHECK keeps any value short.
+        let conn = Connection::open(tmp.db())?;
+        assert!(
+            conn.execute(
+                "UPDATE pages SET icon = ?1 WHERE id = 'p1'",
+                ["muy largo para un icono"]
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v13() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        db.set_page_icon("p2", Some("📒"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v12_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v12_database(&tmp.db())?;
+        // Another tool already added an `icon` column: 0013 fails.
+        Connection::open(tmp.db())?.execute_batch("ALTER TABLE pages ADD COLUMN icon INTEGER;")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 13"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 12);
+        Ok(())
+    }
+
+    #[test]
+    fn v12_backup_restores_into_v13() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v12_database(&old_db)?;
+        let v12_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        let page = db.create_page("Se pierde al restaurar", None)?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v12_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.get_page(&page)?.is_none());
+        db.set_page_icon("p2", Some("🌾"))?;
         Ok(())
     }
 }

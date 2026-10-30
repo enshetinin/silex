@@ -3795,3 +3795,100 @@ fn a_huge_title_never_pushes_the_trash_buttons_off_screen() -> anyhow::Result<()
     }
     Ok(())
 }
+
+/// H12.8: the demo with page icons: in the sidebar, favorites, tabs and
+/// above the title. Emoji come from the system's font, as in the app.
+fn icons_app() -> anyhow::Result<SilexApp> {
+    let mut app = demo_app()?;
+    let id = |app: &SilexApp, title: &str| {
+        app.pages
+            .iter()
+            .find(|p| p.title == title)
+            .map(|p| p.id.clone())
+            .expect("page")
+    };
+    for (title, icon) in [
+        ("Proyecto Silex", "🚀"),
+        ("Diseño de la interfaz", "🎨"),
+        ("Recetas", "🍞"),
+        ("Guía de estilo", "📒"),
+    ] {
+        let page = id(&app, title);
+        app.set_page_icon(&page, Some(icon))?;
+    }
+    app.reload_pages()?;
+    Ok(app)
+}
+
+/// A harness that draws emoji: the system's emoji font, as eframe adds it
+/// (`system_fonts`). Where there is none (a CI runner), missing glyphs are
+/// boxes, not a failure.
+fn emoji_harness(app: SilexApp, size: [f32; 2]) -> Harness<'static, SilexApp> {
+    let mut harness = Harness::builder()
+        .with_size(size)
+        .with_theme(egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .allow_missing_glyphs()
+        .with_context_setup(|ctx| {
+            theme::install(ctx);
+            ctx.add_font_provider(std::sync::Arc::new(
+                egui_system_font_provider::SystemFontProvider::new(),
+            ));
+        })
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness
+}
+
+#[test]
+fn page_icons_light() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = emoji_harness(icons_app()?, [1100.0, 620.0]);
+    harness.snapshot("page_icons_light");
+    Ok(())
+}
+
+#[test]
+fn icon_picker_light() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut app = icons_app()?;
+    let open = app.selected.clone().expect("page");
+    app.open_icon_picker(&open);
+    let mut harness = emoji_harness(app, [1100.0, 700.0]);
+    harness.snapshot("icon_picker_light");
+    Ok(())
+}
+
+/// The picker's emoji have names; a click on one sets the icon; the icon
+/// above the title opens the picker again, which can remove it.
+#[test]
+fn the_icon_picker_works_with_real_clicks() -> anyhow::Result<()> {
+    let mut harness = emoji_harness(icons_app()?, [1100.0, 700.0]);
+    let open = harness.state().selected.clone().expect("page");
+    harness.state_mut().set_page_icon(&open, None)?;
+    harness.run();
+    harness.get_by_label("Añadir un icono a la página").click();
+    harness.run();
+    assert_accessible(&harness, "icon picker");
+    // Found by a word: it is far down the list.
+    harness.event(egui::Event::Text("espiga".into()));
+    harness.run();
+    harness.get_by_label("Icono: espiga").click();
+    harness.run();
+    assert_eq!(
+        harness.state().page_icons.get(&open).map(String::as_str),
+        Some("🌾")
+    );
+    harness
+        .get_by_label("Cambiar el icono de la página")
+        .click();
+    harness.run();
+    harness.get_by_label("Quitar icono").click();
+    harness.run();
+    assert!(!harness.state().page_icons.contains_key(&open));
+    Ok(())
+}

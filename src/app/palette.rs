@@ -44,6 +44,7 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::MoveBlocks => icons::ARROW_RIGHT,
         Command::ToSubpage => icons::PAGE,
         Command::CopyMarkdown => icons::COPY,
+        Command::PageIcon => icons::SMILE_PLUS,
     }
 }
 
@@ -119,6 +120,7 @@ impl SilexApp {
             }
             (Command::ToggleOutline, Some(_)) => self.toggle_outline(ctx),
             (Command::CopyMarkdown, Some(_)) => self.copy_page_as_markdown(ctx),
+            (Command::PageIcon, Some(id)) => self.open_icon_picker(&id),
             (Command::MoveBlocks | Command::ToSubpage, Some(_)) => {
                 let target = self.selection_range().or_else(|| {
                     let (id, _, _) = self.format_target.as_ref()?;
