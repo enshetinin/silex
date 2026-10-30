@@ -9,6 +9,8 @@ use crate::settings::{Settings, ThemeMode, zoom_step};
 pub enum Command {
     NewPage,
     NewDatabase,
+    /// A database inside the open page (H12.11).
+    NewDatabaseHere,
     NewSubpage,
     NewRow,
     RenamePage,
@@ -102,10 +104,11 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 43] = [
+    pub const ALL: [Command; 44] = [
         Command::NewPage,
         Command::OpenToday,
         Command::NewDatabase,
+        Command::NewDatabaseHere,
         Command::NewSubpage,
         Command::NewRow,
         Command::NewFromTemplate,
@@ -152,6 +155,7 @@ impl Command {
         match self {
             Command::NewPage => "Nueva página",
             Command::NewDatabase => "Nueva base de datos",
+            Command::NewDatabaseHere => "Nueva base de datos dentro de esta página",
             Command::NewSubpage => "Nueva subpágina",
             Command::NewRow => "Nueva fila",
             Command::RenamePage => "Renombrar la página",
@@ -198,6 +202,7 @@ impl Command {
         match self {
             Command::NewPage => &["crear", "documento", "new", "page"],
             Command::NewDatabase => &["crear", "tabla", "coleccion", "database", "table"],
+            Command::NewDatabaseHere => &["crear", "tabla", "coleccion", "dentro", "bbdd"],
             Command::NewSubpage => &["crear", "hija", "anidada", "child"],
             Command::NewRow => &["crear", "entrada", "registro", "row"],
             Command::RenamePage => &["titulo", "nombre", "cambiar", "rename"],
@@ -271,7 +276,9 @@ impl Command {
             | Command::ShowShortcuts
             | Command::CheckUpdates => true,
             // Inside a database a child is a row: «Nueva fila» instead.
-            Command::NewSubpage => cx.page_open && !cx.database_open && !cx.template_open,
+            Command::NewSubpage | Command::NewDatabaseHere => {
+                cx.page_open && !cx.database_open && !cx.template_open
+            }
             Command::NewRow => cx.database_open,
             Command::ExportViewCsv | Command::ExportDatabaseCsv => {
                 cx.database_open && !cx.csv_export_running
@@ -665,11 +672,15 @@ mod tests {
             [
                 Command::NewPage,
                 Command::NewDatabase,
+                Command::NewDatabaseHere,
                 Command::NewSubpage,
                 Command::NewFromTemplate
             ]
         );
-        assert_eq!(matching_commands("tabla", &cx()), [Command::NewDatabase]);
+        assert_eq!(
+            matching_commands("tabla", &cx()),
+            [Command::NewDatabase, Command::NewDatabaseHere]
+        );
         assert_eq!(matching_commands("SUBPAGINA", &cx()), [Command::NewSubpage]);
         assert_eq!(matching_commands("oscuro", &cx()), [Command::ThemeDark]);
         assert_eq!(matching_commands("dark", &cx()), [Command::ThemeDark]);

@@ -230,3 +230,31 @@ fn icons_go_before_the_title_inside_the_files() -> anyhow::Result<()> {
     assert!(tasks.starts_with("# ✅ Tareas\n"), "{tasks}");
     Ok(())
 }
+
+/// H12.11: a database made inside a page goes to the trash with it, comes
+/// back with it, and is exported inside its folder.
+#[test]
+fn a_database_inside_a_page_travels_with_it() -> anyhow::Result<()> {
+    let tmp = TempDir::new()?;
+    let mut db = Database::open_in_memory()?;
+    let notas = page(&mut db, "Notas", None, "con una base")?;
+    let lecturas = db.create_database("Lecturas", Some(&notas))?;
+    db.create_row(&lecturas, "Dune")?;
+    db.trash_page(&notas)?;
+    assert!(db.get_page(&lecturas)?.is_none(), "trashed with its page");
+    db.restore_page(&notas)?;
+    assert!(db.get_page(&lecturas)?.is_some(), "back with it");
+    let result = export_workspace(&db, &tmp.0)?;
+    let entries = tree(&result.dir)?;
+    assert!(
+        entries.iter().any(|e| e == "Notas/Lecturas.md"),
+        "{entries:?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|e| e == "Notas.md" || e.starts_with("Notas/")),
+        "{entries:?}"
+    );
+    Ok(())
+}

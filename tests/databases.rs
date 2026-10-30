@@ -333,3 +333,53 @@ fn several_values_are_set_in_one_transaction_or_not_at_all() -> anyhow::Result<(
     assert!(values.get(&b).and_then(|c| c.get(&leido)).is_none());
     Ok(())
 }
+
+/// H12.11: what the card of a database in a page shows.
+#[test]
+fn the_preview_follows_the_view_last_open() -> anyhow::Result<()> {
+    use silex_desktop::view::{Direction, Sort, ViewConfig};
+    let mut db = Database::open_in_memory()?;
+    let notas = db.create_page("Notas", None)?;
+    let base = db.create_database("Lecturas", Some(&notas))?;
+    let autor = db.add_property(&base, "Autor", PropertyKind::Text)?;
+    let nota = db.add_property(&base, "Nota", PropertyKind::Number)?;
+    for (title, author, mark) in [
+        ("Solaris", "Lem", 8.0),
+        ("Dune", "Herbert", 9.0),
+        ("Neuromante", "Gibson", 7.0),
+    ] {
+        let row = db.create_row(&base, title)?;
+        db.set_value(&row, &autor, Some(&CellValue::Text(author.into())))?;
+        db.set_value(&row, &nota, Some(&CellValue::Number(mark)))?;
+    }
+    // The first view, as it is: manual order, every column.
+    let preview = db.database_preview(&base, 2)?.expect("a database");
+    assert_eq!((preview.view.as_str(), preview.total), ("Tabla", 3));
+    let titles: Vec<&str> = preview.rows.iter().map(|(p, _)| p.title.as_str()).collect();
+    assert_eq!(titles, ["Solaris", "Dune"]);
+    assert_eq!(
+        preview.rows[1].1.get(&autor),
+        Some(&CellValue::Text("Herbert".into()))
+    );
+    assert_eq!(preview.columns.len(), 2);
+    // The view last open, sorted by mark and without «Autor».
+    let mut config = ViewConfig::default();
+    config.sorts = vec![Sort {
+        property: nota.clone(),
+        direction: Direction::Descending,
+    }];
+    config.set_hidden(&autor, true);
+    let best = db.add_view(&base, "Mejores", ViewKind::Table, &config)?;
+    db.set_last_view(&base, &best)?;
+    let preview = db.database_preview(&base, 2)?.expect("a database");
+    assert_eq!(preview.view, "Mejores");
+    let titles: Vec<&str> = preview.rows.iter().map(|(p, _)| p.title.as_str()).collect();
+    assert_eq!(titles, ["Dune", "Solaris"]);
+    let columns: Vec<&str> = preview.columns.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(columns, ["Nota"]);
+    // A page, or a database in the trash: no preview.
+    assert!(db.database_preview(&notas, 2)?.is_none());
+    db.trash_page(&base)?;
+    assert!(db.database_preview(&base, 2)?.is_none());
+    Ok(())
+}

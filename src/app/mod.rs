@@ -6,7 +6,9 @@ use eframe::egui::{self};
 use silex_desktop::{
     db::{Database, Shift, backup::BackupJob},
     history::{History, Snapshot},
-    model::{Block, Page, PageKind, TreeRow, ancestors, build_tree, without_database_rows},
+    model::{
+        Block, BlockKind, Page, PageKind, TreeRow, ancestors, build_tree, without_database_rows,
+    },
     save_state::SaveState,
     settings::{Settings, ThemeMode},
 };
@@ -16,6 +18,7 @@ mod board;
 mod cells;
 mod compare;
 mod database;
+mod database_card;
 mod date_picker;
 mod dialogs;
 mod document;
@@ -158,6 +161,9 @@ pub struct SilexApp {
     page_icons: std::collections::HashMap<String, String>,
     /// The icon picker, while open (H12.8).
     icon_picker: Option<icon_picker::IconPicker>,
+    /// «/base de datos» was chosen in this block (H12.11): made after the
+    /// frame, see `database_from_slash`.
+    new_database_at: Option<String>,
     /// The pointer was over the page's title last frame: «Añadir icono»
     /// shows (H12.8).
     title_hovered: bool,
@@ -371,6 +377,7 @@ impl SilexApp {
             link_edit: None,
             page_icons: std::collections::HashMap::new(),
             icon_picker: None,
+            new_database_at: None,
             title_hovered: false,
             folds: silex_desktop::folds::Folds::default(),
             saved_folds: String::new(),
@@ -733,6 +740,68 @@ impl SilexApp {
     fn create_database(&mut self, parent: Option<&str>) -> Result<()> {
         self.save_now()?;
         let id = self.db.create_database("", parent)?;
+        if let Some(parent) = parent {
+            self.expanded.insert(parent.to_owned());
+        }
+        self.reload_pages()?;
+        self.open_page(id)?;
+        self.focus_title = true;
+        Ok(())
+    }
+
+    /// «/base de datos» in block `block_id` of the open page (H12.11): a
+    /// database inside the page and a card to it, in the block's place if
+    /// it was left empty (after it otherwise). Then the database opens to
+    /// be named. The card is a block like any other, and the database a
+    /// page like any other (to the trash from its menu).
+    fn database_from_slash(&mut self, block_id: &str) -> Result<()> {
+        let Some(open) = self.selected.clone() else {
+            return Ok(());
+        };
+        if !self.page_shows_blocks(&open) {
+            return Ok(());
+        }
+        if self.template_open() {
+            self.notice = Some("Una plantilla no puede tener bases de datos dentro.".into());
+            return Ok(());
+        }
+        self.save_now()?;
+        let base = self.db.create_database("", Some(&open))?;
+        let (at, indent) = match self.blocks.iter().position(|b| b.id == block_id) {
+            Some(index) => {
+                let block = &self.blocks[index];
+                let indent = block.indent;
+                if block.kind == BlockKind::Paragraph && block.content.trim().is_empty() {
+                    self.blocks.remove(index);
+                    (index, indent)
+                } else {
+                    (index + 1, indent)
+                }
+            }
+            None => (self.blocks.len(), 0),
+        };
+        let card = Block {
+            id: uuid::Uuid::new_v4().to_string(),
+            page_id: open.clone(),
+            kind: BlockKind::PageLink,
+            content: String::new(),
+            checked: false,
+            position: 0,
+            indent,
+            attachment: None,
+            link: Some(base.clone()),
+            marks: Vec::new(),
+        };
+        self.blocks.insert(at.min(self.blocks.len()), card);
+        self.mark_dirty();
+        self.save_now()?;
+        self.load_links()?;
+        self.create_database_opened(&open, base)
+    }
+
+    /// Shows database `id`, just made inside `parent`, with its name to write.
+    fn create_database_opened(&mut self, parent: &str, id: String) -> Result<()> {
+        self.expanded.insert(parent.to_owned());
         self.reload_pages()?;
         self.open_page(id)?;
         self.focus_title = true;
@@ -1025,6 +1094,10 @@ impl SilexApp {
         self.tick_backups(&ctx);
         self.tick_import();
         self.tick_files(&ctx);
+        if let Some(block) = self.new_database_at.take() {
+            let result = self.database_from_slash(&block);
+            self.report(result);
+        }
         self.tick_free_space();
         self.tick_workspace_export();
         self.tick_page_export();

@@ -19,7 +19,7 @@ use crate::property::{CellValue, OptionColor, Property, PropertyKind, SelectOpti
 use crate::search::{self, BlockMatch, Candidate, SearchHit};
 use crate::settings::Settings;
 use crate::versions::{self, VersionBlocks, VersionInfo};
-use crate::view::ViewConfig;
+use crate::view::{TablePreview, ViewConfig, table_preview};
 
 pub mod backup;
 
@@ -944,6 +944,44 @@ impl Database {
         )?;
         let rows = stmt.query_map([database_id], |r| read_page(r, 0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// What the card of database `id` shows in a page (H12.11): the first
+    /// `max` rows of the view last open in it (or its first), with their
+    /// values. `None` if `id` is not a live database. Without filters or
+    /// sorts, only those rows' values are read.
+    pub fn database_preview(&self, id: &str, max: usize) -> Result<Option<TablePreview>> {
+        if page_kind(&self.conn, id)? != Some(PageKind::Database) {
+            return Ok(None);
+        }
+        let views = self.database_views(id)?;
+        let last = self.last_view(id)?;
+        let view = last
+            .and_then(|last| views.iter().find(|v| v.id == last))
+            .or_else(|| views.first());
+        let (name, config) = view.map_or_else(
+            || ("Tabla".to_owned(), ViewConfig::default()),
+            |v| (v.name.clone(), v.config.clone()),
+        );
+        let properties = self.database_properties(id)?;
+        let rows = self.database_rows(id)?;
+        let values = if config.sorts.is_empty() && config.filters.is_empty() {
+            let mut values = TableValues::new();
+            for row in rows.iter().take(max) {
+                values.insert(row.id.clone(), self.row_values(&row.id)?);
+            }
+            values
+        } else {
+            self.database_values(id)?
+        };
+        Ok(Some(table_preview(
+            &name,
+            &rows,
+            &values,
+            &properties,
+            &config,
+            max,
+        )))
     }
 
     /// Views of a database, in their order. An unknown view kind is skipped

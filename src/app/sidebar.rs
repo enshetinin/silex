@@ -40,6 +40,8 @@ pub(super) enum RowAction {
     UseTemplate(String, Option<String>),
     /// «Nueva página desde plantilla…», inside a page or at the root.
     FromTemplate(Option<String>),
+    /// «Nueva base de datos dentro» of a page (H12.11).
+    NewDatabase(String),
     SaveAsTemplate(String),
 }
 
@@ -537,6 +539,16 @@ impl SilexApp {
         if ui.button(child).clicked() {
             action = Some(RowAction::Subpage(owned()));
         }
+        // Not inside a database, nor inside one of its rows (their
+        // subpages are not in the sidebar).
+        let row = page
+            .parent_id
+            .as_deref()
+            .is_some_and(|parent| self.is_database(parent));
+        if page.kind == PageKind::Page && !row && ui.button("Nueva base de datos dentro").clicked()
+        {
+            action = Some(RowAction::NewDatabase(owned()));
+        }
         // Templates (ADR 0010): not inside a database, nor of one.
         if page.kind == PageKind::Page && ui.button("Nueva página desde plantilla…").clicked() {
             action = Some(RowAction::FromTemplate(Some(owned())));
@@ -626,6 +638,7 @@ impl SilexApp {
                 Ok(())
             }
             RowAction::SaveAsTemplate(id) => self.save_as_template(&id),
+            RowAction::NewDatabase(id) => self.create_database(Some(&id)),
         }
     }
 

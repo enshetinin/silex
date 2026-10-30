@@ -2858,6 +2858,151 @@ fn page_history() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- H12.11: a database inside a page ----
+
+#[test]
+fn the_page_menu_makes_a_database_inside_the_page() -> anyhow::Result<()> {
+    let app = demo_app()?;
+    let open = app.selected.clone().expect("a page is open");
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Más acciones de la página");
+    harness.run();
+    menu_item(&harness, "Nueva base de datos dentro")
+        .expect("«Nueva base de datos dentro» in the page menu")
+        .click();
+    harness.run();
+    let app = harness.state();
+    let base = app.selected.clone().expect("the database is open");
+    let page = app.db.get_page(&base)?.expect("made");
+    assert_eq!(page.kind, silex_desktop::model::PageKind::Database);
+    assert_eq!(page.parent_id.as_deref(), Some(open.as_str()));
+    assert!(app.database.is_some());
+    Ok(())
+}
+
+/// «Club de lectura», a page with a paragraph and the card of
+/// «Lecturas», a database inside it: seven books with a state, an author,
+/// a mark and a «Leído» box (five shown).
+fn database_card_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    use silex_desktop::property::{CellValue, OptionColor, PropertyKind};
+    let mut db = Database::open_in_memory()?;
+    let club = db.create_page("Club de lectura", None)?;
+    let base = db.create_database("Lecturas", Some(&club))?;
+    let estado = db.add_property(&base, "Estado", PropertyKind::Select)?;
+    let autor = db.add_property(&base, "Autor", PropertyKind::Text)?;
+    let nota = db.add_property(&base, "Nota", PropertyKind::Number)?;
+    let leido = db.add_property(&base, "Leído", PropertyKind::Checkbox)?;
+    let hecho = db.add_select_option(&estado, "Leído", OptionColor::Green)?;
+    let leyendo = db.add_select_option(&estado, "Leyendo", OptionColor::Blue)?;
+    let pendiente = db.add_select_option(&estado, "Pendiente", OptionColor::Orange)?;
+    for (title, state, author, mark) in [
+        ("Dune", &hecho, "Frank Herbert", Some(9.0)),
+        ("Solaris", &leyendo, "Stanisław Lem", None),
+        ("Fundación", &pendiente, "Isaac Asimov", None),
+        ("Neuromante", &hecho, "William Gibson", Some(7.0)),
+        (
+            "La mano izquierda de la oscuridad",
+            &hecho,
+            "Ursula K. Le Guin",
+            Some(10.0),
+        ),
+        ("Hyperion", &pendiente, "Dan Simmons", None),
+        ("Ubik", &leyendo, "Philip K. Dick", None),
+    ] {
+        let row = db.create_row(&base, title)?;
+        db.set_value(&row, &estado, Some(&CellValue::Select(state.clone())))?;
+        db.set_value(&row, &autor, Some(&CellValue::Text(author.into())))?;
+        if let Some(mark) = mark {
+            db.set_value(&row, &nota, Some(&CellValue::Number(mark)))?;
+            db.set_value(&row, &leido, Some(&CellValue::Checkbox(true)))?;
+        }
+    }
+    let block = |id: &str, kind: BlockKind, content: &str, link: Option<&str>| Block {
+        id: id.into(),
+        page_id: club.clone(),
+        kind,
+        content: content.into(),
+        checked: false,
+        position: 0,
+        indent: 0,
+        attachment: None,
+        link: link.map(str::to_owned),
+        marks: Vec::new(),
+    };
+    db.save_document(
+        &club,
+        "Club de lectura",
+        &[
+            block(
+                "p",
+                BlockKind::Paragraph,
+                "Lo que leemos este otoño, y lo que nos ha parecido.",
+                None,
+            ),
+            block("l", BlockKind::PageLink, "", Some(&base)),
+            block(
+                "q",
+                BlockKind::Paragraph,
+                "Próxima reunión: el jueves.",
+                None,
+            ),
+        ],
+    )?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(club)?;
+    Ok(app)
+}
+
+#[test]
+fn the_database_card_is_a_link_named_with_its_rows() -> anyhow::Result<()> {
+    let app = database_card_app()?;
+    let mut harness = a11y_harness(app);
+    harness.run();
+    assert_accessible(&harness, "database card");
+    let card = harness.get_by_label("Base de datos «Lecturas», 7 filas. Abrir");
+    card.click();
+    harness.run();
+    let app = harness.state();
+    assert!(app.database.is_some(), "a click opens the database");
+    assert_eq!(
+        app.selected
+            .as_ref()
+            .and_then(|id| app.pages.iter().find(|p| &p.id == id))
+            .map(|p| p.title.as_str()),
+        Some("Lecturas")
+    );
+    Ok(())
+}
+
+fn database_card(theme: eframe::egui::Theme, name: &str) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            database_card_app()?,
+        );
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+#[test]
+fn database_card_light() -> anyhow::Result<()> {
+    database_card(eframe::egui::Theme::Light, "database_card_light")
+}
+
+#[test]
+fn database_card_dark() -> anyhow::Result<()> {
+    database_card(eframe::egui::Theme::Dark, "database_card_dark")
+}
+
 // ---- H12.10: comparing a version with the page now ----
 
 #[test]

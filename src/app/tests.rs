@@ -55,6 +55,7 @@ fn frame(
                     attachment: None,
                     preview: None,
                     link: None,
+                    table: None,
                     found: Vec::new(),
                     reveal: false,
                     link_edit: None,
@@ -3431,6 +3432,81 @@ fn slash_enlace_and_the_palette_open_the_picker_and_escape_closes_it() -> anyhow
     let page = app.selected.clone();
     let offered = links::picker_matches(&app.pages, "", page.as_deref());
     assert!(offered.iter().all(|p| Some(&p.id) != page.as_ref()));
+    Ok(())
+}
+
+// ---- H12.11: a database inside a page ----
+
+#[test]
+fn slash_base_de_datos_makes_one_inside_the_page_with_a_card() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    use silex_desktop::editor::SlashItem;
+    let (mut app, ctx, _, empty) = links_app()?;
+    let diario = app.selected.clone().expect("«Diario» is open");
+    app_frame(&mut app, &ctx, type_text("/base"));
+    let menu = app.slash.clone().expect("slash menu");
+    assert_eq!(menu.matches, [SlashItem::Database]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    // The database opens, inside «Diario», to be named.
+    let base = app.selected.clone().expect("something open");
+    assert_ne!(base, diario);
+    let page = app.db.get_page(&base)?.expect("made");
+    assert_eq!(page.kind, PageKind::Database);
+    assert_eq!(page.parent_id.as_deref(), Some(diario.as_str()));
+    assert!(app.database.is_some(), "its table is shown");
+    assert!(app.expanded.contains(&diario), "seen in the sidebar");
+    // «Diario» has a card to it in the empty block's place, saved.
+    let blocks = app.db.list_blocks(&diario)?;
+    let kinds: Vec<(BlockKind, Option<String>)> =
+        blocks.iter().map(|b| (b.kind, b.link.clone())).collect();
+    assert_eq!(
+        kinds,
+        [
+            (BlockKind::Paragraph, None),
+            (BlockKind::PageLink, Some(base.clone()))
+        ]
+    );
+    assert!(blocks.iter().all(|b| b.id != empty));
+    // Named, the card shows its name.
+    app.db.rename_page(&base, "Lecturas")?;
+    app.open_page(diario.clone())?;
+    app.reload_pages()?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Lecturas"), "{painted:?}");
+    Ok(())
+}
+
+#[test]
+fn a_database_can_be_made_inside_a_page_from_the_palette_but_not_in_a_template()
+-> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let (mut app, ctx, recetas, _) = links_app()?;
+    app.open_page(recetas.clone())?;
+    app.run_command(&ctx, Command::NewDatabaseHere)?;
+    let base = app.selected.clone().expect("open");
+    let page = app.db.get_page(&base)?.expect("made");
+    assert_eq!(page.kind, PageKind::Database);
+    assert_eq!(page.parent_id.as_deref(), Some(recetas.as_str()));
+    assert!(app.expanded.contains(&recetas));
+    // No card from the palette or the menu (as «Nueva subpágina»).
+    assert!(
+        app.db
+            .list_blocks(&recetas)?
+            .iter()
+            .all(|b| b.kind != BlockKind::PageLink)
+    );
+    // In a template, «/base de datos» explains why not.
+    let template = app.db.save_as_template(&recetas)?;
+    app.reload_pages()?;
+    app.open_page(template.clone())?;
+    let before = app.db.list_pages()?.len();
+    app.database_from_slash("nada")?;
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Una plantilla no puede tener bases de datos dentro.")
+    );
+    assert_eq!(app.db.list_pages()?.len(), before);
     Ok(())
 }
 

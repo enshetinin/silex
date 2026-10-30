@@ -14,7 +14,7 @@ use super::*;
 pub(super) fn command_icon(command: Command) -> &'static str {
     match command {
         Command::NewPage | Command::NewSubpage | Command::NewRow => icons::PLUS,
-        Command::NewDatabase => icons::TABLE,
+        Command::NewDatabase | Command::NewDatabaseHere => icons::TABLE,
         Command::RenamePage => icons::TEXT,
         Command::DuplicatePage => icons::COPY,
         Command::FindInPage | Command::ReplaceInPage => icons::SEARCH,
@@ -111,6 +111,7 @@ impl SilexApp {
             (Command::OpenToday, _) => self.open_today()?,
             (Command::NewRow, Some(id)) => self.add_row(&id)?,
             (Command::NewSubpage, Some(id)) => self.create_subpage(&id)?,
+            (Command::NewDatabaseHere, Some(id)) => self.create_database(Some(&id))?,
             // The open page is renamed in its title, as from its "…" menu.
             (Command::RenamePage, Some(_)) => self.focus_title = true,
             (Command::DuplicatePage, Some(id)) => self.start_duplicate(&id)?,

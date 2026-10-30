@@ -585,11 +585,12 @@ fn a_duplicated_file_block_shares_its_attachment() {
 fn the_slash_menu_offers_attaching_files() {
     use silex_desktop::editor::{SlashItem, slash_items};
     let all = slash_items("");
-    assert_eq!(all.len(), BlockKind::ALL.len() + 3);
+    assert_eq!(all.len(), BlockKind::ALL.len() + 4);
     assert_eq!(
         all[BlockKind::ALL.len()..],
         [
             SlashItem::Divider,
+            SlashItem::Database,
             SlashItem::LinkPage,
             SlashItem::AttachFiles
         ]
@@ -599,6 +600,17 @@ fn the_slash_menu_offers_attaching_files() {
     }
     for query in ["arch", "ARCHIVO", "adj", "imagen", "pdf", "foto"] {
         assert_eq!(slash_items(query), [SlashItem::AttachFiles], "{query}");
+    }
+    // H12.11: a database inside the page.
+    for query in [
+        "base",
+        "base de datos",
+        "BBDD",
+        "tabla",
+        "database",
+        "colección",
+    ] {
+        assert_eq!(slash_items(query), [SlashItem::Database], "{query}");
     }
     // «Título 1» and the like are not drowned by it.
     assert_eq!(slash_items("h1"), [SlashItem::Kind(BlockKind::Heading1)]);

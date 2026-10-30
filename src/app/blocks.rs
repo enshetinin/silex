@@ -8,6 +8,7 @@ use silex_desktop::{
     model::{Block, BlockKind, list_numbers},
 };
 
+use super::database_card::database_card;
 use super::*;
 use super::{icons, inline, theme};
 
@@ -313,6 +314,8 @@ pub(super) struct BlockView<'a> {
     pub(super) preview: Option<&'a PreviewState>,
     /// A link's page, as its card shows it (H7.5).
     pub(super) link: Option<LinkState>,
+    /// A linked database's first rows (H12.11): a table in its card.
+    pub(super) table: Option<&'a silex_desktop::view::TablePreview>,
     /// Matches of the find bar in its text (H11.7): character ranges, and
     /// whether each is the one shown.
     pub(super) found: Vec<(usize, usize, bool)>,
@@ -361,6 +364,16 @@ pub(super) fn block_field(
             // block's focus id, so the arrow keys reach it.
             if !block.kind.is_text() {
                 let (card, file_action) = match &view.link {
+                    Some(
+                        state @ LinkState::Live {
+                            kind: PageKind::Database,
+                            ..
+                        },
+                    ) if block.kind == BlockKind::PageLink
+                        && let Some(table) = view.table =>
+                    {
+                        database_card(ui, id, state, table)
+                    }
                     Some(state) if block.kind == BlockKind::PageLink => link_card(ui, id, state),
                     _ if block.kind == BlockKind::Divider => (divider(ui, id), None),
                     _ => file_card(ui, id, block, view.attachment, view.preview),
@@ -883,6 +896,7 @@ pub(super) fn slash_menu_ui(
                             }
                             editor::SlashItem::LinkPage => (icons::LINK, "Enlazar a una página…"),
                             editor::SlashItem::Divider => (icons::MINUS, "Separador"),
+                            editor::SlashItem::Database => (icons::TABLE, "Base de datos"),
                         };
                         let option = ui.add(egui::Button::selectable(
                             i == menu.selected,
@@ -1399,6 +1413,16 @@ impl SilexApp {
                 editor::insert_divider(&mut self.blocks, index, cursor, || {
                     uuid::Uuid::new_v4().to_string()
                 })
+            }
+            // «/base de datos» (H12.11): the text goes, and after this
+            // frame a database is made inside the page, with a card to it
+            // (in the block's place if it was left empty).
+            EditorKey::Slash(editor::SlashItem::Database) => {
+                self.slash = None;
+                let kind = self.blocks[index].kind;
+                let caret = editor::apply_slash(&mut self.blocks, index, cursor, kind);
+                self.new_database_at = Some(block_id.clone());
+                caret
             }
             EditorKey::Slash(editor::SlashItem::AttachFiles) => {
                 self.slash = None;
@@ -2225,6 +2249,7 @@ impl SilexApp {
                                     block,
                                 )
                             }),
+                            table: block.link.as_ref().and_then(|id| self.links.tables.get(id)),
                             found: found_by_block.remove(&index).unwrap_or_default(),
                             reveal: reveal_block == Some(index),
                             link_edit: self

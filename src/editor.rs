@@ -437,10 +437,24 @@ pub enum SlashItem {
     LinkPage,
     /// A divider (H12.2): see [`insert_divider`].
     Divider,
+    /// A new database inside the page, with a card to it (H12.11).
+    Database,
 }
 
 /// Words «Separador» answers to in the slash menu.
 const DIVIDER_WORDS: &[&str] = &["separador", "divisor", "linea", "divider", "hr", "---"];
+
+/// Words «Base de datos» answers to in the slash menu.
+const DATABASE_WORDS: &[&str] = &[
+    "basededatos",
+    "bbdd",
+    "bd",
+    "tabla",
+    "coleccion",
+    "database",
+    "db",
+    "table",
+];
 
 /// Words «Enlazar a una página» answers to in the slash menu.
 const LINK_WORDS: &[&str] = &["enlace", "enlazar", "pagina", "link", "vincular", "mencion"];
@@ -459,8 +473,8 @@ const ATTACH_WORDS: &[&str] = &[
 ];
 
 /// The slash menu for `query`: the matching types (see [`slash_matches`]),
-/// then «Separador», «Enlazar a una página» and «Adjuntar archivos» if
-/// they match too.
+/// then «Separador», «Base de datos», «Enlazar a una página» and
+/// «Adjuntar archivos» if they match too.
 pub fn slash_items(query: &str) -> Vec<SlashItem> {
     let mut items: Vec<SlashItem> = slash_matches(query)
         .into_iter()
@@ -469,6 +483,12 @@ pub fn slash_items(query: &str) -> Vec<SlashItem> {
     let folded = fold(query);
     if DIVIDER_WORDS.iter().any(|w| w.starts_with(&folded)) {
         items.push(SlashItem::Divider);
+    }
+    if DATABASE_WORDS
+        .iter()
+        .any(|w| w.starts_with(&folded.replace(' ', "")))
+    {
+        items.push(SlashItem::Database);
     }
     if LINK_WORDS.iter().any(|w| w.starts_with(&folded)) {
         items.push(SlashItem::LinkPage);

@@ -582,6 +582,53 @@ fn unticked(subject: Subject<'_>) -> Subject<'_> {
     }
 }
 
+/// What the card of a database shows in a page (H12.11): the columns and
+/// first rows of one of its views, and how many rows that view has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TablePreview {
+    /// The view's name («Tabla»).
+    pub view: String,
+    /// The properties the view shows, in order (after «Nombre»).
+    pub columns: Vec<Property>,
+    /// The first rows the view shows, with their values.
+    pub rows: Vec<(Page, std::collections::HashMap<String, CellValue>)>,
+    /// How many rows the view shows in all.
+    pub total: usize,
+}
+
+/// The first `max` rows of a view (filtered and sorted as it is) and its
+/// columns that are not hidden. `rows` come in their manual order.
+pub fn table_preview(
+    view: &str,
+    rows: &[Page],
+    values: &TableValues,
+    properties: &[Property],
+    config: &ViewConfig,
+    max: usize,
+) -> TablePreview {
+    let shown = visible_rows(rows, values, properties, config);
+    TablePreview {
+        view: view.to_owned(),
+        columns: properties
+            .iter()
+            .filter(|p| !config.is_hidden(&p.id))
+            .cloned()
+            .collect(),
+        rows: shown
+            .iter()
+            .take(max)
+            .map(|&i| {
+                let row = &rows[i];
+                (
+                    row.clone(),
+                    values.get(&row.id).cloned().unwrap_or_default(),
+                )
+            })
+            .collect(),
+        total: shown.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -917,5 +964,39 @@ mod tests {
         assert!(config.is_hidden("autor"));
         config.set_hidden("autor", false);
         assert!(!config.is_hidden("autor"));
+    }
+
+    // ---- H12.11: the card of a database in a page ----
+
+    #[test]
+    fn a_preview_is_the_first_rows_of_the_view_and_its_visible_columns() {
+        let (rows, values, properties) = library();
+        let mut config = filtered(&[("leido", FilterOp::Unchecked, "")]);
+        config.sorts = sorted(&[(NAME, Direction::Ascending)]).sorts;
+        config.set_hidden("fin", true);
+        let preview = table_preview("Pendientes", &rows, &values, &properties, &config, 2);
+        assert_eq!(preview.view, "Pendientes");
+        assert_eq!(preview.total, 3, "Rayuela and Ficciones are read");
+        let titles: Vec<&str> = preview.rows.iter().map(|(p, _)| p.title.as_str()).collect();
+        assert_eq!(titles, ["el Aleph", "Pedro Páramo"]);
+        assert_eq!(
+            preview.rows[1].1.get("autor"),
+            Some(&CellValue::Text("Juan Rulfo".into()))
+        );
+        let columns: Vec<&str> = preview.columns.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(columns, ["paginas", "leido", "estado", "autor"]);
+        // An empty database: no rows, the columns all the same.
+        let empty = table_preview(
+            "Tabla",
+            &[],
+            &values,
+            &properties,
+            &ViewConfig::default(),
+            5,
+        );
+        assert_eq!(
+            (empty.total, empty.rows.len(), empty.columns.len()),
+            (0, 0, 5)
+        );
     }
 }

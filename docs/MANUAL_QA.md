@@ -521,3 +521,17 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Una página sin cambios desde la versión: «La página está igual que en esta versión.»
 - Tema oscuro: los colores se distinguen y el texto se lee.
 - Con VoiceOver, cada bloque marcado se anuncia con lo que le pasó («Quitado: …», «Añadido: …», «Cambiado: …»).
+
+## 57. Base de datos dentro de una página (H12.11)
+- En un bloque vacío de una página, escribe `/base` (o `/tabla`, `/bbdd`) e Intro: se abre una base nueva con el nombre por escribir; en la barra lateral cuelga de la página, que se despliega.
+- Vuelve a la página: en el lugar del bloque hay una tarjeta con el nombre de la base; un clic la abre. Cambia el nombre de la base: la tarjeta lo sigue.
+- Menú «…» de la página (o clic derecho en la barra lateral) → «Nueva base de datos dentro»: la base se crea dentro, sin tarjeta. No aparece en el menú de una base, de una fila ni de una plantilla.
+- Cmd/Ctrl+K «base de datos dentro»: lo mismo, con una página abierta (no en una base ni en una plantilla).
+- En una plantilla, `/base de datos`: un aviso explica que una plantilla no puede tener bases dentro, y no se crea nada.
+- Arrastra la base fuera de la página en la barra lateral: la tarjeta sigue funcionando. Manda la página a la papelera: la base va con ella, y vuelve al restaurarla.
+- Exporta el espacio a Markdown: la base sale dentro de la carpeta de su página.
+- La tarjeta de la base es una mini tabla: nombre, «N filas · vista» y «Abrir»; las primeras 5 filas con sus valores (opciones en color, casillas, números a la derecha) y «+ N filas más». Una base vacía dice «Sin filas todavía».
+- En la base, cambia de vista (una con filtro, orden u ocultando columnas) y vuelve a la página: la tarjeta enseña esa vista. Añade o edita filas y vuelve: la tarjeta está al día.
+- Estrecha la ventana: las columnas que no caben desaparecen de la tarjeta, sin solaparse; los textos largos se cortan con «…».
+- Clic, o Tab hasta la tarjeta e Intro: abre la base. Con VoiceOver se anuncia «Base de datos «Lecturas», 7 filas. Abrir».
+- Tema oscuro: se lee bien y el borde se marca al pasar el ratón.

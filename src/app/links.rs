@@ -9,6 +9,7 @@ use silex_desktop::db::LinkTarget;
 use silex_desktop::editor::fold;
 use silex_desktop::model::{Block, BlockKind, Page, PageKind, ancestors};
 
+use super::database_card::PREVIEW_ROWS;
 use super::*;
 use super::{icons, theme};
 
@@ -61,6 +62,8 @@ pub(super) struct Links {
     pub(super) restore: Option<(String, String)>,
     /// The live pages that link to the open one («Enlazada desde», H7.6).
     pub(super) backlinks: Vec<String>,
+    /// What the cards of the databases it links to show (H12.11), by id.
+    pub(super) tables: HashMap<String, silex_desktop::view::TablePreview>,
 }
 
 /// «Proyecto › Diseño»: the titles above a page, root first.
@@ -295,6 +298,7 @@ impl SilexApp {
         let Some(page) = &self.selected else {
             self.links.targets.clear();
             self.links.backlinks.clear();
+            self.links.tables.clear();
             return Ok(());
         };
         self.links.targets = self
@@ -304,6 +308,18 @@ impl SilexApp {
             .map(|t| (t.id.clone(), t))
             .collect();
         self.links.backlinks = self.db.backlinks(page)?;
+        // Read again with the page (and when pages change): a database
+        // edited elsewhere shows its rows as they are now.
+        let mut tables = HashMap::new();
+        for target in self.links.targets.values() {
+            if target.kind == PageKind::Database
+                && !target.trashed
+                && let Some(table) = self.db.database_preview(&target.id, PREVIEW_ROWS)?
+            {
+                tables.insert(target.id.clone(), table);
+            }
+        }
+        self.links.tables = tables;
         Ok(())
     }
 
