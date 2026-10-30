@@ -155,7 +155,7 @@ fn every_ascii_punctuation_round_trips_in_every_text_kind() {
         .filter(char::is_ascii_punctuation)
         .collect();
     for kind in [
-        Paragraph, Heading1, Heading2, Heading3, Bulleted, Numbered, Todo, Quote, Code,
+        Paragraph, Heading1, Heading2, Heading3, Bulleted, Numbered, Todo, Quote, Callout, Code,
     ] {
         for text in [
             punctuation.clone(),
@@ -180,4 +180,74 @@ fn title_comes_from_a_leading_h1_or_the_file_name() {
         "later H1 stays a block"
     );
     assert_eq!(markdown_to_page("", "vacío").blocks, []);
+}
+
+/// H12.2 and H12.3: dividers and callouts, both ways.
+#[test]
+fn dividers_and_callouts_round_trip() {
+    use BlockKind::*;
+    use silex_desktop::marks::{Mark, MarkKind};
+    let mut callout = nb(Callout, 0, false, "Ojo con el horno\nsegunda línea");
+    callout.marks = vec![Mark::new(0, 3, MarkKind::Bold)];
+    let blocks = vec![
+        nb(Paragraph, 0, false, "antes"),
+        nb(Divider, 0, false, ""),
+        callout,
+        nb(Callout, 0, false, "otro aviso"),
+        nb(Quote, 0, false, "una cita"),
+        nb(Bulleted, 0, false, "lista"),
+        nb(Divider, 1, false, ""),
+        nb(Paragraph, 0, false, "[!NOTE] no es un aviso"),
+    ];
+    let markdown = page_to_markdown("t", &to_blocks(&blocks));
+    assert!(markdown.contains("\n---\n"), "{markdown}");
+    assert!(
+        markdown.contains("> [!NOTE]\n> **Ojo** con el horno\\\n> segunda línea\n"),
+        "{markdown}"
+    );
+    let back = markdown_to_page(&markdown, "x");
+    assert_eq!(back.blocks, blocks, "markdown was:\n{markdown}");
+}
+
+#[test]
+fn github_alerts_and_obsidian_callouts_become_callouts() {
+    let page = markdown_to_page(
+        "> [!TIP]\n> un consejo\n>\n> dos párrafos\n\n\
+         > [!warning]\n> cuidado\n\n\
+         > [!info]\n> de Obsidian con *cursiva*\n\n\
+         > [!faq]\n>\n> marcador solo\n\n\
+         > [!info] con título\n> sigue siendo cita\n\n\
+         > cita normal\n\n***\n",
+        "x",
+    );
+    let got: Vec<(BlockKind, &str)> = page
+        .blocks
+        .iter()
+        .map(|b| (b.kind, b.content.as_str()))
+        .collect();
+    use BlockKind::*;
+    assert_eq!(
+        got,
+        [
+            (Callout, "un consejo"),
+            (Callout, "dos párrafos"),
+            (Callout, "cuidado"),
+            (Callout, "de Obsidian con cursiva"),
+            (Callout, "marcador solo"),
+            (Quote, "[!info] con título\nsigue siendo cita"),
+            (Quote, "cita normal"),
+            (Divider, ""),
+        ]
+    );
+    // The formatting after an Obsidian marker stays on its words.
+    let words: String = {
+        let b = &page.blocks[3];
+        let m = &b.marks[0];
+        b.content
+            .chars()
+            .skip(m.start)
+            .take(m.end - m.start)
+            .collect()
+    };
+    assert_eq!(words, "cursiva");
 }

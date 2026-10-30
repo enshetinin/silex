@@ -13,7 +13,7 @@ use silex_desktop::property::{CellValue, Date, OptionColor, PropertyKind};
 const PAGES: usize = 100;
 const BLOCKS_PER_PAGE: usize = 10;
 const ROWS: usize = 1000;
-const KINDS: [BlockKind; 9] = BlockKind::ALL;
+const KINDS: [BlockKind; BlockKind::ALL.len()] = BlockKind::ALL;
 
 fn main() -> Result<()> {
     let path = std::env::args_os()
@@ -119,7 +119,8 @@ fn link(page: &str, to: &str) -> Block {
 }
 
 /// «QA · Formato en línea» (H12.1b, ADR 0015): every kind of inline
-/// formatting in the block kinds that take it, plus a code block.
+/// formatting in the block kinds that take it, plus a code block, a
+/// divider and a callout (H12.2, H12.3).
 fn formatting(db: &mut Database) -> Result<()> {
     use silex_desktop::marks::{Mark, MarkKind};
     let page = db.create_page("QA · Formato en línea", None)?;
@@ -185,6 +186,13 @@ fn formatting(db: &mut Database) -> Result<()> {
             BlockKind::Code,
             "// Convertir un bloque en código quita su formato",
         ),
+        // H12.2 and H12.3.
+        block(&page, BlockKind::Divider, ""),
+        marked(
+            BlockKind::Callout,
+            "Un aviso con negrita y un enlace: Intro sigue en un párrafo normal.",
+            &[("negrita", MarkKind::Bold), ("un enlace", web())],
+        )?,
     ];
     db.save_document(&page, "QA · Formato en línea", &blocks)?;
     Ok(())

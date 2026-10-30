@@ -12,6 +12,7 @@ El Hito 3 añade títulos de tres niveles, listas con viñetas y numeradas, cita
 ## Decisión
 Opción 1, elegida por el propietario.
 - Tipos: `paragraph`, `heading_1`, `heading_2`, `heading_3`, `todo`, `bulleted`, `numbered`, `quote`, `code`, con `BlockKind` tipado en `src/model.rs`. Un tipo desconocido en la base es un error explícito, nunca un pánico.
+  - *Actualización (H12.2, H12.3):* la migración 0011 añade `divider` (una línea entre bloques, sin texto: una tarjeta como la de un archivo) y `callout` (un aviso: texto con fondo e icono, que se puede elegir en «Convertir en»). Ver `docs/DATA_MODEL.md`, versión 11.
 - `indent INTEGER NOT NULL DEFAULT 0 CHECK (indent BETWEEN 0 AND 6)`.
 - Los `heading` existentes pasan a `heading_1`, porque ya se pintaban con el tamaño mayor.
 - Numeración calculada, no guardada: un contador por nivel; un bloque no numerado en el mismo nivel corta la lista, y volver a un nivel menor reinicia los más profundos.

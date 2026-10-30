@@ -5293,3 +5293,72 @@ fn copying_elsewhere_forgets_the_formatting() -> anyhow::Result<()> {
     assert!(app.blocks[1].marks.is_empty());
     Ok(())
 }
+
+// ---- Divider and callout blocks (H12.2, H12.3) ----
+
+#[test]
+fn typing_three_dashes_makes_a_divider_and_one_undo_brings_them_back() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "antes"), (Par, 0, "")], 1, 0)?;
+    app_frame(&mut app, &ctx, type_text("--"));
+    assert_eq!(app.blocks[1].kind, Par, "not yet");
+    app_frame(&mut app, &ctx, type_text("-"));
+    app_frame(&mut app, &ctx, vec![]);
+    let kinds: Vec<_> = app.blocks.iter().map(|b| b.kind).collect();
+    assert_eq!(kinds, [Par, BlockKind::Divider, Par]);
+    assert_eq!(app.blocks[1].content, "");
+    assert_eq!(focused_block(&app, &ctx), Some(2), "typing goes on below");
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(contents(&app)[1], (Par, 0, "---".into()));
+    assert_eq!(app.blocks.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn slash_divider_and_the_keys_of_its_card() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno"), (Par, 0, "")], 1, 0)?;
+    app_frame(&mut app, &ctx, type_text("/separ"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let divider = app.blocks[1].id.clone();
+    assert_eq!(app.blocks[1].kind, BlockKind::Divider);
+    // ↑ from the paragraph below reaches the divider; Intro adds a
+    // paragraph below it.
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(ctx.memory(|m| m.has_focus(app.block_field_id(&divider))));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks.len(), 4);
+    assert_eq!(focused_block(&app, &ctx), Some(2));
+    // Backspace on the card deletes it.
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&divider)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(app.blocks.iter().all(|b| b.kind != BlockKind::Divider));
+    // Saved without text.
+    app.save_now()?;
+    let page = app.selected.clone().expect("page");
+    assert_eq!(app.db.list_blocks(&page)?.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn slash_callout_and_enter_goes_on_as_text() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+    app_frame(&mut app, &ctx, type_text("/aviso"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks[0].kind, BlockKind::Callout);
+    app_frame(&mut app, &ctx, type_text("Ojo"));
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    app_frame(&mut app, &ctx, type_text(" caliente"));
+    assert_eq!(marked_words(&app, 0), [" caliente"]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(contents(&app)[1], (Par, 0, String::new()));
+    app.save_now()?;
+    let page = app.selected.clone().expect("page");
+    assert_eq!(app.db.list_blocks(&page)?[0].kind, BlockKind::Callout);
+    Ok(())
+}

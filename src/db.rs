@@ -35,6 +35,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (8, include_str!("db/migrations/0008_page_versions.sql")),
     (9, include_str!("db/migrations/0009_templates.sql")),
     (10, include_str!("db/migrations/0010_inline_marks.sql")),
+    (11, include_str!("db/migrations/0011_divider_callout.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -1186,8 +1187,10 @@ impl Database {
         blocks: &[NewBlock],
     ) -> Result<String> {
         ensure!(
-            blocks.iter().all(|b| b.kind.is_text()),
-            "Una página nueva no puede crearse con archivos adjuntos"
+            blocks
+                .iter()
+                .all(|b| !matches!(b.kind, BlockKind::File | BlockKind::PageLink)),
+            "Una página nueva no puede crearse con archivos adjuntos ni enlaces"
         );
         let tx = self.conn.transaction()?;
         if let Some(parent) = parent_id {
@@ -1249,7 +1252,10 @@ impl Database {
     }
 
     pub fn add_block(&self, page_id: &str, kind: BlockKind) -> Result<String> {
-        ensure!(kind.is_text(), "Un archivo se añade con su adjunto");
+        ensure!(
+            !matches!(kind, BlockKind::File | BlockKind::PageLink),
+            "Un archivo o un enlace se añade con su archivo o su página"
+        );
         let id = Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO blocks (id, page_id, kind, position)
@@ -1355,6 +1361,18 @@ impl Database {
                     &linked
                 }
                 None => block,
+            };
+            // A divider has no text (H12.2, and a CHECK in 0011): whatever
+            // the document holds, none is stored.
+            let cleared;
+            let block = if block.kind == BlockKind::Divider && !block.content.is_empty() {
+                cleared = Block {
+                    content: String::new(),
+                    ..block.clone()
+                };
+                &cleared
+            } else {
+                block
             };
             // Formatting is stored clean (ADR 0015): in normal form, inside
             // the text, and only on kinds that take it.

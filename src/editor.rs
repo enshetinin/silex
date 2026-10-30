@@ -83,7 +83,11 @@ pub fn enter(
     }
     let leaves_list = matches!(
         block.kind,
-        BlockKind::Bulleted | BlockKind::Numbered | BlockKind::Todo | BlockKind::Quote
+        BlockKind::Bulleted
+            | BlockKind::Numbered
+            | BlockKind::Todo
+            | BlockKind::Quote
+            | BlockKind::Callout
     );
     if block.content.is_empty() && leaves_list {
         let block = &mut blocks[index];
@@ -150,6 +154,14 @@ pub fn backspace_at_start(blocks: &mut Vec<Block>, index: usize) -> Option<Caret
             char: 0,
         });
     }
+    // A divider above goes, as in Notion; the text stays where it is.
+    if index > 0 && blocks[index - 1].kind == BlockKind::Divider {
+        blocks.remove(index - 1);
+        return Some(Caret {
+            block: index - 1,
+            char: 0,
+        });
+    }
     if index == 0 || !blocks[index - 1].kind.is_text() {
         return None;
     }
@@ -167,6 +179,16 @@ pub fn backspace_at_start(blocks: &mut Vec<Block>, index: usize) -> Option<Caret
 
 /// Delete at the very end of block `index`: pulls the next block's text in.
 pub fn delete_at_end(blocks: &mut Vec<Block>, index: usize) -> Option<Caret> {
+    // A divider below goes (H12.2).
+    if blocks.get(index).is_some_and(|b| b.kind.is_text())
+        && blocks
+            .get(index + 1)
+            .is_some_and(|b| b.kind == BlockKind::Divider)
+    {
+        blocks.remove(index + 1);
+        let char = char_len(&blocks[index].content);
+        return Some(Caret { block: index, char });
+    }
     let mergeable = |i: usize| blocks.get(i).is_some_and(|b| b.kind.is_text());
     if !mergeable(index) || !mergeable(index + 1) {
         return None;
@@ -385,8 +407,10 @@ fn aliases(kind: BlockKind) -> &'static [&'static str] {
         BlockKind::Numbered => &["numerada", "ol", "1.", "numero"],
         BlockKind::Quote => &["cita", "quote", ">"],
         BlockKind::Code => &["codigo", "code", "```"],
-        // Not offered: made by attaching a file or choosing a page.
-        BlockKind::File | BlockKind::PageLink => &[],
+        BlockKind::Callout => &["aviso", "callout", "nota", "destacado", "info"],
+        // Not offered as a type: made by attaching a file, choosing a
+        // page or «/separador» (a divider has no text to keep).
+        BlockKind::File | BlockKind::PageLink | BlockKind::Divider => &[],
     }
 }
 
@@ -410,7 +434,12 @@ pub enum SlashItem {
     AttachFiles,
     /// A link to another page (H7.5, ADR 0008): opens the page picker.
     LinkPage,
+    /// A divider (H12.2): see [`insert_divider`].
+    Divider,
 }
+
+/// Words «Separador» answers to in the slash menu.
+const DIVIDER_WORDS: &[&str] = &["separador", "divisor", "linea", "divider", "hr", "---"];
 
 /// Words «Enlazar a una página» answers to in the slash menu.
 const LINK_WORDS: &[&str] = &["enlace", "enlazar", "pagina", "link", "vincular", "mencion"];
@@ -429,13 +458,17 @@ const ATTACH_WORDS: &[&str] = &[
 ];
 
 /// The slash menu for `query`: the matching types (see [`slash_matches`]),
-/// then «Adjuntar archivos» if it matches too.
+/// then «Separador», «Enlazar a una página» and «Adjuntar archivos» if
+/// they match too.
 pub fn slash_items(query: &str) -> Vec<SlashItem> {
     let mut items: Vec<SlashItem> = slash_matches(query)
         .into_iter()
         .map(SlashItem::Kind)
         .collect();
     let folded = fold(query);
+    if DIVIDER_WORDS.iter().any(|w| w.starts_with(&folded)) {
+        items.push(SlashItem::Divider);
+    }
     if LINK_WORDS.iter().any(|w| w.starts_with(&folded)) {
         items.push(SlashItem::LinkPage);
     }
@@ -469,6 +502,49 @@ pub fn apply_slash(
         block: index,
         char: 0,
     })
+}
+
+/// A divider at block `index` (H12.2), from «/separador» (the text
+/// before `cursor` is the slash query) or `---` typed in a paragraph (all
+/// of it). If nothing is left, the block becomes the divider and a new
+/// paragraph below takes the cursor; otherwise the divider goes above the
+/// text, which keeps the cursor.
+pub fn insert_divider(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    cursor: usize,
+    new_id: impl FnOnce() -> String,
+) -> Option<Caret> {
+    let block = blocks.get_mut(index)?;
+    if !block.kind.is_text() {
+        return None;
+    }
+    let cut = byte_index(&block.content, cursor);
+    block.content.replace_range(..cut, "");
+    block.marks = marks::replace(&block.marks, 0, cursor, 0);
+    if block.content.is_empty() {
+        block.kind = BlockKind::Divider;
+        block.checked = false;
+        block.marks.clear();
+        let below = new_block_like(block, BlockKind::Paragraph, new_id(), String::new());
+        blocks.insert(index + 1, below);
+        return Some(Caret {
+            block: index + 1,
+            char: 0,
+        });
+    }
+    let divider = new_block_like(block, BlockKind::Divider, new_id(), String::new());
+    blocks.insert(index, divider);
+    Some(Caret {
+        block: index + 1,
+        char: 0,
+    })
+}
+
+/// Whether a paragraph's text is a divider written as Markdown (`---`):
+/// typing it turns the paragraph into one (H12.2).
+pub fn is_divider_text(kind: BlockKind, content: &str) -> bool {
+    kind == BlockKind::Paragraph && content == "---"
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +643,11 @@ pub fn selection_clip(blocks: &[Block], first: usize, last: usize) -> Clip {
             BlockKind::Todo if block.checked => "[x] ".to_owned(),
             BlockKind::Todo => "[ ] ".to_owned(),
             _ => String::new(),
+        };
+        let marker = if block.kind == BlockKind::Divider {
+            "---".to_owned()
+        } else {
+            marker
         };
         let prefix = format!("{indent}{marker}");
         at += char_len(&prefix);
@@ -687,6 +768,15 @@ pub fn parse_pasted_line(line: &str) -> PastedLine {
         .unwrap_or(MAX_INDENT)
         .min(MAX_INDENT);
     let rest = &line[spaces / 2 * 2..];
+    if rest == "---" {
+        // A divider, as Silex copies it (and as Markdown writes it).
+        return PastedLine {
+            kind: BlockKind::Divider,
+            indent,
+            checked: false,
+            content: String::new(),
+        };
+    }
     let (kind, checked, content) = if let Some(text) = rest.strip_prefix("• ") {
         (BlockKind::Bulleted, false, text)
     } else if let Some(text) = rest.strip_prefix("[ ] ") {
@@ -748,17 +838,36 @@ pub fn paste_lines_marked(
 ) -> Option<Caret> {
     let text = normalize_pasted(text);
     let mut at = 0;
-    let mut lines = text.split('\n').map(|raw| {
-        let line = parse_pasted_line(raw);
-        let len = char_len(raw);
-        // The content is the end of the line, after its marker.
-        let start = at + len - char_len(&line.content);
-        let line_marks = marks::slice(pasted, start, at + len);
-        at += len + 1;
-        (line, line_marks)
-    });
-    let (first, first_marks) = lines.next()?;
+    let mut lines: Vec<(PastedLine, Vec<marks::Mark>)> = text
+        .split('\n')
+        .map(|raw| {
+            let line = parse_pasted_line(raw);
+            let len = char_len(raw);
+            // The content is the end of the line, after its marker.
+            let start = at + len - char_len(&line.content);
+            let line_marks = marks::slice(pasted, start, at + len);
+            at += len + 1;
+            (line, line_marks)
+        })
+        .collect();
     let block = blocks.get_mut(index)?;
+    // A divider never takes text (H12.2): one pasted after some text goes
+    // on a line of its own.
+    if lines
+        .first()
+        .is_some_and(|(l, _)| l.kind == BlockKind::Divider)
+        && byte_index(&block.content, cursor) > 0
+    {
+        let empty = PastedLine {
+            kind: BlockKind::Paragraph,
+            indent: 0,
+            checked: false,
+            content: String::new(),
+        };
+        lines.insert(0, (empty, Vec::new()));
+    }
+    let mut lines = lines.into_iter();
+    let (first, first_marks) = lines.next()?;
     let split_at = byte_index(&block.content, cursor);
     let tail = block.content.split_off(split_at);
     // The text after the cursor keeps its formatting; the pasted text
@@ -789,6 +898,20 @@ pub fn paste_lines_marked(
         };
         fit_marks(&mut new);
         blocks.insert(last, new);
+    }
+    // The text after the cursor never ends up in a divider.
+    if blocks[last].kind == BlockKind::Divider {
+        let below = Block {
+            id: new_id(),
+            kind: BlockKind::Paragraph,
+            checked: false,
+            indent: blocks[last].indent,
+            content: String::new(),
+            marks: Vec::new(),
+            ..template.clone()
+        };
+        last += 1;
+        blocks.insert(last, below);
     }
     let target = &mut blocks[last];
     let char = char_len(&target.content);

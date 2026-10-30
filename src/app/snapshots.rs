@@ -3363,3 +3363,91 @@ fn web_links_are_named_set_with_the_field_and_opened_with_cmd_click() -> anyhow:
     );
     Ok(())
 }
+
+/// H12.2 and H12.3: a divider between paragraphs and a callout with
+/// formatting, next to a quote.
+fn divider_callout_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::marks::{Mark, MarkKind};
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let page = db.create_page("Separador y aviso", None)?;
+    let specs: Vec<(BlockKind, &str, Vec<Mark>)> = vec![
+        (
+            BlockKind::Paragraph,
+            "Un párrafo antes del separador.",
+            vec![],
+        ),
+        (BlockKind::Divider, "", vec![]),
+        (
+            BlockKind::Callout,
+            "Un aviso con negrita y un enlace, que ocupa el ancho de la columna y \
+             sigue en una segunda línea cuando el texto es largo.",
+            vec![
+                // «negrita» and «y un enlace».
+                Mark::new(13, 20, MarkKind::Bold),
+                Mark::new(21, 32, MarkKind::Link("https://ejemplo.com".into())),
+            ],
+        ),
+        (BlockKind::Quote, "Una cita, para comparar.", vec![]),
+        (BlockKind::Divider, "", vec![]),
+        (BlockKind::Paragraph, "Y un párrafo después.", vec![]),
+    ];
+    let blocks: Vec<Block> = specs
+        .into_iter()
+        .enumerate()
+        .map(|(position, (kind, content, marks))| Block {
+            id: format!("b{position}"),
+            page_id: page.clone(),
+            kind,
+            content: content.to_owned(),
+            checked: false,
+            position: position as i64,
+            indent: 0,
+            attachment: None,
+            link: None,
+            marks,
+        })
+        .collect();
+    db.save_document(&page, "Separador y aviso", &blocks)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+fn divider_callout_snapshot(name: &str, theme: egui::Theme) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 560.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            divider_callout_app()?,
+        );
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+#[test]
+fn divider_and_callout_light() -> anyhow::Result<()> {
+    divider_callout_snapshot("divider_and_callout_light", egui::Theme::Light)
+}
+
+#[test]
+fn divider_and_callout_dark() -> anyhow::Result<()> {
+    divider_callout_snapshot("divider_and_callout_dark", egui::Theme::Dark)
+}
+
+/// The divider and the callout have names for screen readers.
+#[test]
+fn dividers_and_callouts_have_names() -> anyhow::Result<()> {
+    let harness = a11y_harness(divider_callout_app()?);
+    assert_accessible(&harness, "divider and callout");
+    assert_eq!(harness.get_all_by_label("Separador").count(), 2);
+    harness.get_by_label("Aviso");
+    Ok(())
+}

@@ -110,6 +110,27 @@ fn read_only_block(
             ui.painter()
                 .vline(x, quote.rect.y_range(), egui::Stroke::new(3.0, p.border));
         }
+        BlockKind::Divider => {
+            let (rect, _) = ui
+                .allocate_exact_size(egui::vec2(ui.available_width(), 16.0), egui::Sense::hover());
+            ui.painter().hline(
+                rect.x_range(),
+                rect.center().y,
+                egui::Stroke::new(1.0, p.border),
+            );
+        }
+        BlockKind::Callout => {
+            egui::Frame::new()
+                .fill(p.subtle)
+                .corner_radius(egui::CornerRadius::same(theme::radius::MD))
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        icons::decoration(ui, icons::LIGHTBULB, theme::icon::MD, p.accent_strong);
+                        ui.label(egui::RichText::new(text).color(p.text));
+                    });
+                });
+        }
         BlockKind::Code => {
             egui::Frame::new()
                 .fill(p.subtle)

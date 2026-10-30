@@ -10,5 +10,5 @@ bulleted 1| Dos
 bulleted 2| Tres
 quote 0| Cita importante⏎en dos líneas
 code 0| fn main() {⏎    println!("hola");⏎}
-paragraph 0| ---
+divider 0| 
 paragraph 0| Final con código y una tilde.  {código «código»; tachado «tilde»}

@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 10;
+const LATEST: i64 = 11;
 
 struct TempDir(PathBuf);
 
@@ -1113,7 +1113,7 @@ mod v10 {
     const SCHEMA_V9: &str = include_str!("../src/db/migrations/0009_templates.sql");
 
     /// A database exactly as Silex v9 left it (v8 content plus a template).
-    fn write_v9_database(path: &Path) -> anyhow::Result<()> {
+    pub(super) fn write_v9_database(path: &Path) -> anyhow::Result<()> {
         write_v8_database(path)?;
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA_V9)?;
@@ -1224,6 +1224,170 @@ mod v10 {
         assert!(db.get_page(&page)?.is_none());
         assert!(db.is_template("p3")?);
         format_first_block(&mut db)?;
+        Ok(())
+    }
+}
+
+mod v11 {
+    use super::v10::write_v9_database;
+    use super::*;
+    use silex_desktop::marks::{Mark, MarkKind};
+    use silex_desktop::model::BlockKind;
+
+    const SCHEMA_V10: &str = include_str!("../src/db/migrations/0010_inline_marks.sql");
+
+    /// A database exactly as Silex v10 left it (v9 content plus bold on
+    /// the first word of `p2`).
+    fn write_v10_database(path: &Path) -> anyhow::Result<()> {
+        write_v9_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V10)?;
+        conn.execute_batch(
+            r#"UPDATE blocks SET marks = '[{"start":0,"end":6,"type":"bold"}]'
+                 WHERE page_id = 'p2' AND position = 0;
+               PRAGMA user_version = 10;"#,
+        )?;
+        Ok(())
+    }
+
+    /// A divider and a callout after `p2`'s blocks, saved and read back.
+    fn add_divider_and_callout(db: &mut Database) -> anyhow::Result<()> {
+        let mut blocks = db.list_blocks("p2")?;
+        let template = blocks[0].clone();
+        for (kind, content) in [(BlockKind::Divider, ""), (BlockKind::Callout, "Ojo 🌾")] {
+            blocks.push(silex_desktop::model::Block {
+                id: uuid::Uuid::new_v4().to_string(),
+                kind,
+                content: content.into(),
+                marks: if kind == BlockKind::Callout {
+                    vec![Mark::new(0, 3, MarkKind::Italic)]
+                } else {
+                    Vec::new()
+                },
+                ..template.clone()
+            });
+        }
+        let title = db.get_page("p2")?.expect("p2").title;
+        db.save_document("p2", &title, &blocks)?;
+        let saved = db.list_blocks("p2")?;
+        let n = saved.len();
+        assert_eq!(saved[n - 2].kind, BlockKind::Divider);
+        assert_eq!(saved[n - 1].kind, BlockKind::Callout);
+        assert_eq!(saved[n - 1].marks, vec![Mark::new(0, 3, MarkKind::Italic)]);
+        Ok(())
+    }
+
+    #[test]
+    fn v10_database_gets_dividers_and_callouts_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v10_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before, "rowids kept");
+        // Everything is where it was, formatting included.
+        let blocks = db.list_blocks("p2")?;
+        assert_eq!(blocks[0].content, "Harina de centeno 🌾");
+        assert_eq!(blocks[0].marks, vec![Mark::new(0, 6, MarkKind::Bold)]);
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert_eq!(db.page_versions("p1")?.len(), 1);
+        assert_eq!(db.list_favorites()?.len(), 1);
+        assert!(db.is_template("p3")?);
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v10 copy first"
+        );
+        add_divider_and_callout(&mut db)?;
+        // The callout's text is searchable; the indexes and triggers are back.
+        assert_eq!(db.search_pages("ojo")?.len(), 1);
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        let indexes: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE tbl_name = 'blocks'
+                   AND type IN ('index', 'trigger') AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert_eq!(
+            indexes,
+            [
+                "blocks_attachment_idx",
+                "blocks_link_idx",
+                "blocks_page_position_idx",
+                "blocks_search_ad",
+                "blocks_search_ai",
+                "blocks_search_au",
+            ]
+        );
+        // A divider never has text or formatting.
+        let with_text = conn.execute(
+            "INSERT INTO blocks (id, page_id, kind, content) VALUES ('d', 'p2', 'divider', 'x')",
+            [],
+        );
+        assert!(with_text.is_err());
+        let broken: Vec<String> = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert!(broken.is_empty(), "{broken:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v11() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        add_divider_and_callout(&mut db)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v10_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v10_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        // The new table's name is taken, so 0011 fails at its first step.
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE blocks_v11 (x);")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 11"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 10);
+        let marks: String = conn.query_row(
+            "SELECT marks FROM blocks WHERE page_id = 'p2' AND position = 0",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(marks.contains("bold"));
+        drop(conn);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        Ok(())
+    }
+
+    #[test]
+    fn v10_backup_restores_into_v11() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v10_database(&old_db)?;
+        let v10_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        let page = db.create_page("Se pierde al restaurar", None)?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v10_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.get_page(&page)?.is_none());
+        assert_eq!(
+            db.list_blocks("p2")?[0].marks,
+            vec![Mark::new(0, 6, MarkKind::Bold)]
+        );
+        add_divider_and_callout(&mut db)?;
         Ok(())
     }
 }

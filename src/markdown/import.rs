@@ -1,5 +1,6 @@
-//! CommonMark (+ GFM task lists and strikethrough) → blocks. The language
-//! of fenced code blocks is not stored (Silex code blocks have no language).
+//! CommonMark (+ GFM task lists, strikethrough and alerts) → blocks. The
+//! language of fenced code blocks is not stored (Silex code blocks have no
+//! language), nor the type of an alert (all are callouts).
 use pulldown_cmark::{Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 
 use crate::marks::{self, Mark, MarkKind};
@@ -49,8 +50,10 @@ enum Open {
 ///   Other links (relative paths, other schemes), images and HTML are kept
 ///   as literal Markdown text, so nothing is lost.
 /// - Line breaks inside a paragraph (soft or hard) become `\n`.
-/// - A thematic break becomes a `---` paragraph; HTML blocks become paragraphs
-///   with their raw text.
+/// - A thematic break becomes a divider (H12.2); HTML blocks become
+///   paragraphs with their raw text.
+/// - A GitHub alert (`> [!NOTE]`, `> [!TIP]`…) or an Obsidian callout
+///   (`> [!info]` on a line of its own) becomes callouts (H12.3).
 pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
     let source = source.trim_start_matches('\u{feff}');
     let mut blocks: Vec<NewBlock> = Vec::new();
@@ -59,6 +62,8 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
     let mut target: Option<Target> = None;
     let mut inline = Inline::default();
     let mut quote_depth = 0usize;
+    // Per open quote: whether it is a callout.
+    let mut callouts: Vec<bool> = Vec::new();
     let mut open: Vec<Open> = Vec::new();
 
     let depth = |lists: &Vec<bool>| {
@@ -80,7 +85,7 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
             marks,
         });
     };
-    let options = Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
+    let options = Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_GFM;
 
     for event in Parser::new_ext(source, options) {
         match event {
@@ -148,10 +153,22 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
                         open_item = None;
                     }
                     Some(Target::Paragraph) => {
-                        let kind = if quote_depth > 0 {
-                            BlockKind::Quote
-                        } else {
+                        let kind = if quote_depth == 0 {
                             BlockKind::Paragraph
+                        } else if callouts.last() == Some(&true) {
+                            BlockKind::Callout
+                        } else if let Some(rest) = obsidian_callout(&content) {
+                            // The marker makes the whole quote a callout.
+                            if let Some(last) = callouts.last_mut() {
+                                *last = true;
+                            }
+                            match rest {
+                                Some(rest) => content = rest,
+                                None => continue,
+                            }
+                            BlockKind::Callout
+                        } else {
+                            BlockKind::Quote
                         };
                         push(&mut blocks, kind, indent, content);
                     }
@@ -172,15 +189,22 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
                     None => {}
                 }
             }
-            Event::Start(Tag::BlockQuote(_)) => quote_depth += 1,
-            Event::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
+            Event::Start(Tag::BlockQuote(alert)) => {
+                quote_depth += 1;
+                callouts.push(alert.is_some());
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                quote_depth = quote_depth.saturating_sub(1);
+                callouts.pop();
+            }
             Event::Rule => {
                 open_item = None;
-                let rule = Inline {
-                    text: "---".into(),
-                    marks: Vec::new(),
-                };
-                push(&mut blocks, BlockKind::Paragraph, depth(&lists), rule);
+                push(
+                    &mut blocks,
+                    BlockKind::Divider,
+                    depth(&lists),
+                    Inline::default(),
+                );
             }
 
             // Inline content.
@@ -307,6 +331,30 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
         _ => fallback_title.to_owned(),
     };
     ImportedPage { title, blocks }
+}
+
+/// An Obsidian callout marker (`[!info]`, `[!warning]`…) on the first
+/// line of a quote's paragraph: `Some` with the text after it (`None` if
+/// there is none), or `None` when it is not one.
+fn obsidian_callout(content: &Inline) -> Option<Option<Inline>> {
+    let rest = content.text.strip_prefix("[!")?;
+    let close = rest.find(']')?;
+    let name = &rest[..close];
+    let after = &rest[close + 1..];
+    if name.is_empty()
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        || !(after.is_empty() || after.starts_with('\n'))
+    {
+        return None;
+    }
+    let skip = "[!".len() + close + 1 + usize::from(after.starts_with('\n'));
+    let removed = content.text[..skip].chars().count();
+    let text = content.text[skip..].to_owned();
+    if text.is_empty() {
+        return Some(None);
+    }
+    let marks = marks::replace(&content.marks, 0, removed, 0);
+    Some(Some(Inline { text, marks }))
 }
 
 fn is_autolink(link_type: LinkType) -> bool {

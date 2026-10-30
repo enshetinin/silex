@@ -21,6 +21,8 @@ const ESCAPED: &[char] = &[
 /// - Newlines inside a block are hard breaks (`\` at the end of the line).
 /// - Inline formatting (ADR 0015): `**negrita**`, `*cursiva*`, `` `código` ``,
 ///   `~~tachado~~` and `[texto](url)`; see [`inline_lines`].
+/// - A divider is `---`; a callout, a GitHub alert (`> [!NOTE]`), which
+///   Obsidian also reads.
 /// - Empty paragraphs cannot be represented and are skipped.
 pub fn page_to_markdown(title: &str, blocks: &[Block]) -> String {
     page_to_markdown_with(title, blocks, &HashMap::new(), &HashMap::new())
@@ -126,6 +128,17 @@ pub fn page_to_markdown_with(
                     None => out.push_str(&name),
                 }
                 out.push('\n');
+            }
+            BlockKind::Divider => {
+                out.push_str(&leading);
+                out.push_str("---\n");
+            }
+            BlockKind::Callout => {
+                let prefix = format!("{leading}> ");
+                out.push_str(&prefix);
+                out.push_str("[!NOTE]\n");
+                let lines = inline_lines(&block.content, &block.marks, true);
+                push_text_lines(&mut out, &prefix, &prefix, &lines);
             }
             BlockKind::Quote => {
                 let prefix = format!("{leading}> ");

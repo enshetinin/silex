@@ -408,3 +408,15 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Selecciona «pan **negro**» dentro de un bloque, Cmd/Ctrl+C, y pégalo en medio de un texto en cursiva de otro bloque: sale exactamente como se copió (negrita solo en «negro», sin cursiva). Cmd/Ctrl+Z lo quita de un paso.
 - Selecciona varios bloques con formato (Esc y Mayús+↓), Cmd/Ctrl+C, y pégalos en un párrafo vacío: vuelven los mismos bloques con su formato.
 - Copia texto desde otra app y pégalo dentro de una negrita: toma la negrita de alrededor, como antes. Pegado en otra app, lo copiado en Silex es texto plano.
+
+## 45. Separador y aviso (H12.2, H12.3)
+- Al abrir con una base de la versión anterior se crea una copia y todo sigue igual: páginas, formato, búsqueda, historial y plantillas.
+- En un párrafo vacío escribe `---`: se convierte en una línea y el cursor pasa a un párrafo nuevo debajo. Cmd/Ctrl+Z vuelve al `---` escrito.
+- Escribe «/sep» e Intro en un párrafo vacío: una línea. Con «/separador» delante de un texto (`/separadorHola`), la línea va encima y el texto se queda.
+- Con ↑ o ↓ llega el foco a la línea (se resalta). Intro añade un párrafo debajo; Retroceso o Supr la borran (Cmd/Ctrl+Z la devuelve). Retroceso al inicio del párrafo de debajo también la borra.
+- Selecciona bloques con una línea en medio (Esc, Mayús+↓), copia y pega en otro sitio: la línea vuelve.
+- «/aviso» (o «…» → «Convertir en» → «Aviso»): el texto sale sobre un fondo gris con una bombilla. Se puede poner negrita, enlaces, etc. Intro sigue en un párrafo normal; Intro en un aviso vacío lo vuelve texto.
+- En oscuro, el aviso y la línea se distinguen y se leen bien.
+- Exporta la página a Markdown: la línea es `---` y el aviso `> [!NOTE]`. En GitHub, el aviso se ve como una nota. Importa el `.md`: vuelven los dos.
+- Importa un `.md` de Obsidian con `> [!info]` en su propia línea: es un aviso. Una página importada antes con `---` como texto no cambia.
+- Con VoiceOver, la línea se anuncia como «Separador» y el aviso como «Aviso».

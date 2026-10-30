@@ -23,7 +23,7 @@
 - Las favoritas en la papelera se ocultan y vuelven al restaurar la página.
 
 ## Versión 3 — tipos de bloque y sangría (`0003_block_kinds.sql`, ADR 0003)
-- `blocks.kind` ∈ `paragraph`, `heading_1`, `heading_2`, `heading_3`, `todo`, `bulleted`, `numbered`, `quote`, `code`. Los `heading` de v1/v2 pasan a `heading_1`. En Rust es `BlockKind`; un nombre desconocido al leer es un error, no un pánico.
+- `blocks.kind` ∈ `paragraph`, `heading_1`, `heading_2`, `heading_3`, `todo`, `bulleted`, `numbered`, `quote`, `code` (más `file` desde la v6, `page_link` desde la v7, y `divider` y `callout` desde la v11). Los `heading` de v1/v2 pasan a `heading_1`. En Rust es `BlockKind`; un nombre desconocido al leer es un error, no un pánico.
 - `blocks.indent INTEGER NOT NULL DEFAULT 0 CHECK (indent BETWEEN 0 AND 6)`: lista plana con sangría, sin árbol de bloques.
 - La tabla se reconstruye (SQLite no permite cambiar un `CHECK`): copia los `rowid` explícitamente, recrea índice y triggers FTS y hace `rebuild` de `block_search`. Hay tests con un hueco de `rowid` y un fallo a mitad que deshace todo.
 - La numeración de listas se calcula al pintar (`list_numbers`), no se guarda.
@@ -92,8 +92,14 @@
 - Historial: una versión con algún bloque con formato se guarda con `format` 2 (`marks` en cada bloque); sin formato, sigue siendo `format` 1, igual que antes. Se leen las dos.
 - Probado: v9→v10 y v1→v10 conservando los `rowid`, la búsqueda, las versiones, los favoritos y las plantillas; un fallo de la migración (una columna `marks` puesta por otra herramienta) que deja la v9 intacta; una copia v9 restaurada y actualizada; JSON dañado que conserva el texto.
 
+## Versión 11 — separador y aviso (`0011_divider_callout.sql`, H12.2 y H12.3)
+- Reconstruye `blocks`, como la 0003, la 0006 y la 0007, para añadir `divider` y `callout` al `CHECK` de `kind`. Copia todas las columnas (también `marks`) con sus `rowid`, vuelve a crear los índices y los triggers de búsqueda, y reconstruye el índice FTS al final.
+- Nuevo `CHECK (kind <> 'divider' OR (content = '' AND marks IS NULL))`: un separador no tiene texto ni formato. `save_document` lo guarda siempre sin texto, aunque el documento en memoria tuviera alguno.
+- Un aviso es un bloque de texto más: busca, guarda formato y se exporta como `> [!NOTE]`.
+- Probado: v10→v11 y v1→v11 conservando los `rowid`, el formato, la búsqueda, las versiones, los favoritos y las plantillas, con los índices y triggers de antes; un fallo a mitad (una tabla `blocks_v11` que ya existe) que deja la v10 intacta, formato incluido; una copia v10 restaurada y actualizada; el `CHECK` del separador.
+
 ## Evolución
-- Las migraciones publicadas (`0001`…`0010`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
+- Las migraciones publicadas (`0001`…`0011`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).
 - Antes de actualizar una base existente en disco se crea una copia verificada con el esquema antiguo. Si esa copia falla, no se migra.
 - Las copias de esquemas anteriores son válidas: la verificación acepta `1..=LATEST` y la restauración actualiza la base después de restaurar.

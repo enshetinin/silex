@@ -585,10 +585,14 @@ fn a_duplicated_file_block_shares_its_attachment() {
 fn the_slash_menu_offers_attaching_files() {
     use silex_desktop::editor::{SlashItem, slash_items};
     let all = slash_items("");
-    assert_eq!(all.len(), BlockKind::ALL.len() + 2);
+    assert_eq!(all.len(), BlockKind::ALL.len() + 3);
     assert_eq!(
         all[BlockKind::ALL.len()..],
-        [SlashItem::LinkPage, SlashItem::AttachFiles]
+        [
+            SlashItem::Divider,
+            SlashItem::LinkPage,
+            SlashItem::AttachFiles
+        ]
     );
     for query in ["enlace", "pag", "LINK", "vinc"] {
         assert_eq!(slash_items(query), [SlashItem::LinkPage], "{query}");
@@ -858,5 +862,135 @@ mod clipboard {
                 marks: vec![bold(0, 1)]
             })
         );
+    }
+}
+
+/// H12.2 and H12.3: dividers and callouts.
+mod divider_and_callout {
+    use super::*;
+    use BlockKind::{Callout, Divider};
+    use silex_desktop::editor::{insert_divider, is_divider_text, paste_lines, selection_text};
+
+    fn ids() -> impl FnMut() -> String {
+        let mut n = 0;
+        move || {
+            n += 1;
+            format!("n{n}")
+        }
+    }
+
+    #[test]
+    fn an_empty_block_becomes_a_divider_with_a_paragraph_below() {
+        // `---` typed: all of it goes.
+        let mut blocks = vec![b("a", Paragraph, 1, "---"), b("z", Paragraph, 0, "fin")];
+        assert!(is_divider_text(Paragraph, "---"));
+        assert!(!is_divider_text(Paragraph, "----") && !is_divider_text(Quote, "---"));
+        let caret = insert_divider(&mut blocks, 0, 3, new_id);
+        assert_eq!(caret, Some(Caret { block: 1, char: 0 }));
+        assert_eq!(
+            summary(&blocks),
+            [
+                ("a", Divider, 1, ""),
+                ("nuevo", Paragraph, 1, ""),
+                ("z", Paragraph, 0, "fin")
+            ]
+        );
+    }
+
+    #[test]
+    fn with_text_after_the_slash_query_the_divider_goes_above() {
+        let mut blocks = vec![b("a", Bulleted, 0, "/sepaTexto")];
+        let caret = insert_divider(&mut blocks, 0, 5, new_id);
+        assert_eq!(caret, Some(Caret { block: 1, char: 0 }));
+        assert_eq!(
+            summary(&blocks),
+            [("nuevo", Divider, 0, ""), ("a", Bulleted, 0, "Texto")]
+        );
+        // Not on a file or another divider.
+        assert_eq!(insert_divider(&mut blocks, 0, 0, new_id), None);
+    }
+
+    #[test]
+    fn backspace_after_a_divider_or_delete_before_it_removes_it() {
+        let mut blocks = vec![
+            b("a", Paragraph, 0, "uno"),
+            b("d", Divider, 0, ""),
+            b("c", Paragraph, 0, "dos"),
+        ];
+        assert_eq!(
+            backspace_at_start(&mut blocks, 2),
+            Some(Caret { block: 1, char: 0 })
+        );
+        assert_eq!(
+            summary(&blocks),
+            [("a", Paragraph, 0, "uno"), ("c", Paragraph, 0, "dos")]
+        );
+        blocks.insert(1, b("d", Divider, 0, ""));
+        assert_eq!(
+            delete_at_end(&mut blocks, 0),
+            Some(Caret { block: 0, char: 3 })
+        );
+        assert_eq!(blocks.len(), 2);
+        // On the divider itself, nothing (the card deletes it as a block).
+        let mut blocks = vec![b("d", Divider, 0, ""), b("c", Paragraph, 0, "x")];
+        assert_eq!(backspace_at_start(&mut blocks, 0), None);
+        assert_eq!(enter(&mut blocks, 0, 0, new_id), None);
+    }
+
+    #[test]
+    fn enter_in_a_callout_goes_on_as_text_and_an_empty_one_leaves() {
+        let mut blocks = vec![b("a", Callout, 0, "aviso")];
+        enter(&mut blocks, 0, 5, new_id);
+        assert_eq!(blocks[1].kind, Paragraph);
+        let mut blocks = vec![b("a", Callout, 0, "")];
+        enter(&mut blocks, 0, 0, new_id);
+        assert_eq!(summary(&blocks), [("a", Paragraph, 0, "")]);
+        // Backspace at the start turns it into text, like a quote.
+        let mut blocks = vec![b("a", Callout, 0, "x")];
+        backspace_at_start(&mut blocks, 0);
+        assert_eq!(blocks[0].kind, Paragraph);
+    }
+
+    #[test]
+    fn dividers_are_copied_and_pasted_as_three_dashes() {
+        let original = vec![
+            b("a", Paragraph, 0, "antes"),
+            b("d", Divider, 1, ""),
+            b("c", Callout, 0, "después"),
+        ];
+        let copied = selection_text(&original, 0, 2);
+        assert_eq!(copied, "antes\n  ---\ndespués");
+        let mut blocks = vec![b("x", Paragraph, 0, "")];
+        paste_lines(&mut blocks, 0, 0, &copied, ids());
+        let kinds: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.content.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [(Paragraph, "antes"), (Divider, ""), (Paragraph, "después")]
+        );
+        assert_eq!(blocks[1].indent, 1);
+    }
+
+    #[test]
+    fn text_around_a_pasted_divider_never_ends_up_in_it() {
+        // Pasted in the middle of «abcd»: «ab», the divider, then «cd».
+        let mut blocks = vec![b("x", Paragraph, 0, "abcd")];
+        let caret = paste_lines(&mut blocks, 0, 2, "---\n---", ids());
+        let kinds: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.content.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (Paragraph, "ab"),
+                (Divider, ""),
+                (Divider, ""),
+                (Paragraph, "cd")
+            ]
+        );
+        assert_eq!(caret, Some(Caret { block: 3, char: 0 }));
     }
 }

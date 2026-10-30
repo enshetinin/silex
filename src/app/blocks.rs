@@ -212,6 +212,42 @@ pub(super) fn handle_menu_id(block_id: &str) -> egui::Id {
     egui::Id::unique(("silex-block-handle", block_id))
 }
 
+/// Height of a divider's row.
+const DIVIDER_HEIGHT: f32 = 24.0;
+/// Room for a callout's icon, left of its text.
+const CALLOUT_ICON_ROOM: i8 = 40;
+
+/// A divider (H12.2): a 1 px line in the middle of its row. It takes the
+/// block's focus id, so the arrow keys reach it like a file card;
+/// Backspace or Delete remove it and Intro adds a paragraph below
+/// (`run_editor_key`).
+fn divider(ui: &mut egui::Ui, id: egui::Id) -> egui::Response {
+    let p = theme::current(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), DIVIDER_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let response = ui.interact(rect, id, egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Splitter, true, "Separador"));
+    if response.clicked() {
+        response.request_focus();
+    }
+    if response.has_focus() {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(theme::radius::MD),
+            p.accent_soft,
+        );
+    }
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1.0, p.border),
+    );
+    super::cells::focus_ring(ui, rect, &response);
+    response
+}
+
 /// Icon for each block type (menus).
 pub(super) fn kind_icon(kind: BlockKind) -> &'static str {
     match kind {
@@ -226,6 +262,8 @@ pub(super) fn kind_icon(kind: BlockKind) -> &'static str {
         BlockKind::Code => icons::CODE,
         BlockKind::File => icons::PAPERCLIP,
         BlockKind::PageLink => icons::LINK,
+        BlockKind::Divider => icons::MINUS,
+        BlockKind::Callout => icons::LIGHTBULB,
     }
 }
 
@@ -290,6 +328,7 @@ pub(super) fn block_field(
             if !block.kind.is_text() {
                 let (card, file_action) = match &view.link {
                     Some(state) if block.kind == BlockKind::PageLink => link_card(ui, id, state),
+                    _ if block.kind == BlockKind::Divider => (divider(ui, id), None),
                     _ => file_card(ui, id, block, view.attachment, view.preview),
                 };
                 if view.scroll_into_view {
@@ -344,7 +383,7 @@ pub(super) fn block_field(
             }
             let placeholder = match block.kind {
                 BlockKind::Paragraph if view.focused => Some("Escribe / para comandos"),
-                kind if kind.is_heading() => Some(kind.label()),
+                kind if kind.is_heading() || kind == BlockKind::Callout => Some(kind.label()),
                 _ => None,
             };
             let style = match block.kind {
@@ -416,6 +455,21 @@ pub(super) fn block_field(
                         .inner_margin(egui::Margin::same(10)),
                 );
             }
+            // A callout (H12.3): its text on a background, with room for
+            // its icon.
+            if block.kind == BlockKind::Callout {
+                edit = edit.frame(
+                    egui::Frame::new()
+                        .fill(p.subtle)
+                        .corner_radius(theme::radius::MD)
+                        .inner_margin(egui::Margin {
+                            left: CALLOUT_ICON_ROOM,
+                            right: 12,
+                            top: 10,
+                            bottom: 10,
+                        }),
+                );
+            }
             if done || before.is_some() {
                 edit = edit.text_color(base.color).layouter(&mut formatted);
             }
@@ -426,7 +480,7 @@ pub(super) fn block_field(
             // text, in a slot taken before the field paints. A code block
             // fills its own frame over that slot, so there they are
             // painted over it and the text inside them again.
-            let framed = block.kind == BlockKind::Code;
+            let framed = matches!(block.kind, BlockKind::Code | BlockKind::Callout);
             let highlight = !view.found.is_empty() || view.link_edit.is_some();
             let behind = (highlight && !framed).then(|| ui.painter().add(egui::Shape::Noop));
             let output = edit.show(ui);
@@ -477,6 +531,23 @@ pub(super) fn block_field(
                 {
                     ui.scroll_to_rect(rect.expand(8.0), Some(egui::Align::Center));
                 }
+            }
+            if block.kind == BlockKind::Callout {
+                // Centered on the first line of text.
+                let y = output
+                    .galley
+                    .rows
+                    .first()
+                    .map_or(0.0, |row| (row.min_y() + row.max_y()) / 2.0)
+                    + output.galley_pos.y;
+                let x = output.response.rect.left() + f32::from(CALLOUT_ICON_ROOM) / 2.0;
+                ui.painter().text(
+                    egui::pos2(x, y),
+                    egui::Align2::CENTER_CENTER,
+                    icons::LIGHTBULB,
+                    icons::font(theme::icon::MD),
+                    p.accent_strong,
+                );
             }
             if let Some(slot) = quote_slot {
                 let bar = egui::Rect::from_min_max(
@@ -737,6 +808,7 @@ pub(super) fn slash_menu_ui(
                                 (icons::PAPERCLIP, "Adjuntar archivos…")
                             }
                             editor::SlashItem::LinkPage => (icons::LINK, "Enlazar a una página…"),
+                            editor::SlashItem::Divider => (icons::MINUS, "Separador"),
                         };
                         let option = ui.add(egui::Button::selectable(
                             i == menu.selected,
@@ -1039,6 +1111,23 @@ impl SilexApp {
         // (Cmd+Z brings it back); the other keys work as on text.
         if !self.blocks[index].kind.is_text() {
             match command {
+                // Intro on a divider: a new paragraph below it (H12.2).
+                EditorKey::Enter if self.blocks[index].kind == BlockKind::Divider => {
+                    let below = Block {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        kind: BlockKind::Paragraph,
+                        content: String::new(),
+                        checked: false,
+                        attachment: None,
+                        link: None,
+                        marks: Vec::new(),
+                        ..self.blocks[index].clone()
+                    };
+                    self.pending_focus = Some((below.id.clone(), 0));
+                    self.blocks.insert(index + 1, below);
+                    self.mark_dirty();
+                    return;
+                }
                 EditorKey::Enter => {
                     let open = if self.blocks[index].kind == BlockKind::PageLink {
                         BlockAction::OpenLink
@@ -1134,6 +1223,13 @@ impl SilexApp {
                     && self.blocks[index].kind == BlockKind::Paragraph;
                 self.open_link_picker(Some(block_id.clone()), empty.then(|| block_id.clone()));
                 caret
+            }
+            // «/separador», or `---` typed in a paragraph (H12.2).
+            EditorKey::Slash(editor::SlashItem::Divider) => {
+                self.slash = None;
+                editor::insert_divider(&mut self.blocks, index, cursor, || {
+                    uuid::Uuid::new_v4().to_string()
+                })
             }
             EditorKey::Slash(editor::SlashItem::AttachFiles) => {
                 self.slash = None;
@@ -1813,6 +1909,16 @@ impl SilexApp {
                                 Some(marks) => block.marks = marks,
                                 None => self.typing_format = None,
                             }
+                        }
+                        // `---` typed in a paragraph becomes a divider (H12.2).
+                        if out.text_changed
+                            && editor::is_divider_text(block.kind, &block.content)
+                            && !self.ime_composing
+                        {
+                            self.pending_key = Some((
+                                EditorKey::Slash(editor::SlashItem::Divider),
+                                block.id.clone(),
+                            ));
                         }
                         // Text copied in Silex, pasted on one line (ADR 0015).
                         if out.text_changed
