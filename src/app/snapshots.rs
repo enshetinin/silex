@@ -3254,3 +3254,111 @@ fn the_block_menu_formats_the_text_selected() -> anyhow::Result<()> {
     assert_eq!(bold, ["interfaz"]);
     Ok(())
 }
+
+/// H12.1d: the formatting page with «documentación» selected, Cmd+K and
+/// an address typed: the field under the text, which stays highlighted.
+fn link_edit_harness(theme: egui::Theme) -> anyhow::Result<Harness<'static, SilexApp>> {
+    use eframe::egui::{Key, Modifiers};
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 560.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            formatting_app()?,
+        );
+    harness.run();
+    // «Un enlace web a la documentación, …»: select «documentación».
+    harness.state_mut().pending_focus = Some(("b2".into(), 32));
+    harness.state_mut().pending_anchor = Some(("b2".into(), 19));
+    harness.run();
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::K);
+    harness.run();
+    harness.event(egui::Event::Text("ejemplo.com/docs".into()));
+    harness.run();
+    Ok(harness)
+}
+
+#[test]
+fn link_edit_light() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = link_edit_harness(egui::Theme::Light)?;
+    harness.snapshot("link_edit_light");
+    Ok(())
+}
+
+/// H12.1d: the link field and the block's links have names; Intro in the
+/// field links the text; Cmd+clic on a link opens it (once, its URL) and
+/// a plain click only places the cursor.
+#[test]
+fn web_links_are_named_set_with_the_field_and_opened_with_cmd_click() -> anyhow::Result<()> {
+    use eframe::egui::{Key, Modifiers};
+    let mut harness = link_edit_harness(egui::Theme::Light)?;
+    assert_accessible(&harness, "link field");
+    harness.get_by_label("Dirección del enlace");
+    harness.key_press(Key::Enter);
+    harness.run();
+    assert!(harness.state().link_edit.is_none());
+    assert!(
+        harness.state().blocks[2]
+            .marks
+            .iter()
+            .any(|m| m.start == 19 && m.end == 32 && m.url() == Some("https://ejemplo.com/docs"))
+    );
+    let text = harness.state().blocks[2].content.clone();
+    let field = harness.get_by(|node| {
+        node.role() == egui::accesskit::Role::MultilineTextInput
+            && node.value().as_deref() == Some(text.as_str())
+    });
+    let description = field.accesskit_node().description();
+    assert_eq!(
+        description.as_deref(),
+        Some(
+            "Enlaces: enlace web (https://ejemplo.com); documentación (https://ejemplo.com/docs); \
+             otro en negrita (https://ejemplo.com)"
+        )
+    );
+    // «enlace web» starts after «Un »: a little to the right of the
+    // field's left edge, on its first line.
+    let pos = field.rect().left_top() + egui::vec2(40.0, 10.0);
+    let click =
+        |harness: &mut Harness<'_, SilexApp>, modifiers: Modifiers| {
+            harness.hover_at(pos);
+            harness.run();
+            // One event per frame (`step` keeps only the last frame's output).
+            let mut urls = Vec::new();
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            };
+            for event in [
+                egui::Event::ModifiersChanged(modifiers),
+                button(true),
+                button(false),
+                egui::Event::ModifiersChanged(Modifiers::NONE),
+                egui::Event::PointerMoved(pos),
+            ] {
+                harness.event(event);
+                harness.step();
+                urls.extend(harness.output().platform_output.commands.iter().filter_map(
+                    |c| match c {
+                        egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                        _ => None,
+                    },
+                ));
+            }
+            urls
+        };
+    assert!(click(&mut harness, Modifiers::NONE).is_empty());
+    harness.run();
+    assert_eq!(
+        click(&mut harness, Modifiers::COMMAND),
+        ["https://ejemplo.com"]
+    );
+    Ok(())
+}

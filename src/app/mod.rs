@@ -47,6 +47,7 @@ mod tests;
 pub mod theme;
 mod view_menus;
 mod view_tabs;
+mod web_links;
 
 pub use self::startup::StartupError;
 use self::{
@@ -146,6 +147,8 @@ pub struct SilexApp {
     /// where the palette and the «…» menu apply bold, italic… (ADR 0015).
     /// egui drops a field's selection when it loses the focus.
     format_target: Option<(String, usize, usize)>,
+    /// The field giving a web link its URL, while open (H12.1d).
+    link_edit: Option<web_links::LinkEdit>,
     /// Block to focus (and cursor position) on the next frame.
     pending_focus: Option<(String, usize)>,
     /// With `pending_focus`, the other end of a selection in that block
@@ -298,6 +301,7 @@ impl SilexApp {
             pending_key: None,
             typing_format: None,
             format_target: None,
+            link_edit: None,
             pending_focus: None,
             pending_anchor: None,
             find: None,
@@ -661,6 +665,19 @@ impl SilexApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut as Sc, Modifiers as M};
         let pressed = |sc: Sc| ctx.input_mut(|i| i.consume_shortcut(&sc));
+        // The link field has the keyboard while it is open (H12.1d).
+        if self.link_edit.is_some() {
+            return;
+        }
+        // Cmd+K over text selected in a block gives it a web link
+        // (ADR 0015); with nothing selected it is the search window.
+        if self.search.is_none()
+            && let Some(id) = self.link_shortcut_block(ctx)
+            && pressed(Sc::new(M::COMMAND, Key::K))
+        {
+            self.open_link_edit(ctx, &id, false);
+            return;
+        }
         // Cmd+K opens and closes the search window. While it is open no
         // other shortcut runs: the window has the keyboard.
         if pressed(Sc::new(M::COMMAND, Key::K)) {
@@ -885,6 +902,7 @@ impl SilexApp {
             && self.links.picker.is_none()
             && self.page_history.is_none()
             && self.templates.picker.is_none()
+            && self.link_edit.is_none()
         {
             self.take_pasted_image(&ctx);
             self.find_keys(&ctx);
@@ -893,6 +911,7 @@ impl SilexApp {
             self.handle_selection_keys(&ctx);
         }
         self.layout(ui);
+        self.link_edit_ui(&ctx);
         self.run_paste(&ctx);
         self.run_editor_key(&ctx);
         self.refresh_slash_and_selection();

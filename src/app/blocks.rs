@@ -46,6 +46,8 @@ pub(super) enum EditorKey {
     /// The same from the block's «…» menu: the selection, or the whole
     /// block when nothing is selected.
     FormatBlock(Format),
+    /// «Enlace…» from the block's «…» menu (H12.1d).
+    LinkBlock,
 }
 
 /// Slash menu shown under the focused block while "/word" is being typed.
@@ -89,6 +91,9 @@ pub(super) enum BlockAction {
     OpenLink,
     /// Bold, italic… on the selection, or on the whole block (ADR 0015).
     Format(Format),
+    /// A web link on the selection, the link at the cursor or the whole
+    /// block (H12.1d).
+    Link,
 }
 
 /// What a block reported while being drawn.
@@ -98,6 +103,10 @@ pub(super) struct BlockOutput {
     /// With `text_changed` on the focused block: what changed, as
     /// `(start, old_end, new_end)` in characters (`marks::edit_range`).
     pub(super) edit: Option<(usize, usize, usize)>,
+    /// Where the text of the link field is (H12.1d), when it is open here.
+    pub(super) link_rect: Option<egui::Rect>,
+    /// A link Cmd+clicked: its URL, to open.
+    pub(super) open_url: Option<String>,
     /// Checkbox changed.
     pub(super) other_changed: bool,
     pub(super) action: Option<BlockAction>,
@@ -239,6 +248,9 @@ pub(super) struct BlockView<'a> {
     pub(super) found: Vec<(usize, usize, bool)>,
     /// Scroll the page to the match shown in this block.
     pub(super) reveal: bool,
+    /// The characters the link field is open over (H12.1d): highlighted,
+    /// as the field took the focus (and the selection) away.
+    pub(super) link_edit: Option<(usize, usize)>,
 }
 
 /// One block, borderless: a hover handle in the left gutter (type and
@@ -290,7 +302,10 @@ pub(super) fn block_field(
                     first_row: true,
                     last_row: true,
                 });
-                return (false, None, false, action.or(file_action), caret);
+                return (
+                    (false, None, false, action.or(file_action), caret),
+                    (None, None),
+                );
             }
             // Height of the first line of body text (text margin included):
             // markers center on it, and it is the minimum height of a block
@@ -412,13 +427,23 @@ pub(super) fn block_field(
             // fills its own frame over that slot, so there they are
             // painted over it and the text inside them again.
             let framed = block.kind == BlockKind::Code;
-            let behind =
-                (!view.found.is_empty() && !framed).then(|| ui.painter().add(egui::Shape::Noop));
+            let highlight = !view.found.is_empty() || view.link_edit.is_some();
+            let behind = (highlight && !framed).then(|| ui.painter().add(egui::Shape::Noop));
             let output = edit.show(ui);
-            if !view.found.is_empty() {
+            let mut link_rect = None;
+            if highlight {
                 let mut shapes = Vec::new();
                 let mut covered = Vec::new();
                 let mut shown = None;
+                // The text the link field is open over, like a selection.
+                if let Some((start, end)) = view.link_edit {
+                    let rects = match_rects(&output.galley, output.galley_pos, start, end);
+                    link_rect = rects.iter().copied().reduce(egui::Rect::union);
+                    for rect in rects {
+                        shapes.push(egui::Shape::rect_filled(rect, 2.0, p.accent_soft));
+                        covered.push(rect);
+                    }
+                }
                 for &(start, end, current) in &view.found {
                     let fill = if current {
                         p.find_current
@@ -470,6 +495,30 @@ pub(super) fn block_field(
             let edit = old_text
                 .filter(|_| text_changed)
                 .map(|old| silex_desktop::marks::edit_range(&old, &block.content));
+            // Web links (H12.1d): the URL on hover, opened with Cmd+clic,
+            // and named for screen readers after the text.
+            let mut open_url = None;
+            if let Some(pos) = output.response.hover_pos()
+                && let Some(link) =
+                    web_links::link_under(&output.galley, output.galley_pos, &block.marks, pos)
+                && let Some(url) = link.url()
+            {
+                let command = ui.input(|i| i.modifiers.command);
+                if command {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if command && output.response.clicked() {
+                    open_url = Some(url.to_owned());
+                } else {
+                    let hint = format!("{url}\n{}+clic para abrir", super::cmd_label(ui.ctx()));
+                    egui::Response::clone(&output.response).on_hover_text_at_pointer(hint);
+                }
+            }
+            if let Some(description) = web_links::links_description(&block.content, &block.marks) {
+                ui.ctx().accesskit_node_builder(output.response.id, |node| {
+                    node.set_description(description);
+                });
+            }
             if view.scroll_into_view {
                 output.response.scroll_to_me(None);
             }
@@ -486,14 +535,19 @@ pub(super) fn block_field(
                         last_row: row + 1 >= output.galley.rows.len(),
                     }
                 });
-            (text_changed, edit, other_changed, action, caret)
+            (
+                (text_changed, edit, other_changed, action, caret),
+                (link_rect, open_url),
+            )
         })
         .inner
     });
-    let (text_changed, edit, other_changed, action, caret) = inner.inner;
+    let ((text_changed, edit, other_changed, action, caret), (link_rect, open_url)) = inner.inner;
     BlockOutput {
         text_changed,
         edit,
+        link_rect,
+        open_url,
         other_changed,
         action,
         caret,
@@ -574,6 +628,12 @@ fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<
                                 action = Some(BlockAction::Format(format));
                                 ui.close();
                             }
+                        }
+                        let link = egui::Button::new((icons::icon(icons::LINK), " Enlace…"))
+                            .shortcut_text(format!("{}+K", super::cmd_label(ui.ctx())));
+                        if ui.add(link).clicked() {
+                            action = Some(BlockAction::Link);
+                            ui.close();
                         }
                     });
                 }
@@ -764,6 +824,9 @@ fn take_format_shortcut(ctx: &egui::Context) -> Option<Format> {
     .map(|(format, _, _)| format)
 }
 
+/// Why a code block gets no formatting (ADR 0015).
+pub(super) const CODE_NOTICE: &str = "Un bloque de código no tiene formato: conviértelo en texto.";
+
 /// Removes the character at `char_index` (if any), and its formatting.
 pub(super) fn delete_char(block: &mut Block, char_index: usize) {
     if let Some((byte, _)) = block.content.char_indices().nth(char_index) {
@@ -813,6 +876,19 @@ impl SilexApp {
             && let Some(format) = take_format_shortcut(ctx)
         {
             self.pending_key = Some((EditorKey::Format(format), block.id.clone()));
+            return;
+        }
+        // Cmd+Intro opens the link the cursor is in (H12.1d).
+        if focused
+            && let Some(url) = marks::link_at(&block.marks, caret.char).and_then(|l| l.url())
+            && ctx.input_mut(|i| {
+                i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::COMMAND,
+                    egui::Key::Enter,
+                ))
+            })
+        {
+            web_links::open_web_link(ctx, url);
             return;
         }
         if (!focused && !escape) || caret.selection {
@@ -958,6 +1034,10 @@ impl SilexApp {
             self.format_block(ctx, &block_id, format, whole);
             return;
         }
+        if command == EditorKey::LinkBlock {
+            self.open_link_edit(ctx, &block_id, true);
+            return;
+        }
         let caret = match command {
             EditorKey::Enter => editor::enter(&mut self.blocks, index, cursor, || {
                 uuid::Uuid::new_v4().to_string()
@@ -1039,7 +1119,7 @@ impl SilexApp {
                 })
             }
             // Run above, before the cursor logic.
-            EditorKey::Format(_) | EditorKey::FormatBlock(_) => None,
+            EditorKey::Format(_) | EditorKey::FormatBlock(_) | EditorKey::LinkBlock => None,
             EditorKey::Duplicate => editor::duplicate_range(&mut self.blocks, index, index, || {
                 uuid::Uuid::new_v4().to_string()
             })
@@ -1335,26 +1415,13 @@ impl SilexApp {
         };
         if !self.blocks[index].kind.takes_marks() {
             if self.blocks[index].kind == BlockKind::Code {
-                self.notice =
-                    Some("Un bloque de código no tiene formato: conviértelo en texto.".into());
+                self.notice = Some(CODE_NOTICE.into());
             }
             return;
         }
-        // From the keyboard the field has the focus and its selection; a
-        // menu or the palette took the focus, so the selection it had then.
-        let field = self.block_field_id(id);
-        let live = egui::text_edit::TextEditState::load(ctx, field)
-            .and_then(|s| s.cursor.char_range())
-            .map(|r| (r.secondary.index.0, r.primary.index.0));
-        let remembered = self
-            .format_target
-            .as_ref()
-            .filter(|(target, _, _)| target == id)
-            .map(|(_, anchor, cursor)| (*anchor, *cursor));
-        let (anchor, cursor) = if whole { remembered.or(live) } else { live }.unwrap_or((0, 0));
+        let (anchor, cursor) = self.format_selection(ctx, id, whole);
         let block = &mut self.blocks[index];
         let len = block.content.chars().count();
-        let (anchor, cursor) = (anchor.min(len), cursor.min(len));
         let (start, end) = (anchor.min(cursor), anchor.max(cursor));
         if start == end && !whole {
             let current = self
@@ -1379,6 +1446,34 @@ impl SilexApp {
         self.pending_anchor = Some((id.to_owned(), anchor));
     }
 
+    /// The selection (anchor, cursor) formatting applies to in block `id`,
+    /// within its text. From the keyboard the field has the focus and its
+    /// selection; a menu or the palette (`whole`) took the focus, so the
+    /// selection it had then (egui drops it when the field loses focus).
+    pub(super) fn format_selection(
+        &self,
+        ctx: &egui::Context,
+        id: &str,
+        whole: bool,
+    ) -> (usize, usize) {
+        let field = self.block_field_id(id);
+        let live = egui::text_edit::TextEditState::load(ctx, field)
+            .and_then(|s| s.cursor.char_range())
+            .map(|r| (r.secondary.index.0, r.primary.index.0));
+        let remembered = self
+            .format_target
+            .as_ref()
+            .filter(|(target, _, _)| target == id)
+            .map(|(_, anchor, cursor)| (*anchor, *cursor));
+        let (anchor, cursor) = if whole { remembered.or(live) } else { live }.unwrap_or((0, 0));
+        let len = self
+            .blocks
+            .iter()
+            .find(|b| b.id == id)
+            .map_or(0, |b| b.content.chars().count());
+        (anchor.min(len), cursor.min(len))
+    }
+
     /// Runs an action from a block's "…" menu.
     pub(super) fn block_action(&mut self, action: BlockAction, id: &str) {
         let Some(index) = self.blocks.iter().position(|b| b.id == id) else {
@@ -1388,6 +1483,10 @@ impl SilexApp {
             BlockAction::Format(format) => {
                 // Needs the text field's selection: run with the editor keys.
                 self.pending_key = Some((EditorKey::FormatBlock(format), id.to_owned()));
+                return;
+            }
+            BlockAction::Link => {
+                self.pending_key = Some((EditorKey::LinkBlock, id.to_owned()));
                 return;
             }
             BlockAction::OpenFile | BlockAction::SaveFile | BlockAction::RevealFile => {
@@ -1622,12 +1721,25 @@ impl SilexApp {
                                 .then(|| link_state(&self.pages, &self.links.targets, block)),
                             found: found_by_block.remove(&index).unwrap_or_default(),
                             reveal: reveal_block == Some(index),
+                            link_edit: self
+                                .link_edit
+                                .as_ref()
+                                .filter(|e| e.block_id == block.id)
+                                .map(|e| (e.start, e.end)),
                         };
                         if index > 0 {
                             ui.add_space(heading_space(block.kind));
                         }
                         let out = block_field(ui, self.doc_generation, block, &view);
                         rects.push(out.rect);
+                        if let Some(edit) =
+                            self.link_edit.as_mut().filter(|e| e.block_id == block.id)
+                        {
+                            edit.anchor = Some(out.link_rect.unwrap_or(out.rect));
+                        }
+                        if let Some(url) = &out.open_url {
+                            web_links::open_web_link(&ctx, url);
+                        }
                         // What is typed with Cmd+B and nothing selected (ADR 0015).
                         if out.text_changed
                             && let Some((target, typing)) = self.typing_format.as_mut()

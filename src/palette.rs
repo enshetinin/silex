@@ -21,6 +21,8 @@ pub enum Command {
     /// Bold, italic… on the text selected in the last block edited, or on
     /// the whole block (ADR 0015).
     Format(Format),
+    /// «Enlace…»: a web link on the same text as `Format` (ADR 0015).
+    Link,
     AddFavorite,
     RemoveFavorite,
     ExportPage,
@@ -85,7 +87,7 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 36] = [
+    pub const ALL: [Command; 37] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
@@ -99,6 +101,7 @@ impl Command {
         Command::Format(Format::Italic),
         Command::Format(Format::Code),
         Command::Format(Format::Strike),
+        Command::Link,
         Command::AddFavorite,
         Command::RemoveFavorite,
         Command::ExportPage,
@@ -135,6 +138,7 @@ impl Command {
             Command::FindInPage => "Buscar en la página",
             Command::ReplaceInPage => "Buscar y reemplazar en la página",
             Command::Format(format) => format.label(),
+            Command::Link => "Enlace…",
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
@@ -177,6 +181,7 @@ impl Command {
             Command::Format(Format::Italic) => &["formato", "italica", "inclinada", "italic"],
             Command::Format(Format::Code) => &["formato", "monoespaciada", "codigo", "code"],
             Command::Format(Format::Strike) => &["formato", "tachar", "rayado", "strikethrough"],
+            Command::Link => &["formato", "url", "web", "vinculo", "hipervinculo", "link"],
             Command::AddFavorite => &["estrella", "marcar", "favorite", "star"],
             Command::RemoveFavorite => &["estrella", "desmarcar", "favorite", "star"],
             Command::ExportPage => &["md", "descargar", "guardar", "export"],
@@ -238,7 +243,9 @@ impl Command {
             | Command::FindInPage
             | Command::ReplaceInPage => cx.page_open && !cx.database_open,
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
-            Command::Format(_) => cx.page_open && !cx.database_open && cx.format_block,
+            Command::Format(_) | Command::Link => {
+                cx.page_open && !cx.database_open && cx.format_block
+            }
             Command::AddFavorite => cx.page_open && !cx.favorite && !cx.template_open,
             // A template makes pages with «Nueva página desde plantilla».
             Command::DuplicatePage => cx.page_open && !cx.template_open,
@@ -356,7 +363,10 @@ mod tests {
             matching_commands("tachar", &editing),
             [Command::Format(Format::Strike)]
         );
-        assert!(matching_commands("formato", &editing).len() >= 4);
+        assert!(matching_commands("formato", &editing).len() >= 5);
+        assert_eq!(matching_commands("enlace", &editing)[0], Command::Link);
+        assert_eq!(matching_commands("url", &editing), [Command::Link]);
+        assert!(!Command::Link.available(&cx()));
         assert!(!Command::Format(Format::Bold).available(&PaletteContext {
             database_open: true,
             ..editing

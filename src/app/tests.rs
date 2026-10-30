@@ -57,6 +57,7 @@ fn frame(
                     link: None,
                     found: Vec::new(),
                     reveal: false,
+                    link_edit: None,
                 },
             )
             .text_changed;
@@ -4967,9 +4968,11 @@ fn the_palette_formats_the_last_block_edited() -> anyhow::Result<()> {
     use silex_desktop::palette::Command;
     let (mut app, ctx) = editor_app(&[(Par, 0, "uno dos")], 0, 0)?;
     select_text(&mut app, &ctx, 0, 0, 3);
-    // Cmd+K takes the focus away, and egui drops the selection of a field
-    // without focus: the command still formats what was selected.
-    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    // The search window takes the focus away, and egui drops the selection
+    // of a field without focus: the command still formats what was
+    // selected. (Cmd+K over a selection makes a link instead, H12.1d.)
+    app.open_search(&ctx);
+    app_frame(&mut app, &ctx, vec![]);
     app_frame(&mut app, &ctx, type_text("negr"));
     assert_eq!(block_selection(&app, &ctx, 0), Some((3, 3)));
     assert!(app.search.is_some());
@@ -4981,4 +4984,208 @@ fn the_palette_formats_the_last_block_edited() -> anyhow::Result<()> {
     assert_eq!(marked_words(&app, 0), ["uno"]);
     assert_eq!(block_selection(&app, &ctx, 0), Some((0, 3)));
     Ok(())
+}
+
+// ---- Web links (H12.1d, ADR 0015) ----
+
+fn web_link(start: usize, end: usize, url: &str) -> silex_desktop::marks::Mark {
+    silex_desktop::marks::Mark::new(start, end, silex_desktop::marks::MarkKind::Link(url.into()))
+}
+
+/// The URLs this frame asked the system to open.
+fn opened_urls(app: &mut SilexApp, ctx: &egui::Context, events: Vec<egui::Event>) -> Vec<String> {
+    app_frame_commands(app, ctx, events)
+        .iter()
+        .filter_map(|c| match c {
+            egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn url_field_focused(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.has_focus(super::web_links::url_field_id()))
+}
+
+#[test]
+fn cmd_k_over_a_selection_gives_it_a_link() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "lee la documentación")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 7, 20);
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    assert!(app.search.is_none(), "not the search window");
+    let edit = app.link_edit.as_ref().expect("link field open");
+    assert_eq!((edit.start, edit.end), (7, 20));
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(url_field_focused(&ctx));
+    app_frame(&mut app, &ctx, type_text("ejemplo.com/docs"));
+    assert_eq!(
+        app.blocks[0].content, "lee la documentación",
+        "typed in the field"
+    );
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.link_edit.is_none());
+    assert_eq!(
+        app.blocks[0].marks,
+        vec![web_link(7, 20, "https://ejemplo.com/docs")]
+    );
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(0), "focus back on the text");
+    assert_eq!(block_selection(&app, &ctx, 0), Some((7, 20)));
+    // One undo step.
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert!(app.blocks[0].marks.is_empty());
+    Ok(())
+}
+
+#[test]
+fn cmd_k_with_nothing_selected_still_opens_the_search_window() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno dos")], 0, 2)?;
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    assert!(app.search.is_some());
+    assert!(app.link_edit.is_none());
+    Ok(())
+}
+
+#[test]
+fn a_url_that_is_not_allowed_is_refused_and_esc_changes_nothing() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "pulsa aquí")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 6, 10);
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![]);
+    for url in ["javascript:alert(1)", "file:///etc/passwd"] {
+        app.link_edit.as_mut().expect("open").url = url.into();
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        let edit = app.link_edit.as_ref().expect("still open");
+        assert!(edit.error.is_some(), "{url}");
+        assert!(app.blocks[0].marks.is_empty());
+    }
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(url_field_focused(&ctx), "the field keeps the keyboard");
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.link_edit.is_none());
+    assert!(app.blocks[0].marks.is_empty());
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(block_selection(&app, &ctx, 0), Some((6, 10)));
+    Ok(())
+}
+
+#[test]
+fn an_empty_url_removes_the_link_and_the_field_starts_with_it() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "ver la web")], 0, 0)?;
+    app.blocks[0].marks = vec![bold(0, 3), web_link(4, 10, "https://a.es")];
+    app_frame(&mut app, &ctx, vec![]);
+    select_text(&mut app, &ctx, 0, 7, 10);
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    assert_eq!(
+        app.link_edit.as_ref().map(|e| e.url.as_str()),
+        Some("https://a.es")
+    );
+    app_frame(&mut app, &ctx, vec![]);
+    // Select all in the field and delete it.
+    app_frame(&mut app, &ctx, vec![key(Key::A, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    assert_eq!(app.link_edit.as_ref().map(|e| e.url.as_str()), Some(""));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(
+        app.blocks[0].marks,
+        vec![bold(0, 3), web_link(4, 7, "https://a.es")],
+        "only the selected part loses it"
+    );
+    Ok(())
+}
+
+#[test]
+fn the_menu_edits_the_link_at_the_cursor_or_links_the_whole_block() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "ver la web"), (Bul, 0, "dos")], 0, 6)?;
+    app.blocks[0].marks = vec![web_link(4, 10, "https://a.es")];
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    let first = app.blocks[0].id.clone();
+    // The cursor is in the link: that link.
+    app.block_action(BlockAction::Link, &first);
+    app_frame(&mut app, &ctx, vec![]);
+    let edit = app.link_edit.as_ref().expect("open");
+    assert_eq!(
+        (edit.start, edit.end, edit.url.as_str()),
+        (4, 10, "https://a.es")
+    );
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    // No link and nothing selected: the whole block.
+    let second = app.blocks[1].id.clone();
+    app.block_action(BlockAction::Link, &second);
+    app_frame(&mut app, &ctx, vec![]);
+    app.link_edit.as_mut().expect("open").url = "https://b.es".into();
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(app.blocks[1].marks, vec![web_link(0, 3, "https://b.es")]);
+    Ok(())
+}
+
+#[test]
+fn the_palette_links_the_last_text_selected() -> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno dos")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 4, 7);
+    app.open_search(&ctx);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(Command::Link.available(&app.palette_context()));
+    app.search = None;
+    app.run_command(&ctx, Command::Link)?;
+    app_frame(&mut app, &ctx, vec![]);
+    let edit = app.link_edit.as_ref().expect("open");
+    assert_eq!((edit.start, edit.end), (4, 7));
+    Ok(())
+}
+
+#[test]
+fn a_code_block_takes_no_link() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Cod, 0, "let x = 1;")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 0, 3);
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    assert!(app.link_edit.is_none());
+    assert!(app.search.is_none());
+    assert!(app.notice.as_deref().is_some_and(|n| n.contains("código")));
+    Ok(())
+}
+
+#[test]
+fn cmd_enter_opens_the_link_at_the_cursor_and_nothing_else() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "ver la web y más")], 0, 6)?;
+    app.blocks[0].marks = vec![web_link(7, 10, "https://ejemplo.com/a")];
+    app_frame(&mut app, &ctx, vec![]);
+    // Outside the link: no URL.
+    assert!(opened_urls(&mut app, &ctx, vec![key(Key::Enter, M::COMMAND)]).is_empty());
+    app.pending_focus = Some((app.blocks[0].id.clone(), 8));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    let before = app.blocks[0].content.clone();
+    assert_eq!(
+        opened_urls(&mut app, &ctx, vec![key(Key::Enter, M::COMMAND)]),
+        ["https://ejemplo.com/a"]
+    );
+    assert_eq!(app.blocks[0].content, before, "no new line");
+    assert_eq!(app.blocks.len(), 1, "no new block");
+    Ok(())
+}
+
+#[test]
+fn screen_readers_hear_the_links_of_a_block() {
+    use super::web_links::links_description;
+    assert_eq!(links_description("sin enlaces", &[bold(0, 3)]), None);
+    assert_eq!(
+        links_description("lee la guía", &[web_link(7, 11, "https://a.es")]).as_deref(),
+        Some("Enlace: guía (https://a.es)")
+    );
+    assert_eq!(
+        links_description(
+            "uno dos",
+            &[
+                web_link(0, 3, "https://a.es"),
+                web_link(4, 7, "mailto:b@c.es")
+            ]
+        )
+        .as_deref(),
+        Some("Enlaces: uno (https://a.es); dos (mailto:b@c.es)")
+    );
 }

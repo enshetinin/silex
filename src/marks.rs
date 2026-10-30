@@ -55,6 +55,14 @@ impl Mark {
     pub fn new(start: usize, end: usize, kind: MarkKind) -> Self {
         Self { start, end, kind }
     }
+
+    /// The URL of a link.
+    pub fn url(&self) -> Option<&str> {
+        match &self.kind {
+            MarkKind::Link(url) => Some(url),
+            _ => None,
+        }
+    }
 }
 
 /// Puts `marks` in normal form for a text of `len` characters: ranges are
@@ -592,6 +600,49 @@ pub fn normalize_url(input: &str) -> Option<String> {
     (looks_like_host && port_ok).then(|| format!("https://{url}"))
 }
 
+/// The link the cursor at `at` is in or touches (`start <= at <= end`):
+/// what Cmd+Intro opens and what «Enlace…» edits with nothing selected.
+/// With two links touching at `at`, the one that starts there.
+pub fn link_at(marks: &[Mark], at: usize) -> Option<&Mark> {
+    let mut links = marks
+        .iter()
+        .filter(|m| matches!(m.kind, MarkKind::Link(_)) && m.start <= at && at <= m.end);
+    let first = links.next()?;
+    Some(links.next().filter(|m| m.start == at).unwrap_or(first))
+}
+
+/// The link over the character `index` (`start <= index < end`): the one
+/// under the pointer.
+pub fn link_over(marks: &[Mark], index: usize) -> Option<&Mark> {
+    marks
+        .iter()
+        .find(|m| matches!(m.kind, MarkKind::Link(_)) && m.start <= index && index < m.end)
+}
+
+/// The URL of the first link inside `[start, end)`, if any: what the link
+/// field starts with.
+pub fn link_url_in(marks: &[Mark], start: usize, end: usize) -> Option<&str> {
+    marks
+        .iter()
+        .filter(|m| m.start < end && start < m.end)
+        .find_map(Mark::url)
+}
+
+/// The marks once `[start, end)` links to what was typed in the link
+/// field: nothing (only spaces) removes the links there; an allowed URL
+/// (see [`normalize_url`]) replaces them. `None` if the URL is not allowed.
+pub fn set_link(marks: &[Mark], start: usize, end: usize, input: &str) -> Option<Vec<Mark>> {
+    if input.trim().is_empty() {
+        return Some(remove(marks, &MarkKind::Link(String::new()), start, end));
+    }
+    let url = normalize_url(input)?;
+    Some(if start < end {
+        add(marks, MarkKind::Link(url), start, end)
+    } else {
+        marks.to_vec()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -984,5 +1035,88 @@ mod tests {
                 text = new;
             }
         }
+    }
+
+    #[test]
+    fn link_at_finds_the_link_the_cursor_is_in_or_touches() {
+        let marks = vec![
+            m(0, 3, Bold),
+            m(2, 5, link("https://a.es")),
+            m(5, 8, link("https://b.es")),
+        ];
+        assert_eq!(link_at(&marks, 0), None);
+        assert_eq!(link_at(&marks, 2).map(|l| l.end), Some(5));
+        assert_eq!(link_at(&marks, 4).map(|l| l.end), Some(5));
+        // Between two links: the one that starts there.
+        assert_eq!(link_at(&marks, 5).map(|l| l.start), Some(5));
+        assert_eq!(link_at(&marks, 8).map(|l| l.start), Some(5));
+        assert_eq!(link_at(&marks, 9), None);
+        assert_eq!(link_at(&[], 0), None);
+    }
+
+    #[test]
+    fn link_over_is_the_link_on_a_character() {
+        let marks = vec![m(0, 2, Italic), m(2, 4, link("https://a.es"))];
+        assert_eq!(link_over(&marks, 1), None);
+        assert_eq!(link_over(&marks, 2).map(|l| l.start), Some(2));
+        assert_eq!(link_over(&marks, 3).map(|l| l.start), Some(2));
+        assert_eq!(link_over(&marks, 4), None, "end is outside");
+    }
+
+    #[test]
+    fn link_url_in_is_the_first_link_in_a_range() {
+        let marks = vec![
+            m(0, 4, Bold),
+            m(4, 6, link("https://a.es")),
+            m(8, 9, link("https://b.es")),
+        ];
+        assert_eq!(link_url_in(&marks, 0, 4), None);
+        assert_eq!(link_url_in(&marks, 0, 5), Some("https://a.es"));
+        assert_eq!(link_url_in(&marks, 6, 9), Some("https://b.es"));
+        assert_eq!(link_url_in(&marks, 6, 8), None);
+    }
+
+    #[test]
+    fn set_link_adds_replaces_removes_or_refuses() {
+        let marks = vec![m(0, 3, Bold), m(4, 8, link("https://a.es"))];
+        // A plain address gets https.
+        assert_eq!(
+            set_link(&marks, 0, 3, " ejemplo.com/x "),
+            Some(vec![
+                m(0, 3, Bold),
+                m(0, 3, link("https://ejemplo.com/x")),
+                m(4, 8, link("https://a.es")),
+            ])
+        );
+        // Over part of a link: that part points elsewhere.
+        assert_eq!(
+            set_link(&marks, 6, 8, "mailto:ana@ejemplo.com"),
+            Some(vec![
+                m(0, 3, Bold),
+                m(4, 6, link("https://a.es")),
+                m(6, 8, link("mailto:ana@ejemplo.com")),
+            ])
+        );
+        // Nothing typed: the link goes, and the rest stays.
+        assert_eq!(set_link(&marks, 4, 8, "  "), Some(vec![m(0, 3, Bold)]));
+        assert_eq!(
+            set_link(&marks, 5, 6, ""),
+            Some(vec![
+                m(0, 3, Bold),
+                m(4, 5, link("https://a.es")),
+                m(6, 8, link("https://a.es")),
+            ])
+        );
+        // Not allowed: nothing changes.
+        for url in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "ftp://a.es",
+            "hola mundo",
+        ] {
+            assert_eq!(set_link(&marks, 0, 3, url), None, "{url}");
+        }
+        // An empty range never gets a link.
+        assert_eq!(set_link(&marks, 2, 2, "a.es"), Some(marks.clone()));
     }
 }

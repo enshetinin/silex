@@ -39,6 +39,7 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::ShowShortcuts => icons::KEYBOARD,
         Command::CheckUpdates => icons::DOWNLOAD,
         Command::Format(format) => super::inline::icon(format),
+        Command::Link => icons::LINK,
     }
 }
 
@@ -57,6 +58,7 @@ pub(super) fn command_shortcut(command: Command, cmd: &str) -> Option<String> {
         Command::ZoomOut => format!("{cmd}+−"),
         Command::ZoomReset => format!("{cmd}+0"),
         Command::Format(format) => super::inline::shortcut_label(format, cmd),
+        Command::Link => format!("{cmd}+K"),
         _ => return None,
     })
 }
@@ -108,6 +110,11 @@ impl SilexApp {
             (Command::Format(format), Some(_)) => {
                 if let Some((id, _, _)) = self.format_target.clone() {
                     self.format_block(ctx, &id, format, true);
+                }
+            }
+            (Command::Link, Some(_)) => {
+                if let Some((id, _, _)) = self.format_target.clone() {
+                    self.open_link_edit(ctx, &id, true);
                 }
             }
             (Command::AddFavorite, Some(id)) => self.set_favorite(&id, true)?,

@@ -384,5 +384,18 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Con un método de entrada (japonés o chino), pulsa Cmd/Ctrl+B y compón una palabra: sale en negrita entera.
 - En un bloque de código, Cmd/Ctrl+B no hace nada y un aviso dice que el código no tiene formato.
 - Selecciona texto y abre el menú «…» del bloque → «Formato» → «Cursiva»: solo ese texto, que vuelve a quedar seleccionado. Sin selección, el menú da formato a todo el bloque. Cada opción muestra su atajo.
-- Selecciona texto, abre Cmd/Ctrl+K y escribe «negrita» (o «tachar», «formato»): el comando da formato a lo seleccionado. En una base de datos no aparece.
+- Selecciona texto, haz clic en «Buscar» de la barra lateral y escribe «negrita» (o «tachar», «formato»): el comando da formato a lo seleccionado. En una base de datos no aparece. (Desde H12.1d, Cmd/Ctrl+K con texto seleccionado abre el campo de enlace: sección 43.)
 - «Atajos de teclado» lista Cmd/Ctrl+B, I, E y Cmd/Ctrl+Mayús+X. En Windows y Linux, con Ctrl.
+
+## 43. Enlaces web en el texto (H12.1d, ADR 0015)
+- Selecciona una palabra y pulsa Cmd/Ctrl+K: se abre un campo bajo ella, con la palabra resaltada. Escribe `ejemplo.com` e Intro: la palabra sale azul y subrayada, y vuelve a quedar seleccionada. Un Cmd/Ctrl+Z quita el enlace.
+- Sin texto seleccionado, Cmd/Ctrl+K sigue abriendo el buscador.
+- En el campo, escribe `javascript:alert(1)` o `file:///etc/passwd` e Intro: un aviso en rojo y el campo sigue abierto. Esc lo cierra sin cambiar nada y devuelve la selección. Un clic fuera también lo cierra.
+- Selecciona parte de un enlace y pulsa Cmd/Ctrl+K: el campo trae su URL. Bórrala e Intro (o «Quitar enlace»): solo esa parte deja de ser enlace.
+- Pasa el ratón por un enlace: se ve su URL y «Cmd+clic para abrir» (Ctrl en Windows y Linux). Con Cmd/Ctrl pulsado, el puntero es una mano. Cmd/Ctrl+clic lo abre en el navegador (un `mailto:`, en el correo). Un clic normal solo coloca el cursor.
+- Con el cursor dentro de un enlace, Cmd/Ctrl+Intro lo abre. Fuera de un enlace, no hace nada nuevo.
+- Menú «…» del bloque → «Formato» → «Enlace…»: con el cursor en un enlace, edita ese enlace; sin enlace ni selección, enlaza todo el bloque. En la paleta, «Enlace…» (busca «url» o «enlace») hace lo mismo con el último bloque editado.
+- En un bloque de código, Cmd/Ctrl+K con texto seleccionado muestra el aviso de que el código no tiene formato.
+- Con VoiceOver (o NVDA/Orca), en un bloque con enlaces se oye su descripción: «Enlace: texto (URL)». El campo de la URL se anuncia como «Dirección del enlace».
+- «Atajos de teclado» lista Cmd/Ctrl+K con texto seleccionado y Cmd/Ctrl+clic / Cmd/Ctrl+Intro.
+- La app no se conecta a ninguna dirección: abrir un enlace solo se lo pide al sistema.

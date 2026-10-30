@@ -962,6 +962,8 @@ impl SilexApp {
                         "Negrita / cursiva / código",
                     ),
                     (format!("{cmd}+Mayús+X"), "Tachado"),
+                    (format!("{cmd}+K con texto seleccionado"), "Enlace web"),
+                    (format!("{cmd}+clic / {cmd}+Intro"), "Abrir el enlace"),
                     (
                         "Arrastrar el asa".to_owned(),
                         "Mover el bloque (Esc cancela)",
