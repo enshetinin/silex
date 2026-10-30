@@ -6,6 +6,7 @@ pub mod csv;
 pub mod db;
 pub mod editor;
 pub mod export;
+pub mod folds;
 pub mod history;
 pub mod import;
 pub mod markdown;

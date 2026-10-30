@@ -149,6 +149,10 @@ pub struct SilexApp {
     format_target: Option<(String, usize, usize)>,
     /// The field giving a web link its URL, while open (H12.1d).
     link_edit: Option<web_links::LinkEdit>,
+    /// The folded toggles (ADR 0016): view state, kept in `settings`.
+    folds: silex_desktop::folds::Folds,
+    /// `folds` as last stored, to save only when it changes.
+    saved_folds: String,
     /// The last text copied from a block or a block selection, with its
     /// formatting: pasting that same text brings it back (ADR 0015).
     clip: Option<silex_desktop::editor::Clip>,
@@ -308,6 +312,8 @@ impl SilexApp {
             typing_format: None,
             format_target: None,
             link_edit: None,
+            folds: silex_desktop::folds::Folds::default(),
+            saved_folds: String::new(),
             clip: None,
             paste_marks: None,
             pending_focus: None,
@@ -352,6 +358,15 @@ impl SilexApp {
         app.rebuild_tree();
         // Before a page opens, which is a visit (H11.8).
         app.load_recent();
+        // The folded toggles (ADR 0016), forgetting those deleted since.
+        if let Some(json) = app.db.folded_blocks().ok().flatten() {
+            let mut folds = silex_desktop::folds::Folds::from_json(&json);
+            if let Ok(live) = app.db.toggle_block_ids() {
+                folds.retain(|id| live.contains(id));
+            }
+            app.saved_folds = json;
+            app.folds = folds;
+        }
         // The tabs of last time (ADR 0011), those still live; else the
         // first page. A damaged value only loses the tabs.
         if let Some(json) = app.db.open_tabs().ok().flatten() {

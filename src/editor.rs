@@ -408,6 +408,7 @@ fn aliases(kind: BlockKind) -> &'static [&'static str] {
         BlockKind::Quote => &["cita", "quote", ">"],
         BlockKind::Code => &["codigo", "code", "```"],
         BlockKind::Callout => &["aviso", "callout", "nota", "destacado", "info"],
+        BlockKind::Toggle => &["desplegable", "toggle", "plegable", "details", "acordeon"],
         // Not offered as a type: made by attaching a file, choosing a
         // page or «/separador» (a divider has no text to keep).
         BlockKind::File | BlockKind::PageLink | BlockKind::Divider => &[],
@@ -539,6 +540,101 @@ pub fn insert_divider(
         block: index + 1,
         char: 0,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Toggle blocks (ADR 0016)
+// ---------------------------------------------------------------------------
+
+/// End (exclusive) of block `index` with its content: the blocks after it
+/// with more indent. For any block, not only toggles.
+pub fn subtree_end(blocks: &[Block], index: usize) -> usize {
+    let Some(block) = blocks.get(index) else {
+        return index;
+    };
+    blocks[index + 1..]
+        .iter()
+        .position(|b| b.indent <= block.indent)
+        .map_or(blocks.len(), |n| index + 1 + n)
+}
+
+/// Which blocks are hidden: those inside a toggle that `folded` says is
+/// folded (also inside another hidden block).
+pub fn hidden_blocks(blocks: &[Block], folded: impl Fn(&Block) -> bool) -> Vec<bool> {
+    let mut hidden = Vec::with_capacity(blocks.len());
+    // The indent of the folded toggle being skipped.
+    let mut hiding: Option<u8> = None;
+    for block in blocks {
+        if let Some(level) = hiding {
+            if block.indent > level {
+                hidden.push(true);
+                continue;
+            }
+            hiding = None;
+        }
+        hidden.push(false);
+        if block.kind == BlockKind::Toggle && folded(block) {
+            hiding = Some(block.indent);
+        }
+    }
+    hidden
+}
+
+/// The blocks that contain block `index`, nearest first: each one is the
+/// closest block above with less indent than the one before.
+pub fn ancestors(blocks: &[Block], index: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let Some(mut level) = blocks.get(index).map(|b| b.indent) else {
+        return out;
+    };
+    for i in (0..index).rev() {
+        if level == 0 {
+            break;
+        }
+        if blocks[i].indent < level {
+            level = blocks[i].indent;
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Enter at `at_char` in block `index`, knowing whether it is a folded
+/// toggle (ADR 0016). In a toggle, the text after the cursor goes inside
+/// it, first, when it is open; after all its content when it is folded;
+/// and an empty toggle becomes a paragraph. Other blocks: [`enter`].
+pub fn enter_with_fold(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    at_char: usize,
+    folded: bool,
+    new_id: impl FnOnce() -> String,
+) -> Option<Caret> {
+    let block = blocks.get(index)?;
+    if block.kind != BlockKind::Toggle || (at_char == 0 && !block.content.is_empty()) {
+        return enter(blocks, index, at_char, new_id);
+    }
+    if block.content.is_empty() {
+        blocks[index].kind = BlockKind::Paragraph;
+        return Some(Caret {
+            block: index,
+            char: 0,
+        });
+    }
+    let (at, indent) = if folded {
+        (subtree_end(blocks, index), block.indent)
+    } else {
+        (index + 1, block.indent.saturating_add(1).min(MAX_INDENT))
+    };
+    let split_at = byte_index(&block.content, at_char);
+    let (before, after) = marks::split(&block.marks, at_char);
+    let tail = blocks[index].content.split_off(split_at);
+    blocks[index].marks = before;
+    let mut below = new_block_like(&blocks[index], BlockKind::Paragraph, new_id(), tail);
+    below.indent = indent;
+    below.marks = after;
+    blocks.insert(at, below);
+    Some(Caret { block: at, char: 0 })
 }
 
 /// Whether a paragraph's text is a divider written as Markdown (`---`):

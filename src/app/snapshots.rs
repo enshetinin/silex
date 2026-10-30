@@ -3451,3 +3451,79 @@ fn dividers_and_callouts_have_names() -> anyhow::Result<()> {
     harness.get_by_label("Aviso");
     Ok(())
 }
+
+/// H12.4a: an open toggle with blocks inside (one a toggle itself), a
+/// folded one and an empty one.
+fn toggles_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let page = db.create_page("Desplegables", None)?;
+    let specs: Vec<(BlockKind, u8, &str)> = vec![
+        (BlockKind::Toggle, 0, "Abierto, con contenido"),
+        (BlockKind::Paragraph, 1, "Un párrafo dentro."),
+        (BlockKind::Bulleted, 1, "Y una lista"),
+        (BlockKind::Toggle, 1, "Otro desplegable dentro"),
+        (BlockKind::Paragraph, 2, "Más adentro todavía."),
+        (BlockKind::Toggle, 0, "Plegado: esconde lo que tiene"),
+        (BlockKind::Paragraph, 1, "No se ve."),
+        (BlockKind::Toggle, 0, "Vacío"),
+        (BlockKind::Paragraph, 0, "Fuera de los desplegables."),
+    ];
+    let blocks: Vec<Block> = specs
+        .into_iter()
+        .enumerate()
+        .map(|(position, (kind, indent, content))| Block {
+            id: format!("b{position}"),
+            page_id: page.clone(),
+            kind,
+            content: content.to_owned(),
+            checked: false,
+            position: position as i64,
+            indent,
+            attachment: None,
+            link: None,
+            marks: Vec::new(),
+        })
+        .collect();
+    db.save_document(&page, "Desplegables", &blocks)?;
+    db.save_folded_blocks(r#"["b5"]"#)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+#[test]
+fn toggles_light() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 560.0])
+        .with_theme(egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), toggles_app()?);
+    harness.run();
+    harness.snapshot("toggles_light");
+    Ok(())
+}
+
+/// The arrows have names that say what they do; a real click folds.
+#[test]
+fn toggle_arrows_are_named_and_fold_with_a_click() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(toggles_app()?);
+    assert_accessible(&harness, "toggles");
+    harness.get_by_label("Desplegar «Plegado: esconde lo que tiene»");
+    harness
+        .get_by_label("Plegar «Abierto, con contenido»")
+        .click();
+    harness.run();
+    assert!(harness.state().folds.is_folded("b0"));
+    harness.get_by_label("Desplegar «Abierto, con contenido»");
+    assert!(
+        harness
+            .query_by_label("Plegar «Otro desplegable dentro»")
+            .is_none()
+    );
+    Ok(())
+}

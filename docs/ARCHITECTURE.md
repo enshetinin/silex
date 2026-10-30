@@ -158,6 +158,10 @@ Cada decisión irreversible (formato de documento, sincronización, cifrado, edi
 - `0010-templates.md`: plantillas como páginas marcadas con `pages.template_at`.
 - `0011-tabs-and-split-view.md`: pestañas con deshacer propio y vista dividida de consulta (solo lectura).
 - `0012-encryption-and-sync.md`: evaluación de cifrado y sincronización; cifrado de disco del sistema, datos locales endurecidos y sin sincronización por ahora.
+- `0013-permanent-delete.md`: borrado definitivo desde la papelera, con confirmación.
+- `0014-releases.md`: versiones con etiqueta `vX.Y.Z`, borrador de release con los paquetes y «Buscar actualizaciones» sin red.
+- `0015-inline-formatting.md`: formato en línea como tramos en `blocks.marks`, pintados sobre el mismo texto.
+- `0016-toggle-blocks.md`: bloque desplegable; su contenido es la sangría, plegar es estado de vista en `settings` y en Markdown es `<details>`.
 - `0006-databases.md`: bases de datos como páginas, filas como subpáginas, propiedades tipadas en tablas propias y vistas con configuración JSON (Hito 6).
 
 ## Rendimiento (H9.3b)

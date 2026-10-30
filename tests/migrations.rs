@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 11;
+const LATEST: i64 = 12;
 
 struct TempDir(PathBuf);
 
@@ -1238,7 +1238,7 @@ mod v11 {
 
     /// A database exactly as Silex v10 left it (v9 content plus bold on
     /// the first word of `p2`).
-    fn write_v10_database(path: &Path) -> anyhow::Result<()> {
+    pub(super) fn write_v10_database(path: &Path) -> anyhow::Result<()> {
         write_v9_database(path)?;
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA_V10)?;
@@ -1388,6 +1388,160 @@ mod v11 {
             vec![Mark::new(0, 6, MarkKind::Bold)]
         );
         add_divider_and_callout(&mut db)?;
+        Ok(())
+    }
+}
+
+mod v12 {
+    use super::v11::write_v10_database;
+    use super::*;
+    use silex_desktop::marks::{Mark, MarkKind};
+    use silex_desktop::model::{Block, BlockKind};
+
+    const SCHEMA_V11: &str = include_str!("../src/db/migrations/0011_divider_callout.sql");
+
+    /// A database exactly as Silex v11 left it (v10 content plus a
+    /// divider at the end of `p2`).
+    fn write_v11_database(path: &Path) -> anyhow::Result<()> {
+        write_v10_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V11)?;
+        conn.execute_batch(
+            "INSERT INTO blocks (id, page_id, kind, position) VALUES ('div', 'p2', 'divider', 99);
+             PRAGMA user_version = 11;",
+        )?;
+        Ok(())
+    }
+
+    /// A toggle with a block inside it at the end of `p2`, saved and read
+    /// back.
+    fn add_toggle(db: &mut Database) -> anyhow::Result<String> {
+        let mut blocks = db.list_blocks("p2")?;
+        let template = blocks[0].clone();
+        let toggle = uuid::Uuid::new_v4().to_string();
+        blocks.push(Block {
+            id: toggle.clone(),
+            kind: BlockKind::Toggle,
+            content: "Más detalles".into(),
+            marks: vec![Mark::new(0, 3, MarkKind::Bold)],
+            indent: 0,
+            ..template.clone()
+        });
+        blocks.push(Block {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: BlockKind::Paragraph,
+            content: "dentro".into(),
+            marks: Vec::new(),
+            indent: 1,
+            ..template
+        });
+        let title = db.get_page("p2")?.expect("p2").title;
+        db.save_document("p2", &title, &blocks)?;
+        let saved = db.list_blocks("p2")?;
+        let n = saved.len();
+        assert_eq!(saved[n - 2].kind, BlockKind::Toggle);
+        assert_eq!(saved[n - 2].marks, vec![Mark::new(0, 3, MarkKind::Bold)]);
+        assert_eq!(saved[n - 1].indent, 1);
+        Ok(toggle)
+    }
+
+    #[test]
+    fn v11_database_gets_toggles_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v11_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before, "rowids kept");
+        let blocks = db.list_blocks("p2")?;
+        assert_eq!(blocks[0].marks, vec![Mark::new(0, 6, MarkKind::Bold)]);
+        assert!(blocks.iter().any(|b| b.kind == BlockKind::Divider));
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert_eq!(db.page_versions("p1")?.len(), 1);
+        assert!(db.is_template("p3")?);
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v11 copy first"
+        );
+        add_toggle(&mut db)?;
+        assert_eq!(db.search_pages("detalles")?.len(), 1);
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        // The divider rule is still there.
+        assert!(
+            conn.execute("UPDATE blocks SET content = 'x' WHERE id = 'div'", [])
+                .is_err()
+        );
+        let broken: Vec<String> = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert!(broken.is_empty(), "{broken:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v12() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        add_toggle(&mut db)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v11_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v11_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE blocks_v12 (x);")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 12"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 11);
+        drop(conn);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        Ok(())
+    }
+
+    #[test]
+    fn v11_backup_restores_into_v12() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v11_database(&old_db)?;
+        let v11_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        let page = db.create_page("Se pierde al restaurar", None)?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v11_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.get_page(&page)?.is_none());
+        add_toggle(&mut db)?;
+        Ok(())
+    }
+
+    /// Folded toggles are view state in `settings` (ADR 0016): they survive
+    /// reopening, and only toggles count.
+    #[test]
+    fn folded_toggles_are_remembered() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v11_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.folded_blocks()?, None);
+        let toggle = add_toggle(&mut db)?;
+        db.save_folded_blocks(&format!(r#"["{toggle}"]"#))?;
+        let ids = db.toggle_block_ids()?;
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains(&toggle));
+        drop(db);
+        let db = Database::open(tmp.db())?;
+        assert_eq!(db.folded_blocks()?, Some(format!(r#"["{toggle}"]"#)));
         Ok(())
     }
 }

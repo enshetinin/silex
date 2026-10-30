@@ -119,6 +119,10 @@ fn read_only_block(
                 egui::Stroke::new(1.0, p.border),
             );
         }
+        BlockKind::Toggle => {
+            icons::decoration(ui, icons::CARET_DOWN, theme::icon::MD, p.text_muted);
+            ui.label(egui::RichText::new(text).color(p.text));
+        }
         BlockKind::Callout => {
             egui::Frame::new()
                 .fill(p.subtle)

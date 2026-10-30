@@ -965,6 +965,10 @@ impl SilexApp {
                     (format!("{cmd}+K con texto seleccionado"), "Enlace web"),
                     (format!("{cmd}+clic / {cmd}+Intro"), "Abrir el enlace"),
                     (
+                        format!("{cmd}+Intro en un desplegable"),
+                        "Plegar o desplegar",
+                    ),
+                    (
                         "Arrastrar el asa".to_owned(),
                         "Mover el bloque (Esc cancela)",
                     ),

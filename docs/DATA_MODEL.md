@@ -23,7 +23,7 @@
 - Las favoritas en la papelera se ocultan y vuelven al restaurar la página.
 
 ## Versión 3 — tipos de bloque y sangría (`0003_block_kinds.sql`, ADR 0003)
-- `blocks.kind` ∈ `paragraph`, `heading_1`, `heading_2`, `heading_3`, `todo`, `bulleted`, `numbered`, `quote`, `code` (más `file` desde la v6, `page_link` desde la v7, y `divider` y `callout` desde la v11). Los `heading` de v1/v2 pasan a `heading_1`. En Rust es `BlockKind`; un nombre desconocido al leer es un error, no un pánico.
+- `blocks.kind` ∈ `paragraph`, `heading_1`, `heading_2`, `heading_3`, `todo`, `bulleted`, `numbered`, `quote`, `code` (más `file` desde la v6, `page_link` desde la v7, `divider` y `callout` desde la v11, y `toggle` desde la v12). Los `heading` de v1/v2 pasan a `heading_1`. En Rust es `BlockKind`; un nombre desconocido al leer es un error, no un pánico.
 - `blocks.indent INTEGER NOT NULL DEFAULT 0 CHECK (indent BETWEEN 0 AND 6)`: lista plana con sangría, sin árbol de bloques.
 - La tabla se reconstruye (SQLite no permite cambiar un `CHECK`): copia los `rowid` explícitamente, recrea índice y triggers FTS y hace `rebuild` de `block_search`. Hay tests con un hueco de `rowid` y un fallo a mitad que deshace todo.
 - La numeración de listas se calcula al pintar (`list_numbers`), no se guarda.
@@ -98,8 +98,14 @@
 - Un aviso es un bloque de texto más: busca, guarda formato y se exporta como `> [!NOTE]`.
 - Probado: v10→v11 y v1→v11 conservando los `rowid`, el formato, la búsqueda, las versiones, los favoritos y las plantillas, con los índices y triggers de antes; un fallo a mitad (una tabla `blocks_v11` que ya existe) que deja la v10 intacta, formato incluido; una copia v10 restaurada y actualizada; el `CHECK` del separador.
 
+## Versión 12 — desplegables (`0012_toggle.sql`, ADR 0016)
+- Reconstruye `blocks` exactamente como la 0011, con `toggle` en el `CHECK` de `kind`. Se conservan los `rowid`, todas las columnas, los índices, los triggers y la regla del separador.
+- Un desplegable es un bloque de texto con formato. Su contenido son los bloques que lo siguen con más sangría: no hay columna de padre.
+- **Plegado no está en `blocks`:** es estado de vista, en `settings` con la clave `folded_blocks` (lista JSON de ids, `src/folds.rs`). Un valor dañado se lee como «nada plegado». Al arrancar se olvidan los ids que ya no son desplegables.
+- Probado: v11→v12 y v1→v12 conservando los `rowid`, el formato, el separador y su regla, la búsqueda, las versiones y las plantillas; un fallo a mitad que deja la v11 intacta; una copia v11 restaurada y actualizada; el plegado guardado y releído al reabrir.
+
 ## Evolución
-- Las migraciones publicadas (`0001`…`0011`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
+- Las migraciones publicadas (`0001`…`0012`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).
 - Antes de actualizar una base existente en disco se crea una copia verificada con el esquema antiguo. Si esa copia falla, no se migra.
 - Las copias de esquemas anteriores son válidas: la verificación acepta `1..=LATEST` y la restauración actualiza la base después de restaurar.

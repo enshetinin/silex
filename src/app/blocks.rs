@@ -94,6 +94,8 @@ pub(super) enum BlockAction {
     /// A web link on the selection, the link at the cursor or the whole
     /// block (H12.1d).
     Link,
+    /// The arrow of a toggle: fold or open it (ADR 0016).
+    ToggleFold,
 }
 
 /// What a block reported while being drawn.
@@ -212,6 +214,28 @@ pub(super) fn handle_menu_id(block_id: &str) -> egui::Id {
     egui::Id::unique(("silex-block-handle", block_id))
 }
 
+/// Under an open toggle with nothing inside (ADR 0016): a hint, which
+/// also adds a block inside it. Returns whether it was clicked.
+fn empty_toggle_hint(ui: &mut egui::Ui, indent: u8) -> bool {
+    let p = theme::current(ui.ctx());
+    ui.horizontal(|ui| {
+        gutter_space(ui);
+        // In line with the text inside: the button's padding left out.
+        ui.add_space(
+            f32::from(indent.saturating_add(1)) * INDENT_WIDTH - ui.spacing().button_padding.x,
+        );
+        ui.add(
+            egui::Button::new(
+                egui::RichText::new("Desplegable vacío: haz clic para escribir dentro")
+                    .color(p.text_muted),
+            )
+            .frame_when_inactive(false),
+        )
+        .clicked()
+    })
+    .inner
+}
+
 /// Height of a divider's row.
 const DIVIDER_HEIGHT: f32 = 24.0;
 /// Room for a callout's icon, left of its text.
@@ -264,6 +288,7 @@ pub(super) fn kind_icon(kind: BlockKind) -> &'static str {
         BlockKind::PageLink => icons::LINK,
         BlockKind::Divider => icons::MINUS,
         BlockKind::Callout => icons::LIGHTBULB,
+        BlockKind::Toggle => icons::LIST_COLLAPSE,
     }
 }
 
@@ -289,6 +314,8 @@ pub(super) struct BlockView<'a> {
     /// The characters the link field is open over (H12.1d): highlighted,
     /// as the field took the focus (and the selection) away.
     pub(super) link_edit: Option<(usize, usize)>,
+    /// A toggle that is folded (ADR 0016).
+    pub(super) folded: bool,
 }
 
 /// One block, borderless: a hover handle in the left gutter (type and
@@ -317,7 +344,7 @@ pub(super) fn block_field(
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
             let (gutter, _) =
                 ui.allocate_exact_size(egui::vec2(GUTTER, 24.0), egui::Sense::hover());
-            let action = if view.show_handle {
+            let mut action = if view.show_handle {
                 block_handle(ui, gutter, block)
             } else {
                 None
@@ -374,6 +401,40 @@ pub(super) fn block_field(
                         body.clone(),
                         p.text_muted,
                     );
+                }
+                BlockKind::Toggle => {
+                    // The arrow folds and opens it (ADR 0016).
+                    let (slot, arrow) = marker_slot(ui, line, egui::Sense::click());
+                    let name = if view.folded {
+                        format!("Desplegar «{}»", block.content)
+                    } else {
+                        format!("Plegar «{}»", block.content)
+                    };
+                    arrow
+                        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
+                    let color = if arrow.hovered() {
+                        p.text
+                    } else {
+                        p.text_muted
+                    };
+                    let icon = if view.folded {
+                        icons::CARET_RIGHT
+                    } else {
+                        icons::CARET_DOWN
+                    };
+                    ui.painter().text(
+                        slot.center(),
+                        egui::Align2::CENTER_CENTER,
+                        icon,
+                        icons::font(theme::icon::MD),
+                        color,
+                    );
+                    if arrow
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        action = Some(BlockAction::ToggleFold);
+                    }
                 }
                 BlockKind::Quote => {
                     // The bar is painted once the text's height is known.
@@ -986,6 +1047,21 @@ impl SilexApp {
             web_links::open_web_link(ctx, url);
             return;
         }
+        // Cmd+Intro folds or opens a toggle (ADR 0016).
+        if focused
+            && block.kind == BlockKind::Toggle
+            && ctx.input_mut(|i| {
+                i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::COMMAND,
+                    egui::Key::Enter,
+                ))
+            })
+        {
+            let id = block.id.clone();
+            let folded = self.folds.is_folded(&id);
+            self.set_folded(&id, !folded);
+            return;
+        }
         if (!focused && !escape) || caret.selection {
             return;
         }
@@ -1158,10 +1234,33 @@ impl SilexApp {
             self.open_link_edit(ctx, &block_id, true);
             return;
         }
+        // What is inside folded toggles is never edited unseen (ADR 0016).
+        let hidden = self.hidden();
         let caret = match command {
-            EditorKey::Enter => editor::enter(&mut self.blocks, index, cursor, || {
-                uuid::Uuid::new_v4().to_string()
-            }),
+            EditorKey::Enter => {
+                let folded = self.folds.is_folded(&block_id);
+                editor::enter_with_fold(&mut self.blocks, index, cursor, folded, || {
+                    uuid::Uuid::new_v4().to_string()
+                })
+            }
+            // Merging into a hidden block would change text out of sight:
+            // its toggle opens instead.
+            EditorKey::Backspace
+                if index > 0
+                    && hidden[index - 1]
+                    && self.blocks[index].kind == BlockKind::Paragraph
+                    && self.blocks[index].indent == 0 =>
+            {
+                self.reveal_block(index - 1);
+                return;
+            }
+            EditorKey::Delete
+                if cursor >= editor::block_char_len(&self.blocks[index])
+                    && hidden.get(index + 1) == Some(&true) =>
+            {
+                self.reveal_block(index + 1);
+                return;
+            }
             EditorKey::Backspace if cursor > 0 => {
                 // Text was typed before Backspace in the same frame: plain delete.
                 delete_char(&mut self.blocks[index], cursor - 1);
@@ -1187,14 +1286,13 @@ impl SilexApp {
                     char: cursor,
                 })
             }
-            EditorKey::Up => index.checked_sub(1).map(|i| editor::Caret {
+            EditorKey::Up => self.previous_visible(index).map(|i| editor::Caret {
                 block: i,
                 char: editor::block_char_len(&self.blocks[i]),
             }),
-            EditorKey::Down => (index + 1 < self.blocks.len()).then(|| editor::Caret {
-                block: index + 1,
-                char: 0,
-            }),
+            EditorKey::Down => self
+                .next_visible(index)
+                .map(|i| editor::Caret { block: i, char: 0 }),
             EditorKey::Select => {
                 self.selection = Some(BlockSelection {
                     anchor: block_id.clone(),
@@ -1341,10 +1439,15 @@ impl SilexApp {
             );
         }
         // The gap: before the first block whose middle is below the pointer.
-        let to = rects
+        let mut to = rects
             .iter()
             .position(|r| pointer.y < r.center().y)
             .unwrap_or(rects.len());
+        // Never between a folded toggle and what it hides (ADR 0016).
+        let hidden = self.hidden();
+        while hidden.get(to) == Some(&true) {
+            to += 1;
+        }
         let moves = !(first..=last + 1).contains(&to);
         if moves {
             let y = match (to.checked_sub(1).and_then(|i| rects.get(i)), rects.get(to)) {
@@ -1398,27 +1501,26 @@ impl SilexApp {
         use egui::{Key, Modifiers as M};
         let id_at = |i: usize| self.blocks.get(i).map(|b| b.id.clone());
         let step = |key: Key, modifiers: M| take_exact_key(ctx, key, modifiers);
+        // Hidden blocks are skipped (ADR 0016).
+        let previous = |i: usize| self.previous_visible(i);
+        let next = |i: usize| self.next_visible(i);
         if step(Key::ArrowUp, M::SHIFT) {
-            if let Some(id) = head.checked_sub(1).and_then(id_at) {
+            if let Some(id) = previous(head).and_then(id_at) {
                 self.selection = Some(BlockSelection { head: id, ..sel });
             }
         } else if step(Key::ArrowDown, M::SHIFT) {
-            if let Some(id) = id_at(head + 1) {
+            if let Some(id) = next(head).and_then(id_at) {
                 self.selection = Some(BlockSelection { head: id, ..sel });
             }
         } else if step(Key::ArrowUp, M::NONE) {
-            if let Some(id) = first
-                .checked_sub(1)
-                .and_then(id_at)
-                .or_else(|| id_at(first))
-            {
+            if let Some(id) = previous(first).and_then(id_at).or_else(|| id_at(first)) {
                 self.selection = Some(BlockSelection {
                     anchor: id.clone(),
                     head: id,
                 });
             }
         } else if step(Key::ArrowDown, M::NONE) {
-            if let Some(id) = id_at(last + 1).or_else(|| id_at(last)) {
+            if let Some(id) = next(last).and_then(id_at).or_else(|| id_at(last)) {
                 self.selection = Some(BlockSelection {
                     anchor: id.clone(),
                     head: id,
@@ -1575,6 +1677,82 @@ impl SilexApp {
         self.pending_anchor = Some((id.to_owned(), anchor));
     }
 
+    /// Which blocks are inside a folded toggle (ADR 0016).
+    pub(super) fn hidden(&self) -> Vec<bool> {
+        editor::hidden_blocks(&self.blocks, |b| self.folds.is_folded(&b.id))
+    }
+
+    /// The nearest block above `index` that is not hidden.
+    pub(super) fn previous_visible(&self, index: usize) -> Option<usize> {
+        let hidden = self.hidden();
+        (0..index).rev().find(|&i| !hidden[i])
+    }
+
+    /// The nearest block below `index` that is not hidden.
+    pub(super) fn next_visible(&self, index: usize) -> Option<usize> {
+        let hidden = self.hidden();
+        (index + 1..self.blocks.len()).find(|&i| !hidden[i])
+    }
+
+    /// Folds or opens toggle `id` and remembers it (view state, ADR 0016):
+    /// not an edit of the page. Folding with the cursor inside moves it to
+    /// the toggle's title.
+    pub(super) fn set_folded(&mut self, id: &str, folded: bool) {
+        if !self.folds.set(id, folded) {
+            return;
+        }
+        if folded
+            && let Some(index) = self.blocks.iter().position(|b| b.id == id)
+            && let Some(caret) = &self.caret
+            && let Some(at) = self.blocks.iter().position(|b| b.id == caret.block_id)
+            && (index + 1..editor::subtree_end(&self.blocks, index)).contains(&at)
+        {
+            let end = editor::block_char_len(&self.blocks[index]);
+            self.pending_focus = Some((id.to_owned(), end));
+        }
+        let json = self.folds.to_json();
+        let result = self.db.save_folded_blocks(&json);
+        if result.is_ok() {
+            self.saved_folds = json;
+        }
+        self.report(result);
+    }
+
+    /// Opens every folded toggle that hides block `index`.
+    pub(super) fn reveal_block(&mut self, index: usize) {
+        for at in editor::ancestors(&self.blocks, index) {
+            let block = &self.blocks[at];
+            if block.kind == BlockKind::Toggle && self.folds.is_folded(&block.id) {
+                let id = block.id.clone();
+                self.set_folded(&id, false);
+            }
+        }
+    }
+
+    /// A new paragraph inside toggle `index`, first, with the cursor.
+    pub(super) fn add_inside_toggle(&mut self, index: usize) {
+        let Some(toggle) = self.blocks.get(index) else {
+            return;
+        };
+        let inside = Block {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: BlockKind::Paragraph,
+            content: String::new(),
+            checked: false,
+            indent: toggle
+                .indent
+                .saturating_add(1)
+                .min(silex_desktop::model::MAX_INDENT),
+            attachment: None,
+            link: None,
+            marks: Vec::new(),
+            ..toggle.clone()
+        };
+        self.pending_focus = Some((inside.id.clone(), 0));
+        self.blocks.insert(index + 1, inside);
+        self.mark_dirty();
+    }
+
     /// Copying or cutting text selected in a block remembers it with its
     /// formatting (ADR 0015); copying anything else forgets it. A block
     /// selection is remembered where it is copied
@@ -1649,6 +1827,11 @@ impl SilexApp {
                 self.pending_key = Some((EditorKey::LinkBlock, id.to_owned()));
                 return;
             }
+            BlockAction::ToggleFold => {
+                let folded = self.folds.is_folded(id);
+                self.set_folded(id, !folded);
+                return;
+            }
             BlockAction::OpenFile | BlockAction::SaveFile | BlockAction::RevealFile => {
                 self.files.pending.push((action, id.to_owned()));
                 return;
@@ -1697,6 +1880,12 @@ impl SilexApp {
         let Some((block_id, char)) = self.pending_focus.clone() else {
             return;
         };
+        // A block about to be edited is never left folded away (ADR 0016).
+        if let Some(index) = self.blocks.iter().position(|b| b.id == block_id)
+            && self.hidden().get(index) == Some(&true)
+        {
+            self.reveal_block(index);
+        }
         let id = self.block_field_id(&block_id);
         let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
         let anchor = self
@@ -1858,8 +2047,32 @@ impl SilexApp {
                             reveal_block = bar.shown().map(|m| m.block);
                         }
                     }
+                    // The match shown is never inside a folded toggle.
+                    if let Some(index) = reveal_block {
+                        self.reveal_block(index);
+                    }
+                    // Folded toggles hide their content (ADR 0016); an
+                    // open one with nothing inside says how to fill it.
+                    let hidden = self.hidden();
+                    let empty_toggles: Vec<bool> = (0..self.blocks.len())
+                        .map(|i| {
+                            self.blocks[i].kind == BlockKind::Toggle
+                                && !self.folds.is_folded(&self.blocks[i].id)
+                                && editor::subtree_end(&self.blocks, i) == i + 1
+                        })
+                        .collect();
+                    let mut fill_toggle = None;
                     for (index, (block, number)) in self.blocks.iter_mut().zip(numbers).enumerate()
                     {
+                        if hidden[index] {
+                            // No room, but a place for the drag line.
+                            let at = ui.cursor().min;
+                            rects.push(egui::Rect::from_min_size(
+                                at,
+                                egui::vec2(ui.available_width(), 0.0),
+                            ));
+                            continue;
+                        }
                         let field = field_id(self.doc_generation, "block", &block.id);
                         let view = BlockView {
                             number,
@@ -1886,12 +2099,16 @@ impl SilexApp {
                                 .as_ref()
                                 .filter(|e| e.block_id == block.id)
                                 .map(|e| (e.start, e.end)),
+                            folded: self.folds.is_folded(&block.id),
                         };
                         if index > 0 {
                             ui.add_space(heading_space(block.kind));
                         }
                         let out = block_field(ui, self.doc_generation, block, &view);
                         rects.push(out.rect);
+                        if empty_toggles[index] && empty_toggle_hint(ui, block.indent) {
+                            fill_toggle = Some(index);
+                        }
                         if let Some(edit) =
                             self.link_edit.as_mut().filter(|e| e.block_id == block.id)
                         {
@@ -1971,6 +2188,9 @@ impl SilexApp {
                     }
                     if let Some((kind, id)) = clicked_kind {
                         self.pending_key = Some((EditorKey::Slash(kind), id));
+                    }
+                    if let Some(index) = fill_toggle {
+                        self.add_inside_toggle(index);
                     }
                     if let Some(dragged) = &dragging {
                         drop_move = self.drag_blocks(ui, dragged, &rects);

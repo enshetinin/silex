@@ -994,3 +994,81 @@ mod divider_and_callout {
         assert_eq!(caret, Some(Caret { block: 3, char: 0 }));
     }
 }
+
+/// H12.4a: toggles, their content and what folding hides (ADR 0016).
+mod toggles {
+    use super::*;
+    use BlockKind::Toggle;
+    use silex_desktop::editor::{ancestors, enter_with_fold, hidden_blocks, subtree_end};
+
+    /// t1 (folded) > [a, t2 (open) > [b], c] , d ; t3 (folded, empty)
+    fn doc() -> Vec<Block> {
+        vec![
+            b("t1", Toggle, 0, "uno"),
+            b("a", Paragraph, 1, "a"),
+            b("t2", Toggle, 1, "dos"),
+            b("b", Bulleted, 2, "b"),
+            b("c", Paragraph, 1, "c"),
+            b("d", Paragraph, 0, "d"),
+            b("t3", Toggle, 0, "tres"),
+        ]
+    }
+
+    #[test]
+    fn the_content_of_a_block_is_what_follows_with_more_indent() {
+        let blocks = doc();
+        assert_eq!(subtree_end(&blocks, 0), 5);
+        assert_eq!(subtree_end(&blocks, 2), 4);
+        assert_eq!(subtree_end(&blocks, 3), 4);
+        assert_eq!(subtree_end(&blocks, 6), 7);
+        assert_eq!(subtree_end(&blocks, 9), 9, "past the end");
+        assert_eq!(ancestors(&blocks, 3), [2, 0]);
+        assert_eq!(ancestors(&blocks, 4), [0]);
+        assert!(ancestors(&blocks, 5).is_empty());
+    }
+
+    #[test]
+    fn folded_toggles_hide_their_content_also_nested() {
+        let blocks = doc();
+        let folded = |ids: &'static [&'static str]| move |b: &Block| ids.contains(&b.id.as_str());
+        assert_eq!(
+            hidden_blocks(&blocks, folded(&["t1", "t3"])),
+            [false, true, true, true, true, false, false]
+        );
+        assert_eq!(
+            hidden_blocks(&blocks, folded(&["t2"])),
+            [false, false, false, true, false, false, false]
+        );
+        // Only toggles fold: a paragraph's id in the set changes nothing.
+        assert_eq!(hidden_blocks(&blocks, folded(&["a", "d"])), [false; 7]);
+    }
+
+    #[test]
+    fn enter_goes_inside_an_open_toggle_and_after_a_folded_one() {
+        let mut blocks = doc();
+        // Open: the text after the cursor goes inside, first.
+        let caret = enter_with_fold(&mut blocks, 2, 1, false, new_id);
+        assert_eq!(caret, Some(Caret { block: 3, char: 0 }));
+        assert_eq!(
+            summary(&blocks)[2..4],
+            [("t2", Toggle, 1, "d"), ("nuevo", Paragraph, 2, "os")]
+        );
+        // Folded: after everything it holds.
+        let mut blocks = doc();
+        let caret = enter_with_fold(&mut blocks, 0, 3, true, new_id);
+        assert_eq!(caret, Some(Caret { block: 5, char: 0 }));
+        assert_eq!(summary(&blocks)[5], ("nuevo", Paragraph, 0, ""));
+        // At the start: an empty block above, as usual.
+        let mut blocks = doc();
+        enter_with_fold(&mut blocks, 0, 0, true, new_id);
+        assert_eq!(summary(&blocks)[0], ("nuevo", Paragraph, 0, ""));
+        // An empty toggle becomes text.
+        let mut blocks = vec![b("t", Toggle, 0, "")];
+        enter_with_fold(&mut blocks, 0, 0, false, new_id);
+        assert_eq!(summary(&blocks), [("t", Paragraph, 0, "")]);
+        // Other blocks: plain Enter.
+        let mut blocks = vec![b("a", Bulleted, 0, "ab")];
+        enter_with_fold(&mut blocks, 0, 1, true, new_id);
+        assert_eq!(summary(&blocks)[1], ("nuevo", Bulleted, 0, "b"));
+    }
+}

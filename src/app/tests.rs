@@ -58,6 +58,7 @@ fn frame(
                     found: Vec::new(),
                     reveal: false,
                     link_edit: None,
+                    folded: false,
                 },
             )
             .text_changed;
@@ -5360,5 +5361,137 @@ fn slash_callout_and_enter_goes_on_as_text() -> anyhow::Result<()> {
     app.save_now()?;
     let page = app.selected.clone().expect("page");
     assert_eq!(app.db.list_blocks(&page)?[0].kind, BlockKind::Callout);
+    Ok(())
+}
+
+// ---- Toggle blocks (H12.4a, ADR 0016) ----
+
+const TOG: BlockKind = BlockKind::Toggle;
+
+/// A toggle with two blocks inside, then a paragraph; the caret in `focus`.
+fn toggle_app(focus: usize, char: usize) -> anyhow::Result<(SilexApp, egui::Context)> {
+    editor_app(
+        &[
+            (TOG, 0, "Detalles"),
+            (Par, 1, "oculto uno"),
+            (Bul, 1, "oculto dos"),
+            (Par, 0, "después"),
+        ],
+        focus,
+        char,
+    )
+}
+
+#[test]
+fn folding_hides_the_content_without_touching_the_document() -> anyhow::Result<()> {
+    let (mut app, ctx) = toggle_app(3, 0)?;
+    app.save_now()?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "oculto uno"));
+    let toggle = app.blocks[0].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        !painted.iter().any(|t| t.starts_with("oculto")),
+        "{painted:?}"
+    );
+    assert!(painted.iter().any(|t| t == "después"));
+    // View state: nothing to save, nothing to undo, remembered in settings.
+    assert!(app.save.can_close());
+    assert_eq!(app.db.folded_blocks()?, Some(format!(r#"["{toggle}"]"#)));
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(app.blocks.len(), 4);
+    assert!(app.folds.is_folded(&toggle));
+    // Open again.
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "oculto dos"));
+    assert_eq!(app.db.folded_blocks()?, Some("[]".into()));
+    Ok(())
+}
+
+#[test]
+fn arrows_skip_what_is_folded_and_cmd_enter_folds() -> anyhow::Result<()> {
+    let (mut app, ctx) = toggle_app(0, 8)?;
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::COMMAND)]);
+    assert!(app.folds.is_folded(&app.blocks[0].id));
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(3), "past the hidden blocks");
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(0));
+    // Folding with the cursor inside takes it to the title.
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::COMMAND)]);
+    focus_at(&mut app, &ctx, 2, 3);
+    let toggle = app.blocks[0].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(0));
+    Ok(())
+}
+
+#[test]
+fn hidden_text_is_revealed_before_it_is_found_or_merged() -> anyhow::Result<()> {
+    let (mut app, ctx) = toggle_app(3, 0)?;
+    let toggle = app.blocks[0].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    app_frame(&mut app, &ctx, vec![]);
+    // Backspace at the start of the block after it: the toggle opens,
+    // nothing merges into a hidden block.
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    assert!(!app.folds.is_folded(&toggle));
+    assert_eq!(app.blocks[2].content, "oculto dos");
+    assert_eq!(app.blocks[3].content, "después");
+    // A match inside a folded toggle opens it when shown.
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    app_frame(&mut app, &ctx, vec![key(Key::F, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("oculto"));
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(!app.folds.is_folded(&toggle));
+    Ok(())
+}
+
+#[test]
+fn enter_in_an_open_toggle_writes_inside_it() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+    app_frame(&mut app, &ctx, type_text("/despleg"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, type_text("Pasos"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, type_text("primero"));
+    assert_eq!(
+        contents(&app),
+        [(TOG, 0, "Pasos".into()), (Par, 1, "primero".into())]
+    );
+    // Folded, Enter goes after it.
+    let toggle = app.blocks[0].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    focus_at(&mut app, &ctx, 0, 5);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(contents(&app)[2], (Par, 0, String::new()));
+    assert_eq!(focused_block(&app, &ctx), Some(2));
+    Ok(())
+}
+
+#[test]
+fn an_empty_toggle_offers_to_write_inside_it() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(TOG, 0, "Vacío"), (Par, 0, "fuera")], 1, 0)?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t == "Desplegable vacío: haz clic para escribir dentro")
+    );
+    app.add_inside_toggle(0);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(contents(&app)[1], (Par, 1, String::new()));
+    assert_eq!(focused_block(&app, &ctx), Some(1));
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(!painted.iter().any(|t| t.starts_with("Desplegable vacío")));
     Ok(())
 }

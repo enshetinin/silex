@@ -420,3 +420,15 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Exporta la página a Markdown: la línea es `---` y el aviso `> [!NOTE]`. En GitHub, el aviso se ve como una nota. Importa el `.md`: vuelven los dos.
 - Importa un `.md` de Obsidian con `> [!info]` en su propia línea: es un aviso. Una página importada antes con `---` como texto no cambia.
 - Con VoiceOver, la línea se anuncia como «Separador» y el aviso como «Aviso».
+
+## 46. Desplegable: plegar y teclado (H12.4a, ADR 0016)
+- Al abrir con una base de la versión anterior se crea una copia y todo sigue igual, también separadores, avisos y formato.
+- «/desplegable» en un párrafo vacío y escribe un título. Intro: el cursor pasa dentro (con sangría). Escribe dos bloques; Tab y Mayús+Tab meten y sacan bloques.
+- Clic en la flecha (o Cmd/Ctrl+Intro en el título): se pliega y el contenido desaparece. Otra vez: vuelve. El estado de guardado no cambia y Cmd/Ctrl+Z no lo deshace.
+- Cierra y abre la app: los desplegables siguen plegados o abiertos como los dejaste.
+- Con uno plegado, ↑ y ↓ saltan su contenido; Esc y Mayús+↓ también. Intro al final del título crea un párrafo después de todo su contenido.
+- Pliégalo con el cursor dentro: el cursor pasa al título.
+- Con uno plegado, Retroceso al inicio del párrafo de debajo lo despliega (no une el texto con nada oculto). «Buscar en la página» una palabra que está dentro: se despliega al mostrarla.
+- Un desplegable vacío y abierto muestra «Desplegable vacío: haz clic para escribir dentro»; el clic crea un bloque dentro.
+- Con VoiceOver, la flecha se anuncia como «Plegar «título»» o «Desplegar «título»».
+- Pendiente para H12.4b: mover, duplicar, arrastrar o borrar un desplegable todavía no lleva su contenido.

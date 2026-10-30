@@ -36,6 +36,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (9, include_str!("db/migrations/0009_templates.sql")),
     (10, include_str!("db/migrations/0010_inline_marks.sql")),
     (11, include_str!("db/migrations/0011_divider_callout.sql")),
+    (12, include_str!("db/migrations/0012_toggle.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -272,6 +273,38 @@ impl Database {
             params![OPEN_TABS, json],
         )?;
         Ok(())
+    }
+
+    /// The folded toggles as last stored ([`crate::folds::Folds::to_json`]),
+    /// if any (ADR 0016). Kept in `settings`, which ignores the key.
+    pub fn folded_blocks(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [FOLDED_BLOCKS],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Remembers the folded toggles, for the next start.
+    pub fn save_folded_blocks(&self, json: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![FOLDED_BLOCKS, json],
+        )?;
+        Ok(())
+    }
+
+    /// The ids of every toggle block, to forget folds of deleted ones.
+    pub fn toggle_block_ids(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT id FROM blocks WHERE kind = ?1")?;
+        let ids = stmt
+            .query_map([BlockKind::Toggle.as_str()], |r| r.get(0))?
+            .collect::<rusqlite::Result<HashSet<String>>>()?;
+        Ok(ids)
     }
 
     /// The pages opened recently as last stored
@@ -2349,6 +2382,8 @@ const COMPACTING: &str = "compacting";
 const SYNCED_WARNING: &str = "synced_warning_dismissed";
 /// `settings` key of the open tabs (ADR 0011).
 const OPEN_TABS: &str = "open_tabs";
+/// `settings` key of the folded toggles (ADR 0016).
+const FOLDED_BLOCKS: &str = "folded_blocks";
 /// `settings` key of the pages opened recently (H11.8).
 const RECENT_PAGES: &str = "recent_pages";
 /// Start of the `settings` key of a database's last open view (H11.6),

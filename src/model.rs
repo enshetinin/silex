@@ -59,11 +59,14 @@ pub enum BlockKind {
     /// Text on a background, with an icon (H12.3): a paragraph that stands
     /// out. Takes formatting like a paragraph.
     Callout,
+    /// A title that shows or hides the blocks after it with more indent
+    /// (ADR 0016). Takes formatting like a paragraph.
+    Toggle,
 }
 
 impl BlockKind {
     /// The kinds a text block can take: the `/` menu and «Convertir en».
-    pub const ALL: [BlockKind; 10] = [
+    pub const ALL: [BlockKind; 11] = [
         BlockKind::Paragraph,
         BlockKind::Heading1,
         BlockKind::Heading2,
@@ -72,11 +75,12 @@ impl BlockKind {
         BlockKind::Bulleted,
         BlockKind::Numbered,
         BlockKind::Quote,
+        BlockKind::Toggle,
         BlockKind::Callout,
         BlockKind::Code,
     ];
 
-    /// Name stored in SQLite (must match the CHECK in migration 0011).
+    /// Name stored in SQLite (must match the CHECK in migration 0012).
     pub fn as_str(self) -> &'static str {
         match self {
             BlockKind::Paragraph => "paragraph",
@@ -92,6 +96,7 @@ impl BlockKind {
             BlockKind::PageLink => "page_link",
             BlockKind::Divider => "divider",
             BlockKind::Callout => "callout",
+            BlockKind::Toggle => "toggle",
         }
     }
 
@@ -127,6 +132,7 @@ impl BlockKind {
             BlockKind::PageLink => "Enlace a página",
             BlockKind::Divider => "Separador",
             BlockKind::Callout => "Aviso",
+            BlockKind::Toggle => "Desplegable",
         }
     }
 
