@@ -149,6 +149,12 @@ pub struct SilexApp {
     format_target: Option<(String, usize, usize)>,
     /// The field giving a web link its URL, while open (H12.1d).
     link_edit: Option<web_links::LinkEdit>,
+    /// The last text copied from a block or a block selection, with its
+    /// formatting: pasting that same text brings it back (ADR 0015).
+    clip: Option<silex_desktop::editor::Clip>,
+    /// A one-line paste of `clip` this frame: block id, where it goes, its
+    /// length in characters and its formatting.
+    paste_marks: Option<(String, usize, usize, Vec<silex_desktop::marks::Mark>)>,
     /// Block to focus (and cursor position) on the next frame.
     pending_focus: Option<(String, usize)>,
     /// With `pending_focus`, the other end of a selection in that block
@@ -302,6 +308,8 @@ impl SilexApp {
             typing_format: None,
             format_target: None,
             link_edit: None,
+            clip: None,
+            paste_marks: None,
             pending_focus: None,
             pending_anchor: None,
             find: None,
@@ -896,6 +904,7 @@ impl SilexApp {
         ui.painter()
             .rect_filled(ctx.content_rect(), 0.0, theme::current(&ctx).bg);
         self.handle_shortcuts(&ctx);
+        self.remember_copy(&ctx);
         self.handle_dropped_files(&ctx);
         // The search window has the keyboard while it is open.
         if self.search.is_none()
@@ -911,6 +920,7 @@ impl SilexApp {
             self.handle_selection_keys(&ctx);
         }
         self.layout(ui);
+        self.paste_marks = None;
         self.link_edit_ui(&ctx);
         self.run_paste(&ctx);
         self.run_editor_key(&ctx);

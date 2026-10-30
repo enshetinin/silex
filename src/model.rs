@@ -200,6 +200,8 @@ pub struct NewBlock {
     pub indent: u8,
     pub checked: bool,
     pub content: String,
+    /// Inline formatting (ADR 0015), over `content`.
+    pub marks: Vec<crate::marks::Mark>,
 }
 
 /// Number shown before each numbered block (`None` for other blocks).

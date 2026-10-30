@@ -747,3 +747,116 @@ mod formatting {
         assert_eq!(blocks[1].marks, vec![bold(3, 5)]);
     }
 }
+
+/// H12.1e: copying keeps the formatting with the text, and pasting that
+/// same text gives it back (ADR 0015).
+mod clipboard {
+    use super::*;
+    use silex_desktop::editor::{Clip, paste_lines_marked, selection_clip, selection_text};
+    use silex_desktop::marks::{Mark, MarkKind};
+
+    fn bold(start: usize, end: usize) -> Mark {
+        Mark::new(start, end, MarkKind::Bold)
+    }
+
+    fn italic(start: usize, end: usize) -> Mark {
+        Mark::new(start, end, MarkKind::Italic)
+    }
+
+    fn marked(mut block: Block, marks: Vec<Mark>) -> Block {
+        block.marks = marks;
+        block
+    }
+
+    fn ids() -> impl FnMut() -> String {
+        let mut n = 0;
+        move || {
+            n += 1;
+            format!("n{n}")
+        }
+    }
+
+    fn copied_blocks() -> Vec<Block> {
+        vec![
+            marked(b("a", Bulleted, 0, "pan negro"), vec![bold(0, 3)]),
+            marked(b("b", Numbered, 1, "dos ñu"), vec![italic(4, 6)]),
+            marked(b("c", Paragraph, 0, "🌾 fin"), vec![bold(2, 5)]),
+        ]
+    }
+
+    #[test]
+    fn a_selection_of_blocks_copies_its_formatting_after_the_markers() {
+        let clip = selection_clip(&copied_blocks(), 0, 2);
+        assert_eq!(clip.text, selection_text(&copied_blocks(), 0, 2));
+        assert_eq!(clip.text, "• pan negro\n  1. dos ñu\n🌾 fin");
+        let words: Vec<String> = clip
+            .marks
+            .iter()
+            .map(|m| {
+                clip.text
+                    .chars()
+                    .skip(m.start)
+                    .take(m.end - m.start)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(words, ["pan", "ñu", "fin"]);
+    }
+
+    #[test]
+    fn pasting_copied_blocks_brings_back_their_formatting() {
+        let original = copied_blocks();
+        let clip = selection_clip(&original, 0, 2);
+        let mut blocks = vec![marked(b("x", Paragraph, 0, ""), vec![])];
+        let marks = clip.marks_for(&clip.text).expect("same text");
+        paste_lines_marked(&mut blocks, 0, 0, &clip.text, marks, ids());
+        let got: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.content.as_str(), b.marks.clone()))
+            .collect();
+        let want: Vec<_> = original
+            .iter()
+            .map(|b| (b.kind, b.content.as_str(), b.marks.clone()))
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn pasting_in_the_middle_keeps_the_text_around_and_its_formatting() {
+        let clip = Clip {
+            text: "uno\ndos".into(),
+            marks: vec![bold(1, 6)],
+        };
+        let mut blocks = vec![marked(b("a", Paragraph, 0, "ab"), vec![italic(0, 2)])];
+        // Windows line endings are the same text.
+        let marks = clip.marks_for("uno\r\ndos").expect("same text");
+        let caret = paste_lines_marked(&mut blocks, 0, 1, "uno\r\ndos", marks, ids());
+        assert_eq!(caret, Some(Caret { block: 1, char: 3 }));
+        assert_eq!(blocks[0].content, "auno");
+        assert_eq!(blocks[0].marks, vec![italic(0, 1), bold(2, 4)]);
+        assert_eq!(blocks[1].content, "dosb");
+        assert_eq!(blocks[1].marks, vec![bold(0, 2), italic(3, 4)]);
+        assert!(clip.marks_for("otro texto").is_none());
+    }
+
+    #[test]
+    fn a_code_block_or_a_control_character_takes_no_formatting() {
+        let clip = Clip {
+            text: "uno\ndos".into(),
+            marks: vec![bold(0, 7)],
+        };
+        let mut blocks = vec![b("a", Code, 0, "")];
+        paste_lines_marked(&mut blocks, 0, 0, &clip.text, &clip.marks, ids());
+        assert!(blocks[0].marks.is_empty());
+        let block = b("a", Paragraph, 0, "a\u{7}b");
+        assert!(Clip::of_text(&block, 0, 3).is_none());
+        let block = marked(b("a", Paragraph, 0, "pan negro"), vec![bold(0, 3)]);
+        assert_eq!(
+            Clip::of_text(&block, 2, 6),
+            Some(Clip {
+                text: "n ne".into(),
+                marks: vec![bold(0, 1)]
+            })
+        );
+    }
+}

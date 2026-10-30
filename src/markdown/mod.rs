@@ -1,8 +1,8 @@
 //! Markdown conversion for pages (milestone 4). Pure functions, no I/O, no egui.
 //!
-//! Silex blocks have no inline formatting, so export escapes every character
-//! Markdown could interpret: importing an exported page gives back the exact
-//! same text (see `tests/markdown_*.rs`).
+//! Export escapes every character Markdown could interpret and writes the
+//! inline formatting (ADR 0015) as Markdown: importing an exported page
+//! gives back the exact same text and formatting (see `tests/markdown_*.rs`).
 mod export;
 mod import;
 

@@ -96,18 +96,21 @@ fn page_with_blocks_is_created_atomically_and_searchable() -> anyhow::Result<()>
             indent: 0,
             checked: false,
             content: "Sección".into(),
+            marks: Vec::new(),
         },
         NewBlock {
             kind: BlockKind::Todo,
             indent: 9, // clamped to the maximum
             checked: true,
             content: "tarea importada".into(),
+            marks: Vec::new(),
         },
         NewBlock {
             kind: BlockKind::Paragraph,
             indent: 0,
             checked: true, // only tasks keep checked
             content: "texto".into(),
+            marks: Vec::new(),
         },
     ];
     let id = db.create_page_with_blocks("Importada", None, &blocks)?;
@@ -125,5 +128,41 @@ fn page_with_blocks_is_created_atomically_and_searchable() -> anyhow::Result<()>
     );
     assert_eq!(db.list_pages()?.len(), before);
     assert!(db.search_pages("Huérfana")?.is_empty());
+    Ok(())
+}
+
+/// H12.1e: an imported page keeps its formatting (ADR 0015); a code block
+/// and a link that is not allowed lose theirs, never their text.
+#[test]
+fn imported_formatting_is_saved() -> anyhow::Result<()> {
+    use silex_desktop::marks::{Mark, MarkKind};
+    let mut db = Database::open_in_memory()?;
+    let page = silex_desktop::markdown::markdown_to_page(
+        "# Nota\n\nPan **integral** y [receta](https://a.es).\n\n```\ncódigo\n```\n",
+        "x",
+    );
+    let mut blocks = page.blocks;
+    blocks[1].marks = vec![Mark::new(0, 3, MarkKind::Bold)];
+    blocks.push(NewBlock {
+        kind: BlockKind::Paragraph,
+        indent: 0,
+        checked: false,
+        content: "malo".into(),
+        marks: vec![Mark::new(0, 4, MarkKind::Link("javascript:x".into()))],
+    });
+    let id = db.create_page_with_blocks(&page.title, None, &blocks)?;
+    let saved = db.list_blocks(&id)?;
+    assert_eq!(saved[0].content, "Pan integral y receta.");
+    assert_eq!(
+        saved[0].marks,
+        vec![
+            Mark::new(4, 12, MarkKind::Bold),
+            Mark::new(15, 21, MarkKind::Link("https://a.es".into())),
+        ]
+    );
+    assert_eq!(saved[1].content, "código");
+    assert!(saved[1].marks.is_empty());
+    assert_eq!(saved[2].content, "malo");
+    assert!(saved[2].marks.is_empty());
     Ok(())
 }

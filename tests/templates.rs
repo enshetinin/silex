@@ -176,6 +176,7 @@ fn nothing_goes_inside_a_template_and_it_never_moves() -> anyhow::Result<()> {
         indent: 0,
         checked: false,
         content: "importada".into(),
+        marks: Vec::new(),
     }];
     assert!(
         db.create_page_with_blocks("Importada", Some(&template), &text)

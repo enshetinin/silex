@@ -399,3 +399,12 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Con VoiceOver (o NVDA/Orca), en un bloque con enlaces se oye su descripción: «Enlace: texto (URL)». El campo de la URL se anuncia como «Dirección del enlace».
 - «Atajos de teclado» lista Cmd/Ctrl+K con texto seleccionado y Cmd/Ctrl+clic / Cmd/Ctrl+Intro.
 - La app no se conecta a ninguna dirección: abrir un enlace solo se lo pide al sistema.
+
+## 44. Formato en Markdown y al copiar y pegar (H12.1e, ADR 0015)
+- En la página «QA · Formato en línea» de la semilla, «…» → «Exportar la página a Markdown». Abre el `.md` en otro editor (o en GitHub): negrita, cursiva, código, tachado y enlaces se ven con su formato; los caracteres raros (`*`, `#`, `[`) se ven tal cual.
+- Importa ese `.md` (arrastrándolo a la ventana): la página nueva tiene el mismo texto y el mismo formato.
+- Importa un `.md` de Obsidian o de GitHub con `**negrita**`, `~~tachado~~`, `` `código` ``, `[enlace](https://…)`, `<https://…>`, `[nota](otra.md)` y una imagen: los cuatro primeros salen con formato; el enlace relativo y la imagen, como texto.
+- Las páginas importadas antes de esta versión no cambian: su `**texto**` literal sigue siendo texto.
+- Selecciona «pan **negro**» dentro de un bloque, Cmd/Ctrl+C, y pégalo en medio de un texto en cursiva de otro bloque: sale exactamente como se copió (negrita solo en «negro», sin cursiva). Cmd/Ctrl+Z lo quita de un paso.
+- Selecciona varios bloques con formato (Esc y Mayús+↓), Cmd/Ctrl+C, y pégalos en un párrafo vacío: vuelven los mismos bloques con su formato.
+- Copia texto desde otra app y pégalo dentro de una negrita: toma la negrita de alrededor, como antes. Pegado en otra app, lo copiado en Silex es texto plano.

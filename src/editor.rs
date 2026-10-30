@@ -511,26 +511,76 @@ pub fn restore_deleted(blocks: &mut Vec<Block>, deleted: DeletedBlocks) {
 /// Plain text of blocks `first..=last`: one line per block, two spaces per
 /// indent level, list markers and task boxes. (Markdown is milestone 4.)
 pub fn selection_text(blocks: &[Block], first: usize, last: usize) -> String {
+    selection_clip(blocks, first, last).text
+}
+
+/// Text copied inside Silex, with its formatting over it (ADR 0015).
+/// Pasting exactly this text gives the formatting back; other apps only
+/// get the text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Clip {
+    pub text: String,
+    pub marks: Vec<marks::Mark>,
+}
+
+impl Clip {
+    /// The characters `[start, end)` of a block, with their formatting.
+    /// `None` if the text would change when pasted (control characters).
+    pub fn of_text(block: &Block, start: usize, end: usize) -> Option<Clip> {
+        let text: String = block
+            .content
+            .chars()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .collect();
+        (normalize_pasted(&text) == text).then(|| Clip {
+            marks: marks::slice(&block.marks, start, end),
+            text,
+        })
+    }
+
+    /// The formatting of `pasted` if it is this text (line endings aside).
+    pub fn marks_for(&self, pasted: &str) -> Option<&[marks::Mark]> {
+        (normalize_pasted(pasted) == self.text).then_some(self.marks.as_slice())
+    }
+}
+
+/// [`selection_text`] with the formatting of each block, moved to where
+/// its text is in the copied lines.
+pub fn selection_clip(blocks: &[Block], first: usize, last: usize) -> Clip {
     let (first, last) = (first.min(last), first.max(last));
     let numbers = crate::model::list_numbers(blocks);
-    blocks
-        .iter()
-        .zip(numbers)
-        .enumerate()
-        .filter(|(i, _)| (first..=last).contains(i))
-        .map(|(_, (block, number))| {
-            let indent = "  ".repeat(usize::from(block.indent));
-            let marker = match block.kind {
-                BlockKind::Bulleted => "• ".to_owned(),
-                BlockKind::Numbered => format!("{}. ", number.unwrap_or(1)),
-                BlockKind::Todo if block.checked => "[x] ".to_owned(),
-                BlockKind::Todo => "[ ] ".to_owned(),
-                _ => String::new(),
-            };
-            format!("{indent}{marker}{}", block.content)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut clip = Clip::default();
+    let mut at = 0;
+    for (i, (block, number)) in blocks.iter().zip(numbers).enumerate() {
+        if !(first..=last).contains(&i) {
+            continue;
+        }
+        if i > first {
+            clip.text.push('\n');
+            at += 1;
+        }
+        let indent = "  ".repeat(usize::from(block.indent));
+        let marker = match block.kind {
+            BlockKind::Bulleted => "• ".to_owned(),
+            BlockKind::Numbered => format!("{}. ", number.unwrap_or(1)),
+            BlockKind::Todo if block.checked => "[x] ".to_owned(),
+            BlockKind::Todo => "[ ] ".to_owned(),
+            _ => String::new(),
+        };
+        let prefix = format!("{indent}{marker}");
+        at += char_len(&prefix);
+        clip.text.push_str(&prefix);
+        clip.text.push_str(&block.content);
+        clip.marks.extend(
+            block
+                .marks
+                .iter()
+                .map(|m| marks::Mark::new(m.start + at, m.end + at, m.kind.clone())),
+        );
+        at += char_len(&block.content);
+    }
+    clip
 }
 
 // ---------------------------------------------------------------------------
@@ -680,17 +730,41 @@ pub fn paste_lines(
     index: usize,
     cursor: usize,
     text: &str,
+    new_id: impl FnMut() -> String,
+) -> Option<Caret> {
+    paste_lines_marked(blocks, index, cursor, text, &[], new_id)
+}
+
+/// [`paste_lines`] of text copied inside Silex: `pasted` is its formatting
+/// (over the text with `\r\n` as `\n`, see [`Clip`]), which each line
+/// keeps without its list marker.
+pub fn paste_lines_marked(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    cursor: usize,
+    text: &str,
+    pasted: &[marks::Mark],
     mut new_id: impl FnMut() -> String,
 ) -> Option<Caret> {
     let text = normalize_pasted(text);
-    let mut lines = text.split('\n').map(parse_pasted_line);
-    let first = lines.next()?;
+    let mut at = 0;
+    let mut lines = text.split('\n').map(|raw| {
+        let line = parse_pasted_line(raw);
+        let len = char_len(raw);
+        // The content is the end of the line, after its marker.
+        let start = at + len - char_len(&line.content);
+        let line_marks = marks::slice(pasted, start, at + len);
+        at += len + 1;
+        (line, line_marks)
+    });
+    let (first, first_marks) = lines.next()?;
     let block = blocks.get_mut(index)?;
     let split_at = byte_index(&block.content, cursor);
     let tail = block.content.split_off(split_at);
-    // The text after the cursor keeps its formatting; pasted text has none.
+    // The text after the cursor keeps its formatting; the pasted text
+    // gets its own (none, if it was not copied in Silex).
     let (head_marks, tail_marks) = marks::split(&block.marks, cursor);
-    block.marks = head_marks;
+    block.marks = marks::join(&head_marks, char_len(&block.content), &first_marks);
     let base_indent = block.indent;
     if block.content.is_empty() && first.kind != BlockKind::Paragraph {
         block.kind = first.kind;
@@ -698,23 +772,23 @@ pub fn paste_lines(
         block.indent = base_indent.saturating_add(first.indent).min(MAX_INDENT);
     }
     block.content.push_str(&first.content);
+    fit_marks(block);
 
     let template = block.clone();
     let mut last = index;
-    for line in lines {
+    for (line, line_marks) in lines {
         last += 1;
-        blocks.insert(
-            last,
-            Block {
-                id: new_id(),
-                kind: line.kind,
-                checked: line.checked,
-                indent: base_indent.saturating_add(line.indent).min(MAX_INDENT),
-                content: line.content,
-                marks: Vec::new(),
-                ..template.clone()
-            },
-        );
+        let mut new = Block {
+            id: new_id(),
+            kind: line.kind,
+            checked: line.checked,
+            indent: base_indent.saturating_add(line.indent).min(MAX_INDENT),
+            content: line.content,
+            marks: line_marks,
+            ..template.clone()
+        };
+        fit_marks(&mut new);
+        blocks.insert(last, new);
     }
     let target = &mut blocks[last];
     let char = char_len(&target.content);

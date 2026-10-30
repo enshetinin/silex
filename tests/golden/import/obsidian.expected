@@ -1,5 +1,5 @@
 título: Nota diaria
-paragraph 0| Hoy **revisé** el proyecto y *anoté* ideas.⏎Segunda línea del mismo párrafo con [[enlace interno]] y #etiqueta.
+paragraph 0| Hoy revisé el proyecto y anoté ideas.⏎Segunda línea del mismo párrafo con [[enlace interno]] y #etiqueta.  {negrita «revisé»; cursiva «anoté»}
 heading_2 0| Tareas
 todo 0 [ ]| Llamar a Ana
 todo 0 [x]| Enviar factura
@@ -11,4 +11,4 @@ bulleted 2| Tres
 quote 0| Cita importante⏎en dos líneas
 code 0| fn main() {⏎    println!("hola");⏎}
 paragraph 0| ---
-paragraph 0| Final con `código` y una ~tilde~.
+paragraph 0| Final con código y una tilde.  {código «código»; tachado «tilde»}

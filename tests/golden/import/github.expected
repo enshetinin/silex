@@ -1,5 +1,5 @@
 título: Proyecto Silex
-paragraph 0| Descripción con un [enlace](https://example.com "Título") y una imagen ![logo](logo.png).⏎Autoenlace: <https://silex.dev> y correo <hola@silex.dev>.
+paragraph 0| Descripción con un enlace y una imagen ![logo](logo.png).⏎Autoenlace: https://silex.dev y correo hola@silex.dev.  {enlace «enlace» → https://example.com; enlace «https://silex.dev» → https://silex.dev; enlace «hola@silex.dev» → mailto:hola@silex.dev}
 heading_2 0| Instalación
 numbered 0| Quinto paso
 numbered 0| Sexto paso

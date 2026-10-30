@@ -12,14 +12,43 @@ fn dump(page: &ImportedPage) -> String {
             _ => "",
         };
         out.push_str(&format!(
-            "{} {}{}| {}\n",
+            "{} {}{}| {}{}\n",
             b.kind.as_str(),
             b.indent,
             check,
-            b.content.replace('\n', "⏎")
+            b.content.replace('\n', "⏎"),
+            dump_marks(&b.content, &b.marks),
         ));
     }
     out
+}
+
+/// The formatting of a block, after its text: `  {negrita «pan»; enlace
+/// «web» → https://…}`.
+fn dump_marks(content: &str, marks: &[silex_desktop::marks::Mark]) -> String {
+    use silex_desktop::marks::MarkKind;
+    if marks.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = marks
+        .iter()
+        .map(|m| {
+            let text: String = content
+                .chars()
+                .skip(m.start)
+                .take(m.end - m.start)
+                .collect::<String>()
+                .replace('\n', "⏎");
+            match &m.kind {
+                MarkKind::Bold => format!("negrita «{text}»"),
+                MarkKind::Italic => format!("cursiva «{text}»"),
+                MarkKind::Code => format!("código «{text}»"),
+                MarkKind::Strike => format!("tachado «{text}»"),
+                MarkKind::Link(url) => format!("enlace «{text}» → {url}"),
+            }
+        })
+        .collect();
+    format!("  {{{}}}", parts.join("; "))
 }
 
 const FIXTURES: &[(&str, &str)] = &[
@@ -76,7 +105,7 @@ fn to_blocks(blocks: &[NewBlock]) -> Vec<silex_desktop::model::Block> {
             indent: b.indent,
             attachment: None,
             link: None,
-            marks: Vec::new(),
+            marks: b.marks.clone(),
         })
         .collect()
 }
@@ -87,6 +116,7 @@ fn nb(kind: BlockKind, indent: u8, checked: bool, content: &str) -> NewBlock {
         indent,
         checked,
         content: content.into(),
+        marks: Vec::new(),
     }
 }
 

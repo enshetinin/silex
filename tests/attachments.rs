@@ -131,6 +131,7 @@ fn blocks_that_do_not_match_their_attachment_are_refused() -> anyhow::Result<()>
         indent: 0,
         checked: false,
         content: "x".into(),
+        marks: Vec::new(),
     };
     assert!(
         db.create_page_with_blocks("Importada", None, &[new])

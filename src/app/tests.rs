@@ -340,6 +340,7 @@ fn search_pages(app: &mut SilexApp) -> anyhow::Result<(String, String)> {
             indent: 0,
             checked: false,
             content: (*text).to_owned(),
+            marks: Vec::new(),
         })
         .collect();
     let notas = app.db.create_page_with_blocks("Notas", None, &new)?;
@@ -4172,6 +4173,7 @@ fn startup_and_navigation_smoke() -> anyhow::Result<()> {
                         indent: 0,
                         checked: false,
                         content: format!("Bloque {b} de la página {p}: texto de ejemplo"),
+                        marks: Vec::new(),
                     })
                     .collect();
                 let under = if p % 10 == 0 { None } else { parent.as_deref() };
@@ -5188,4 +5190,106 @@ fn screen_readers_hear_the_links_of_a_block() {
         .as_deref(),
         Some("Enlaces: uno (https://a.es); dos (mailto:b@c.es)")
     );
+}
+
+// ---- Copy and paste with formatting (H12.1e, ADR 0015) ----
+
+/// Focuses block `index` with the cursor at `char`.
+fn focus_at(app: &mut SilexApp, ctx: &egui::Context, index: usize, char: usize) {
+    app.pending_focus = Some((app.blocks[index].id.clone(), char));
+    app_frame(app, ctx, vec![]);
+    app_frame(app, ctx, vec![]);
+}
+
+#[test]
+fn text_copied_in_a_block_is_pasted_with_its_formatting() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "pan negro"), (Par, 0, "un  más")], 0, 0)?;
+    app.blocks[0].marks = vec![bold(4, 9)];
+    app.blocks[1].marks = vec![italic(0, 7)];
+    app.mark_dirty();
+    app_frame(&mut app, &ctx, vec![]);
+    // Copy «n negro»: the bold part comes along.
+    select_text(&mut app, &ctx, 0, 2, 9);
+    let commands = app_frame_commands(&mut app, &ctx, vec![egui::Event::Copy]);
+    assert!(commands.contains(&egui::OutputCommand::CopyText("n negro".into())));
+    // Pasted inside the italic text: exactly its own formatting.
+    focus_at(&mut app, &ctx, 1, 3);
+    app_frame(&mut app, &ctx, vec![paste("n negro")]);
+    assert_eq!(app.blocks[1].content, "un n negro más");
+    assert_eq!(
+        app.blocks[1].marks,
+        vec![italic(0, 3), bold(5, 10), italic(10, 14)]
+    );
+    // One undo step takes the paste away, formatting included.
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(app.blocks[1].content, "un  más");
+    assert_eq!(app.blocks[1].marks, vec![italic(0, 7)]);
+    Ok(())
+}
+
+#[test]
+fn other_text_pasted_follows_the_text_around_it() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "pan negro"), (Par, 0, "abc")], 0, 0)?;
+    app.blocks[0].marks = vec![bold(4, 9)];
+    app.blocks[1].marks = vec![bold(0, 3)];
+    app_frame(&mut app, &ctx, vec![]);
+    select_text(&mut app, &ctx, 0, 0, 3);
+    app_frame(&mut app, &ctx, vec![egui::Event::Copy]);
+    focus_at(&mut app, &ctx, 1, 1);
+    // Not what was copied: it takes the bold it is pasted into.
+    app_frame(&mut app, &ctx, vec![paste("xyz")]);
+    assert_eq!(app.blocks[1].marks, vec![bold(0, 6)]);
+    Ok(())
+}
+
+#[test]
+fn copied_lines_and_blocks_are_pasted_with_their_formatting() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[(Bul, 0, "pan negro"), (Bul, 0, "café"), (Par, 0, "")],
+        0,
+        0,
+    )?;
+    app.blocks[0].marks = vec![bold(4, 9)];
+    app.blocks[1].marks = vec![italic(0, 4)];
+    app_frame(&mut app, &ctx, vec![]);
+    // A block selection, copied.
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::SHIFT)]);
+    assert_eq!(app.selection_range(), Some((0, 1)));
+    app_frame(&mut app, &ctx, vec![egui::Event::Copy]);
+    let copied = app.clip.as_ref().map(|c| c.text.clone());
+    assert_eq!(copied.as_deref(), Some("• pan negro\n• café"));
+    // Pasted into the empty paragraph: two list items, as they were.
+    app.selection = None;
+    focus_at(&mut app, &ctx, 2, 0);
+    app_frame(&mut app, &ctx, vec![paste("• pan negro\r\n• café")]);
+    let pasted: Vec<_> = app.blocks[2..]
+        .iter()
+        .map(|b| (b.kind, b.content.as_str(), b.marks.clone()))
+        .collect();
+    assert_eq!(
+        pasted,
+        vec![
+            (Bul, "pan negro", vec![bold(4, 9)]),
+            (Bul, "café", vec![italic(0, 4)]),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn copying_elsewhere_forgets_the_formatting() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "pan negro"), (Par, 0, "abc")], 0, 0)?;
+    app.blocks[0].marks = vec![bold(0, 9)];
+    app_frame(&mut app, &ctx, vec![]);
+    select_text(&mut app, &ctx, 0, 0, 3);
+    app_frame(&mut app, &ctx, vec![egui::Event::Copy]);
+    assert!(app.clip.is_some());
+    // Copy with no text selected in a block (another field, say).
+    focus_at(&mut app, &ctx, 1, 1);
+    app_frame(&mut app, &ctx, vec![egui::Event::Copy]);
+    assert!(app.clip.is_none());
+    app_frame(&mut app, &ctx, vec![paste("pan")]);
+    assert!(app.blocks[1].marks.is_empty());
+    Ok(())
 }

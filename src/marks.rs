@@ -444,6 +444,35 @@ pub fn toggle(marks: &[Mark], kind: MarkKind, start: usize, end: usize) -> Vec<M
     }
 }
 
+/// The marks once text with `pasted` marks was pasted as the characters
+/// `[start, start + len)` (`marks` already moved for it): those characters
+/// get exactly the pasted formatting, not that of the text around them.
+pub fn with_pasted(marks: &[Mark], start: usize, len: usize, pasted: &[Mark]) -> Vec<Mark> {
+    let end = start + len;
+    let mut out = Vec::with_capacity(marks.len() + pasted.len() + 1);
+    for m in marks {
+        if m.end <= start || m.start >= end {
+            out.push(m.clone());
+            continue;
+        }
+        if m.start < start {
+            out.push(Mark::new(m.start, start, m.kind.clone()));
+        }
+        if m.end > end {
+            out.push(Mark::new(end, m.end, m.kind.clone()));
+        }
+    }
+    out.extend(
+        pasted
+            .iter()
+            .filter(|m| m.end <= len)
+            .map(|m| Mark::new(m.start + start, m.end + start, m.kind.clone())),
+    );
+    let total = out.iter().map(|m| m.end).max().unwrap_or(0);
+    normalize(&mut out, total);
+    out
+}
+
 /// The marks of a text where every `from` (a non-empty string) became
 /// `to`, as `str::replace` does (`{{fecha}}` in templates). Each
 /// occurrence is one [`replace`], from the last to the first.
@@ -1118,5 +1147,27 @@ mod tests {
         }
         // An empty range never gets a link.
         assert_eq!(set_link(&marks, 2, 2, "a.es"), Some(marks.clone()));
+    }
+
+    #[test]
+    fn pasted_text_keeps_exactly_its_own_formatting() {
+        // «pan negro» bold; «X y» pasted in the middle of «negro», with
+        // italic on «X».
+        let marks = vec![m(0, 12, Bold)];
+        assert_eq!(
+            with_pasted(&marks, 6, 3, &[m(0, 1, Italic)]),
+            vec![m(0, 6, Bold), m(6, 7, Italic), m(9, 12, Bold)]
+        );
+        // Pasted bold next to bold merges with it.
+        assert_eq!(
+            with_pasted(&[m(0, 3, Bold)], 3, 2, &[m(0, 2, Bold)]),
+            vec![m(0, 5, Bold)]
+        );
+        // Marks past the pasted text are ignored.
+        assert_eq!(with_pasted(&[], 0, 2, &[m(1, 5, Code)]), vec![]);
+        assert_eq!(
+            with_pasted(&[], 1, 2, &[m(0, 2, link("https://a.es"))]),
+            vec![m(1, 3, link("https://a.es"))]
+        );
     }
 }

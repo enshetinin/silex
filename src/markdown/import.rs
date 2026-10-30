@@ -1,7 +1,8 @@
-//! CommonMark (+ GFM task lists) → blocks. The language of fenced code
-//! blocks is not stored (Silex code blocks have no language).
+//! CommonMark (+ GFM task lists and strikethrough) → blocks. The language
+//! of fenced code blocks is not stored (Silex code blocks have no language).
 use pulldown_cmark::{Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 
+use crate::marks::{self, Mark, MarkKind};
 use crate::model::{BlockKind, MAX_INDENT, NewBlock};
 
 /// A page read from Markdown.
@@ -21,14 +22,32 @@ enum Target {
     Html,
 }
 
+/// Text being collected, with its formatting.
+#[derive(Default)]
+struct Inline {
+    text: String,
+    marks: Vec<Mark>,
+}
+
+/// Inline syntax opened and not closed yet.
+enum Open {
+    /// Becomes a mark from this character on (ADR 0015).
+    Mark(MarkKind, usize),
+    /// Kept as literal Markdown: written when it closes (images, links
+    /// to something that is not a web or mail address).
+    Literal(String),
+}
+
 /// Parses Markdown into a page.
 ///
 /// - `#`/`##`/`###` → headings (deeper levels become level 3); a first
 ///   `# Title` becomes the page title, otherwise `fallback_title` is used.
 /// - Lists → list blocks with indent = nesting; `- [ ]`/`- [x]` → tasks.
 /// - Quotes → quote blocks; code blocks (fenced or indented) → code.
-/// - Inline formatting Silex does not have (emphasis, links, inline code,
-///   images, HTML) is kept as literal Markdown text, so nothing is lost.
+/// - Emphasis, strong emphasis, strikethrough, inline code and links to
+///   `http`, `https` or `mailto` become inline formatting (ADR 0015).
+///   Other links (relative paths, other schemes), images and HTML are kept
+///   as literal Markdown text, so nothing is lost.
 /// - Line breaks inside a paragraph (soft or hard) become `\n`.
 /// - A thematic break becomes a `---` paragraph; HTML blocks become paragraphs
 ///   with their raw text.
@@ -38,25 +57,32 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
     let mut lists: Vec<bool> = Vec::new(); // ordered?
     let mut open_item: Option<usize> = None;
     let mut target: Option<Target> = None;
-    let mut text = String::new();
+    let mut inline = Inline::default();
     let mut quote_depth = 0usize;
-    let mut links: Vec<(LinkType, String, String)> = Vec::new();
+    let mut open: Vec<Open> = Vec::new();
 
     let depth = |lists: &Vec<bool>| {
         u8::try_from(lists.len())
             .unwrap_or(MAX_INDENT)
             .min(MAX_INDENT)
     };
-    let push = |blocks: &mut Vec<NewBlock>, kind, indent, content: String| {
+    let push = |blocks: &mut Vec<NewBlock>, kind, indent, inline: Inline| {
+        let marks = if kind == BlockKind::Code {
+            Vec::new()
+        } else {
+            marks::sanitize(&inline.marks, &inline.text)
+        };
         blocks.push(NewBlock {
             kind,
             indent,
             checked: false,
-            content,
+            content: inline.text,
+            marks,
         });
     };
+    let options = Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
 
-    for event in Parser::new_ext(source, Options::ENABLE_TASKLISTS) {
+    for event in Parser::new_ext(source, options) {
         match event {
             Event::Start(Tag::List(start)) => {
                 open_item = None; // a nested list ends the item's own text
@@ -73,7 +99,7 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
                     BlockKind::Bulleted
                 };
                 let indent = depth(&lists).saturating_sub(1);
-                push(&mut blocks, kind, indent, String::new());
+                push(&mut blocks, kind, indent, Inline::default());
                 open_item = Some(blocks.len() - 1);
             }
             Event::End(TagEnd::Item) => open_item = None,
@@ -84,7 +110,7 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
                 }
             }
             Event::Start(Tag::Paragraph) => {
-                text.clear();
+                inline = Inline::default();
                 target = Some(match open_item {
                     Some(i) if blocks[i].content.is_empty() => Target::Item(i),
                     _ => Target::Paragraph,
@@ -92,7 +118,7 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 open_item = None;
-                text.clear();
+                inline = Inline::default();
                 target = Some(Target::Heading(match level {
                     HeadingLevel::H1 => BlockKind::Heading1,
                     HeadingLevel::H2 => BlockKind::Heading2,
@@ -101,22 +127,24 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
             }
             Event::Start(Tag::CodeBlock(_)) => {
                 open_item = None;
-                text.clear();
+                inline = Inline::default();
                 target = Some(Target::Code);
             }
             Event::Start(Tag::HtmlBlock) => {
                 open_item = None;
-                text.clear();
+                inline = Inline::default();
                 target = Some(Target::Html);
             }
             Event::End(
                 TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::HtmlBlock,
             ) => {
-                let content = std::mem::take(&mut text);
+                let mut content = std::mem::take(&mut inline);
                 let indent = depth(&lists);
                 match target.take() {
                     Some(Target::Item(i)) => {
-                        blocks[i].content = content;
+                        let marks = marks::sanitize(&content.marks, &content.text);
+                        blocks[i].content = content.text;
+                        blocks[i].marks = marks;
                         open_item = None;
                     }
                     Some(Target::Paragraph) => {
@@ -129,12 +157,17 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
                     }
                     Some(Target::Heading(kind)) => push(&mut blocks, kind, indent, content),
                     Some(Target::Code) => {
-                        let code = content.strip_suffix('\n').unwrap_or(&content).to_owned();
-                        push(&mut blocks, BlockKind::Code, indent, code);
+                        if content.text.ends_with('\n') {
+                            content.text.pop();
+                        }
+                        push(&mut blocks, BlockKind::Code, indent, content);
                     }
                     Some(Target::Html) => {
-                        let html = content.trim_end_matches('\n').to_owned();
-                        push(&mut blocks, BlockKind::Paragraph, indent, html);
+                        content
+                            .text
+                            .truncate(content.text.trim_end_matches('\n').len());
+                        content.marks.clear();
+                        push(&mut blocks, BlockKind::Paragraph, indent, content);
                     }
                     None => {}
                 }
@@ -143,67 +176,124 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
             Event::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
             Event::Rule => {
                 open_item = None;
-                push(
-                    &mut blocks,
-                    BlockKind::Paragraph,
-                    depth(&lists),
-                    "---".into(),
-                );
+                let rule = Inline {
+                    text: "---".into(),
+                    marks: Vec::new(),
+                };
+                push(&mut blocks, BlockKind::Paragraph, depth(&lists), rule);
             }
 
             // Inline content.
-            Event::Text(t) => append(&mut blocks, &target, open_item, &mut text, &t),
+            Event::Text(t) => {
+                if let Some(mut dest) = destination(&mut blocks, &target, open_item, &mut inline) {
+                    dest.push(&t);
+                }
+            }
             Event::Code(code) => {
-                let fence = "`".repeat(longest_run(&code, '`') + 1);
-                let pad = if code.starts_with('`') || code.ends_with('`') {
-                    " "
-                } else {
-                    ""
-                };
-                let literal = format!("{fence}{pad}{code}{pad}{fence}");
-                append(&mut blocks, &target, open_item, &mut text, &literal);
+                if let Some(mut dest) = destination(&mut blocks, &target, open_item, &mut inline) {
+                    let start = dest.len();
+                    dest.push(&code);
+                    let end = dest.len();
+                    dest.marks_mut().push(Mark::new(start, end, MarkKind::Code));
+                }
             }
             Event::SoftBreak | Event::HardBreak => {
-                append(&mut blocks, &target, open_item, &mut text, "\n");
+                if let Some(mut dest) = destination(&mut blocks, &target, open_item, &mut inline) {
+                    dest.push("\n");
+                }
             }
             Event::Html(html) | Event::InlineHtml(html) => {
-                append(&mut blocks, &target, open_item, &mut text, &html);
+                if let Some(mut dest) = destination(&mut blocks, &target, open_item, &mut inline) {
+                    dest.push(&html);
+                }
             }
-            Event::Start(Tag::Emphasis) | Event::End(TagEnd::Emphasis) => {
-                append(&mut blocks, &target, open_item, &mut text, "*");
+            Event::Start(Tag::Emphasis) => {
+                open_mark(
+                    &mut blocks,
+                    &target,
+                    open_item,
+                    &mut inline,
+                    &mut open,
+                    MarkKind::Italic,
+                );
             }
-            Event::Start(Tag::Strong) | Event::End(TagEnd::Strong) => {
-                append(&mut blocks, &target, open_item, &mut text, "**");
+            Event::Start(Tag::Strong) => {
+                open_mark(
+                    &mut blocks,
+                    &target,
+                    open_item,
+                    &mut inline,
+                    &mut open,
+                    MarkKind::Bold,
+                );
+            }
+            Event::Start(Tag::Strikethrough) => {
+                open_mark(
+                    &mut blocks,
+                    &target,
+                    open_item,
+                    &mut inline,
+                    &mut open,
+                    MarkKind::Strike,
+                );
             }
             Event::Start(Tag::Link {
                 link_type,
                 dest_url,
                 title,
                 ..
-            }) => {
-                let opening = if is_autolink(link_type) { "<" } else { "[" };
-                append(&mut blocks, &target, open_item, &mut text, opening);
-                links.push((link_type, dest_url.to_string(), title.to_string()));
-            }
+            }) => match web_url(link_type, &dest_url) {
+                Some(url) => open_mark(
+                    &mut blocks,
+                    &target,
+                    open_item,
+                    &mut inline,
+                    &mut open,
+                    MarkKind::Link(url),
+                ),
+                None => {
+                    let autolink = is_autolink(link_type);
+                    if let Some(mut dest) =
+                        destination(&mut blocks, &target, open_item, &mut inline)
+                    {
+                        dest.push(if autolink { "<" } else { "[" });
+                    }
+                    open.push(Open::Literal(closing(autolink, &dest_url, &title)));
+                }
+            },
             Event::Start(Tag::Image {
                 link_type,
                 dest_url,
                 title,
                 ..
             }) => {
-                append(&mut blocks, &target, open_item, &mut text, "![");
-                links.push((link_type, dest_url.to_string(), title.to_string()));
+                if let Some(mut dest) = destination(&mut blocks, &target, open_item, &mut inline) {
+                    dest.push("![");
+                }
+                open.push(Open::Literal(closing(
+                    is_autolink(link_type),
+                    &dest_url,
+                    &title,
+                )));
             }
-            Event::End(TagEnd::Link | TagEnd::Image) => {
-                if let Some((link_type, dest, title)) = links.pop() {
-                    let closing = if is_autolink(link_type) {
-                        ">".to_owned()
-                    } else if title.is_empty() {
-                        format!("]({dest})")
-                    } else {
-                        format!("]({dest} \"{title}\")")
-                    };
-                    append(&mut blocks, &target, open_item, &mut text, &closing);
+            Event::End(
+                TagEnd::Emphasis
+                | TagEnd::Strong
+                | TagEnd::Strikethrough
+                | TagEnd::Link
+                | TagEnd::Image,
+            ) => {
+                let Some(opened) = open.pop() else {
+                    continue;
+                };
+                if let Some(mut dest) = destination(&mut blocks, &target, open_item, &mut inline) {
+                    match opened {
+                        Open::Mark(kind, start) => {
+                            let end = dest.len();
+                            dest.marks_mut().push(Mark::new(start, end, kind));
+                        }
+                        Open::Literal(text) => dest.push(&text),
+                    }
                 }
             }
             _ => {}
@@ -223,22 +313,83 @@ fn is_autolink(link_type: LinkType) -> bool {
     matches!(link_type, LinkType::Autolink | LinkType::Email)
 }
 
-fn longest_run(text: &str, c: char) -> usize {
-    text.split(|x| x != c).map(str::len).max().unwrap_or(0)
+/// The URL of a link that becomes a mark: one written with `http`,
+/// `https` or `mailto` (an `<a@b.es>` autolink is a `mailto`). A relative
+/// path like `nota.md` is not, even if it looks like a host name.
+fn web_url(link_type: LinkType, dest: &str) -> Option<String> {
+    let url = if link_type == LinkType::Email && !dest.to_ascii_lowercase().starts_with("mailto:") {
+        format!("mailto:{dest}")
+    } else {
+        dest.to_owned()
+    };
+    (marks::normalize_url(&url).as_deref() == Some(url.as_str())).then_some(url)
 }
 
-/// Inline text goes to the block being collected, or straight into the open
+/// How a link kept as literal text ends.
+fn closing(autolink: bool, dest: &str, title: &str) -> String {
+    if autolink {
+        ">".to_owned()
+    } else if title.is_empty() {
+        format!("]({dest})")
+    } else {
+        format!("]({dest} \"{title}\")")
+    }
+}
+
+/// Where inline text goes: the text being collected, or straight the open
 /// list item (tight lists have no paragraph inside items).
-fn append(
-    blocks: &mut [crate::model::NewBlock],
+enum Destination<'a> {
+    Inline(&'a mut Inline),
+    Item(&'a mut NewBlock),
+}
+
+impl Destination<'_> {
+    fn push(&mut self, piece: &str) {
+        match self {
+            Destination::Inline(inline) => inline.text.push_str(piece),
+            Destination::Item(block) => block.content.push_str(piece),
+        }
+    }
+
+    /// Length in characters.
+    fn len(&self) -> usize {
+        match self {
+            Destination::Inline(inline) => inline.text.chars().count(),
+            Destination::Item(block) => block.content.chars().count(),
+        }
+    }
+
+    fn marks_mut(&mut self) -> &mut Vec<Mark> {
+        match self {
+            Destination::Inline(inline) => &mut inline.marks,
+            Destination::Item(block) => &mut block.marks,
+        }
+    }
+}
+
+fn destination<'a>(
+    blocks: &'a mut [NewBlock],
     target: &Option<Target>,
     open_item: Option<usize>,
-    text: &mut String,
-    piece: &str,
-) {
+    inline: &'a mut Inline,
+) -> Option<Destination<'a>> {
     if target.is_some() {
-        text.push_str(piece);
-    } else if let Some(block) = open_item.and_then(|i| blocks.get_mut(i)) {
-        block.content.push_str(piece);
+        Some(Destination::Inline(inline))
+    } else {
+        open_item
+            .and_then(|i| blocks.get_mut(i))
+            .map(Destination::Item)
     }
+}
+
+fn open_mark(
+    blocks: &mut [NewBlock],
+    target: &Option<Target>,
+    open_item: Option<usize>,
+    inline: &mut Inline,
+    open: &mut Vec<Open>,
+    kind: MarkKind,
+) {
+    let start = destination(blocks, target, open_item, inline).map_or(0, |d| d.len());
+    open.push(Open::Mark(kind, start));
 }

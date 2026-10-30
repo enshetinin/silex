@@ -1201,10 +1201,16 @@ impl Database {
         )?;
         {
             let mut insert = tx.prepare(
-                "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent, marks)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for (position, block) in blocks.iter().enumerate() {
+                // Formatting is stored as on every save (ADR 0015).
+                let marks = if block.kind.takes_marks() {
+                    marks::sanitize(&block.marks, &block.content)
+                } else {
+                    Vec::new()
+                };
                 insert.execute(params![
                     Uuid::new_v4().to_string(),
                     page_id,
@@ -1213,6 +1219,7 @@ impl Database {
                     block.checked && block.kind == BlockKind::Todo,
                     position as i64,
                     block.indent.min(MAX_INDENT),
+                    marks::to_json(&marks),
                 ])?;
             }
         }

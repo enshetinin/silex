@@ -73,6 +73,7 @@ fn demo_app() -> anyhow::Result<SilexApp> {
                 indent: *indent,
                 checked: *checked,
                 content: (*content).to_owned(),
+                marks: Vec::new(),
             },
         )
         .collect();

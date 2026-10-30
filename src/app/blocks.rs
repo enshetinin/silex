@@ -878,6 +878,29 @@ impl SilexApp {
             self.pending_key = Some((EditorKey::Format(format), block.id.clone()));
             return;
         }
+        // Text copied in Silex keeps its formatting when pasted on one
+        // line (ADR 0015); the field inserts it, the editor applies it.
+        if focused
+            && block.kind.takes_marks()
+            && let Some(clip) = &self.clip
+            && let Some(text) = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Paste(text) if !text.contains(['\n', '\r']) => Some(text.clone()),
+                    _ => None,
+                })
+            })
+            && let Some(marks) = clip.marks_for(&text)
+        {
+            let start = egui::text_edit::TextEditState::load(ctx, self.block_field_id(&block.id))
+                .and_then(|s| s.cursor.char_range())
+                .map_or(caret.char, |r| r.primary.index.0.min(r.secondary.index.0));
+            self.paste_marks = Some((
+                block.id.clone(),
+                start,
+                text.chars().count(),
+                marks.to_vec(),
+            ));
+        }
         // Cmd+Intro opens the link the cursor is in (H12.1d).
         if focused
             && let Some(url) = marks::link_at(&block.marks, caret.char).and_then(|l| l.url())
@@ -984,9 +1007,17 @@ impl SilexApp {
         let cursor = egui::text_edit::TextEditState::load(ctx, self.block_field_id(&block_id))
             .and_then(|s| s.cursor.char_range())
             .map_or(0, |r| r.primary.index.0);
-        let caret = editor::paste_lines(&mut self.blocks, index, cursor, &text, || {
-            uuid::Uuid::new_v4().to_string()
-        });
+        // Text copied in Silex brings back its formatting (ADR 0015).
+        let marks = self
+            .clip
+            .as_ref()
+            .and_then(|clip| clip.marks_for(&text))
+            .map(<[_]>::to_vec)
+            .unwrap_or_default();
+        let caret =
+            editor::paste_lines_marked(&mut self.blocks, index, cursor, &text, &marks, || {
+                uuid::Uuid::new_v4().to_string()
+            });
         self.mark_dirty();
         if let Some(caret) = caret
             && let Some(target) = self.blocks.get(caret.block)
@@ -1328,7 +1359,9 @@ impl SilexApp {
             let copy = take_event(ctx, |e| matches!(e, egui::Event::Copy));
             let cut = take_event(ctx, |e| matches!(e, egui::Event::Cut));
             if copy || cut {
-                ctx.copy_text(editor::selection_text(&self.blocks, first, last));
+                let clip = editor::selection_clip(&self.blocks, first, last);
+                ctx.copy_text(clip.text.clone());
+                self.clip = Some(clip);
             }
             if cut || step(Key::Backspace, M::NONE) || step(Key::Delete, M::NONE) {
                 self.delete_selection(first, last);
@@ -1444,6 +1477,37 @@ impl SilexApp {
         self.mark_dirty();
         self.pending_focus = Some((id.to_owned(), cursor));
         self.pending_anchor = Some((id.to_owned(), anchor));
+    }
+
+    /// Copying or cutting text selected in a block remembers it with its
+    /// formatting (ADR 0015); copying anything else forgets it. A block
+    /// selection is remembered where it is copied
+    /// (`handle_selection_keys`), after this.
+    pub(super) fn remember_copy(&mut self, ctx: &egui::Context) {
+        let copying = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Copy | egui::Event::Cut))
+        });
+        if !copying {
+            return;
+        }
+        self.clip = self
+            .caret
+            .as_ref()
+            .filter(|caret| caret.selection)
+            .and_then(|caret| {
+                let block = self.blocks.iter().find(|b| b.id == caret.block_id)?;
+                let field = self.block_field_id(&block.id);
+                if !ctx.memory(|m| m.has_focus(field)) {
+                    return None;
+                }
+                let range = egui::text_edit::TextEditState::load(ctx, field)?
+                    .cursor
+                    .char_range()?;
+                let (a, b) = (range.primary.index.0, range.secondary.index.0);
+                editor::Clip::of_text(block, a.min(b), a.max(b))
+            });
     }
 
     /// The selection (anchor, cursor) formatting applies to in block `id`,
@@ -1749,6 +1813,13 @@ impl SilexApp {
                                 Some(marks) => block.marks = marks,
                                 None => self.typing_format = None,
                             }
+                        }
+                        // Text copied in Silex, pasted on one line (ADR 0015).
+                        if out.text_changed
+                            && let Some((_, start, len, pasted)) =
+                                self.paste_marks.take_if(|(id, ..)| *id == block.id)
+                        {
+                            block.marks = marks::with_pasted(&block.marks, start, len, &pasted);
                         }
                         // An image in sight: kept, or decoded if it has no preview (H7.2).
                         if let Some(id) = &block.attachment
