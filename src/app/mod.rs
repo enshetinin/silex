@@ -96,6 +96,7 @@ pub struct SilexApp {
     favorites: Vec<Page>,
     /// The search window (Cmd+K), while open.
     search: Option<SearchWindow>,
+    graph: Option<graph::Graph>,
     /// The open page's rows and views, when it is a database (ADR 0006).
     database: Option<DatabaseState>,
     /// The open page's properties, when it is a row of a database.
@@ -346,6 +347,7 @@ impl SilexApp {
             duplicate_dialog: None,
             favorites: Vec::new(),
             search: None,
+            graph: None,
             database: None,
             row_page: None,
             last_views: std::collections::HashMap::new(),
@@ -467,6 +469,9 @@ impl SilexApp {
         if self.db.get_page(&id)?.is_none() {
             return Ok(());
         }
+        if self.graph_active() {
+            return self.open_in_new_tab(&id);
+        }
         if let Some(left) = self.tabs.open_here(&id) {
             self.parked.remove(&left);
         }
@@ -498,6 +503,16 @@ impl SilexApp {
                     scroll: self.editor_scroll,
                 },
             );
+        }
+        if id == graph::TAB_ID {
+            self.selected = None;
+            self.blocks.clear();
+            self.database = None;
+            self.selection = None;
+            self.find = None;
+            self.slash = None;
+            self.rebuild_graph()?;
+            return Ok(());
         }
         if !self.load_page(id.clone())? {
             // Gone meanwhile: its tab closes, and the next one is shown.
@@ -596,7 +611,9 @@ impl SilexApp {
             .chain(&self.templates.list)
             .map(|p| p.id.as_str())
             .collect();
-        let closed = self.tabs.retain(|id| live.contains(id));
+        let closed = self
+            .tabs
+            .retain(|id| id == graph::TAB_ID || live.contains(id));
         for id in closed {
             self.parked.remove(&id);
         }
@@ -1037,8 +1054,10 @@ impl SilexApp {
             )
             .show(ui, |ui| self.sidebar(ui));
         self.main_width = ui.available_width();
-        self.outline_panel(ui);
-        self.side_panel(ui);
+        if !self.graph_active() {
+            self.outline_panel(ui);
+            self.side_panel(ui);
+        }
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -1069,7 +1088,8 @@ impl SilexApp {
         self.remember_copy(&ctx);
         self.handle_dropped_files(&ctx);
         // The search window has the keyboard while it is open.
-        if self.search.is_none()
+        if !self.graph_active()
+            && self.search.is_none()
             && self.links.picker.is_none()
             && self.page_history.is_none()
             && self.templates.picker.is_none()

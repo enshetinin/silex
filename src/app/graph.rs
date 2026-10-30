@@ -1,205 +1,386 @@
-//! Read-only relationship explorer. Positions and camera live only for this session.
+//! A workspace tab for exploring page links. Never writes graph geometry to documents.
 use super::{SilexApp, theme};
 use eframe::egui::{self, Color32, Pos2, Vec2};
 use std::collections::HashMap;
 
-#[derive(Clone)]
-struct Graph {
-    nodes: Vec<(String, String, Pos2)>,
+pub(super) const TAB_ID: &str = "silex:graph";
+pub(super) struct Graph {
+    nodes: Vec<Node>,
     edges: Vec<(usize, usize)>,
     zoom: f32,
     pan: Vec2,
     query: String,
+    selected: Option<String>,
+    fit: bool,
 }
-fn key() -> egui::Id {
-    egui::Id::unique("relationship_graph")
+struct Node {
+    id: String,
+    title: String,
+    position: Pos2,
+    group: usize,
+    degree: usize,
 }
+
+/// Connected components occupy separate islands, with the best-connected node at the centre.
+fn arrange(nodes: &mut [Node], edges: &[(usize, usize)]) {
+    let mut adjacency = vec![Vec::new(); nodes.len()];
+    for &(a, b) in edges {
+        adjacency[a].push(b);
+        adjacency[b].push(a);
+    }
+    let mut seen = vec![false; nodes.len()];
+    let mut groups = Vec::new();
+    for start in 0..nodes.len() {
+        if seen[start] {
+            continue;
+        }
+        seen[start] = true;
+        let mut stack = vec![start];
+        let mut group = Vec::new();
+        while let Some(i) = stack.pop() {
+            group.push(i);
+            for &j in &adjacency[i] {
+                if !seen[j] {
+                    seen[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+        group.sort_by_key(|&i| std::cmp::Reverse(adjacency[i].len()));
+        groups.push(group);
+    }
+    groups.sort_by_key(|g| std::cmp::Reverse(g.len()));
+    let columns = (groups.len() as f32).sqrt().ceil().max(1.0) as usize;
+    let cell = groups
+        .iter()
+        .map(|g| 180.0 * (g.len() as f32).sqrt())
+        .fold(320.0_f32, f32::max);
+    for (group_id, group) in groups.iter().enumerate() {
+        let centre = egui::vec2(
+            (group_id % columns) as f32 * cell,
+            (group_id / columns) as f32 * cell,
+        );
+        for (rank, &i) in group.iter().enumerate() {
+            let radius = if rank == 0 {
+                0.0
+            } else {
+                130.0 * (rank as f32).sqrt()
+            };
+            let angle = rank as f32 * 2.399_963;
+            nodes[i].position = Pos2::ZERO + centre + egui::vec2(angle.cos(), angle.sin()) * radius;
+            nodes[i].group = group_id;
+            nodes[i].degree = adjacency[i].len();
+        }
+    }
+}
+
 impl SilexApp {
-    pub(super) fn open_graph(&mut self, ctx: &egui::Context) -> anyhow::Result<()> {
+    pub(super) fn graph_active(&self) -> bool {
+        self.tabs.active_id() == Some(TAB_ID)
+    }
+
+    pub(super) fn open_graph(&mut self, _ctx: &egui::Context) -> anyhow::Result<()> {
         self.save_now()?;
-        let edges = self.db.graph_edges()?;
-        let nodes: Vec<_> = self
+        for closed in self.tabs.open_new(TAB_ID) {
+            self.parked.remove(&closed);
+        }
+        self.show_active_tab(true)
+    }
+
+    pub(super) fn rebuild_graph(&mut self) -> anyhow::Result<()> {
+        let links = self.db.graph_edges()?;
+        let mut nodes: Vec<_> = self
             .pages
             .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let angle = i as f32 * 2.399_963;
-                let radius = 90.0 * (i as f32).sqrt();
-                (
-                    p.id.clone(),
-                    super::display_title(&p.title).to_owned(),
-                    Pos2::new(angle.cos() * radius, angle.sin() * radius),
-                )
+            .map(|page| Node {
+                id: page.id.clone(),
+                title: super::display_title(&page.title).to_owned(),
+                position: Pos2::ZERO,
+                group: 0,
+                degree: 0,
             })
             .collect();
         let indices: HashMap<_, _> = nodes
             .iter()
             .enumerate()
-            .map(|(i, n)| (n.0.as_str(), i))
+            .map(|(i, n)| (n.id.as_str(), i))
             .collect();
-        let edges = edges
+        let edges: Vec<_> = links
             .iter()
             .filter_map(|(a, b)| Some((*indices.get(a.as_str())?, *indices.get(b.as_str())?)))
             .collect();
-        ctx.data_mut(|d| {
-            d.insert_temp(
-                key(),
-                Graph {
-                    nodes,
-                    edges,
-                    zoom: 1.0,
-                    pan: Vec2::ZERO,
-                    query: String::new(),
-                },
-            )
+        arrange(&mut nodes, &edges);
+        let old = self.graph.take();
+        self.graph = Some(Graph {
+            nodes,
+            edges,
+            zoom: old.as_ref().map_or(1.0, |g| g.zoom),
+            pan: old.as_ref().map_or(Vec2::ZERO, |g| g.pan),
+            query: old.as_ref().map_or_else(String::new, |g| g.query.clone()),
+            selected: old.as_ref().and_then(|g| g.selected.clone()),
+            fit: old.is_none(),
         });
         Ok(())
     }
 
-    pub(super) fn graph_window(&mut self, ctx: &egui::Context) {
-        let Some(mut graph) = ctx.data(|d| d.get_temp::<Graph>(key())) else {
+    pub(super) fn graph_view(&mut self, ui: &mut egui::Ui) {
+        let Some(mut graph) = self.graph.take() else {
             return;
         };
-        let mut visible = true;
         let mut open = None;
-        egui::Window::new("Relaciones entre páginas")
-            .open(&mut visible)
-            .default_size(egui::vec2(850.0, 580.0))
-            .show(ctx, |ui| {
-                let mut p = *theme::current(ctx);
-                if ui.visuals().dark_mode {
-                    p.bg = Color32::from_rgb(31, 31, 40);
-                    p.accent = Color32::from_rgb(126, 156, 216);
-                    p.accent_soft = Color32::from_rgb(45, 49, 70);
-                    p.border = Color32::from_rgb(64, 68, 88);
-                    p.text = Color32::from_rgb(220, 215, 186);
-                }
-                ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "{} páginas · {} enlaces",
-                        graph.nodes.len(),
-                        graph.edges.len()
-                    ));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut graph.query)
-                            .hint_text("Buscar página…")
-                            .desired_width(180.0),
-                    );
-                    if ui.button("Centrar").clicked() {
-                        graph.pan = Vec2::ZERO;
-                        graph.zoom =
-                            (200.0 / (90.0 * (graph.nodes.len().max(1) as f32).sqrt())).min(1.5);
-                    }
-                });
-                ui.label(
-                    "Arrastra el fondo para moverte · Rueda para zoom · Doble clic para abrir",
-                );
-                if graph.nodes.is_empty() {
-                    ui.label("Crea páginas y enlázalas con [[ para explorar sus relaciones.");
-                    return;
-                }
-                let (response, painter) = ui.allocate_painter(
-                    ui.available_size().max(egui::vec2(200.0, 200.0)),
-                    egui::Sense::drag(),
-                );
-                let rect = response.rect;
-                let painter = painter.with_clip_rect(rect.intersect(ui.clip_rect()));
-                painter.rect_filled(rect, 12.0, p.bg);
-                if response.dragged() {
-                    graph.pan += response.drag_delta();
-                }
-                if response.hovered() {
-                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                    let old = graph.zoom;
-                    graph.zoom = (old * (scroll * 0.002).exp()).clamp(0.15, 4.0);
-                    if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
-                        graph.pan = pointer
-                            - rect.center()
-                            - (pointer - rect.center() - graph.pan) * (graph.zoom / old);
-                    }
-                }
-                let positions: Vec<_> = graph
-                    .nodes
-                    .iter()
-                    .map(|n| rect.center() + graph.pan + n.2.to_vec2() * graph.zoom)
-                    .collect();
-                let hovered = ui
-                    .input(|i| i.pointer.hover_pos())
-                    .filter(|pos| rect.contains(*pos))
-                    .and_then(|pos| positions.iter().position(|p| p.distance(pos) < 15.0));
-                let query = graph.query.to_lowercase();
-                for &(a, b) in &graph.edges {
-                    let active = hovered == Some(a) || hovered == Some(b);
-                    painter.line_segment(
-                        [positions[a], positions[b]],
-                        egui::Stroke::new(
-                            if active { 2.0 } else { 1.0 },
-                            if active { p.accent } else { p.border },
-                        ),
-                    );
-                }
-                for (i, (_, title, _)) in graph.nodes.iter().enumerate() {
-                    let pos = positions[i];
-                    if !rect.shrink(12.0).contains(pos) {
-                        continue;
-                    }
-                    let active = hovered == Some(i);
-                    let matching = query.is_empty() || title.to_lowercase().contains(&query);
-                    let color = if matching { p.accent } else { p.text_faint };
-                    if active || (!query.is_empty() && matching) {
-                        painter.circle_filled(pos, 19.0, p.accent_soft);
-                    }
-                    painter.circle_filled(pos, if active { 8.0 } else { 5.0 }, color);
-                    painter.circle_stroke(
-                        pos,
-                        10.0,
-                        egui::Stroke::new(
-                            1.0,
-                            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 55),
-                        ),
-                    );
-                    if active || (matching && (graph.zoom > 0.7 || !query.is_empty())) {
-                        let label: String = title.chars().take(30).collect();
-                        painter.text(
-                            pos + egui::vec2(0.0, 15.0),
-                            egui::Align2::CENTER_TOP,
-                            label,
-                            egui::FontId::proportional(12.0),
-                            p.text,
-                        );
-                    }
-                    let hit = ui.interact(
-                        egui::Rect::from_center_size(pos, egui::vec2(24.0, 24.0)),
-                        key().with(i),
-                        egui::Sense::click(),
-                    );
-                    hit.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::Role::Button,
-                            true,
-                            format!("Abrir {title}"),
-                        )
-                    });
-                    if hit.double_clicked()
-                        || (hit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                    {
-                        open = Some(graph.nodes[i].0.clone());
-                    }
-                    hit.on_hover_text(title);
-                }
-            });
-        if open.is_some() {
-            visible = false;
-        }
-        ctx.data_mut(|d| {
-            if visible {
-                d.insert_temp(key(), graph);
-            } else {
-                d.remove::<Graph>(key());
+        let mut refresh = false;
+        let p = *theme::current(ui.ctx());
+        let dark = ui.visuals().dark_mode;
+        let bg = if dark {
+            Color32::from_rgb(31, 31, 40)
+        } else {
+            p.subtle
+        };
+        let colors = if dark {
+            [
+                Color32::from_rgb(126, 156, 216),
+                Color32::from_rgb(152, 187, 108),
+                Color32::from_rgb(187, 154, 247),
+                Color32::from_rgb(224, 175, 104),
+            ]
+        } else {
+            [
+                Color32::from_rgb(55, 93, 156),
+                Color32::from_rgb(63, 115, 78),
+                Color32::from_rgb(113, 77, 150),
+                Color32::from_rgb(143, 93, 35),
+            ]
+        };
+        ui.add_space(18.0);
+        ui.heading("Tu mapa de ideas");
+        ui.label(
+            egui::RichText::new(format!(
+                "{} páginas · {} enlaces · Explora cómo se conecta tu espacio",
+                graph.nodes.len(),
+                graph.edges.len()
+            ))
+            .color(p.text_muted),
+        );
+        ui.add_space(14.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut graph.query)
+                    .hint_text("Buscar en el mapa…")
+                    .desired_width(210.0),
+            );
+            if ui.button("−").on_hover_text("Alejar").clicked() {
+                graph.zoom = (graph.zoom / 1.2).max(0.02);
+            }
+            ui.label(format!("{} %", (graph.zoom * 100.0).round()));
+            if ui.button("+").on_hover_text("Acercar").clicked() {
+                graph.zoom = (graph.zoom * 1.2).min(4.0);
+            }
+            if ui.button("Encajar").clicked() {
+                graph.fit = true;
+            }
+            if ui.button("Actualizar").clicked() {
+                refresh = true;
             }
         });
+        ui.add_space(8.0);
+        let selected = graph
+            .nodes
+            .iter()
+            .position(|n| Some(&n.id) == graph.selected.as_ref());
+        ui.horizontal(|ui| {
+            if let Some(index) = selected {
+                ui.label(egui::RichText::new(&graph.nodes[index].title).strong());
+                ui.label(format!("{} conexiones", graph.nodes[index].degree));
+                if ui.button("Abrir página").clicked() {
+                    open = Some(graph.nodes[index].id.clone());
+                }
+                if ui.button("Quitar selección").clicked() {
+                    graph.selected = None;
+                }
+            } else {
+                ui.label(
+                    egui::RichText::new("Selecciona una página para destacar sus conexiones")
+                        .color(p.text_muted),
+                );
+            }
+        });
+        ui.add_space(10.0);
+        let size = egui::vec2(
+            ui.available_width(),
+            (ui.available_height() - 28.0).max(100.0),
+        );
+        let (response, painter) = ui.allocate_painter(size, egui::Sense::click_and_drag());
+        let rect = response.rect;
+        let painter = painter.with_clip_rect(rect.intersect(ui.clip_rect()));
+        painter.rect_filled(rect, 16.0, bg);
+        painter.rect_stroke(
+            rect,
+            16.0,
+            egui::Stroke::new(1.0, p.border),
+            egui::StrokeKind::Inside,
+        );
+        if graph.fit && !graph.nodes.is_empty() {
+            let bounds = egui::Rect::from_points(
+                &graph.nodes.iter().map(|n| n.position).collect::<Vec<_>>(),
+            )
+            .expand(100.0);
+            graph.zoom = ((rect.width() - 50.0) / bounds.width())
+                .min((rect.height() - 50.0) / bounds.height())
+                .clamp(0.02, 1.25);
+            graph.pan = -bounds.center().to_vec2() * graph.zoom;
+            graph.fit = false;
+        }
+        // A quiet dotted canvas gives movement and scale a visual reference.
+        let step = 32.0;
+        for x in 0..(rect.width() / step) as usize + 1 {
+            for y in 0..(rect.height() / step) as usize + 1 {
+                painter.circle_filled(
+                    rect.min
+                        + egui::vec2(
+                            x as f32 * step + graph.pan.x.rem_euclid(step),
+                            y as f32 * step + graph.pan.y.rem_euclid(step),
+                        ),
+                    0.7,
+                    p.border.gamma_multiply(0.5),
+                );
+            }
+        }
+        if response.dragged() {
+            graph.pan += response.drag_delta();
+        }
+        if response.hovered() {
+            let old = graph.zoom;
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            graph.zoom = (old * (scroll * 0.002).exp()).clamp(0.02, 4.0);
+            if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
+                graph.pan = pointer
+                    - rect.center()
+                    - (pointer - rect.center() - graph.pan) * (graph.zoom / old);
+            }
+        }
+        let positions: Vec<_> = graph
+            .nodes
+            .iter()
+            .map(|n| rect.center() + graph.pan + n.position.to_vec2() * graph.zoom)
+            .collect();
+        let hovered = ui
+            .input(|i| i.pointer.hover_pos())
+            .filter(|pos| rect.contains(*pos))
+            .and_then(|pos| positions.iter().position(|p| p.distance(pos) < 16.0));
+        let focus = hovered.or(selected);
+        let mut related = vec![false; graph.nodes.len()];
+        if let Some(i) = focus {
+            related[i] = true;
+        }
+        let query = silex_desktop::editor::fold(&graph.query);
+        for &(a, b) in &graph.edges {
+            let active = focus == Some(a) || focus == Some(b);
+            if active {
+                related[a] = true;
+                related[b] = true;
+            }
+            let color = if active {
+                colors[graph.nodes[a].group % colors.len()]
+            } else {
+                p.text_faint
+                    .gamma_multiply(if focus.is_some() { 0.15 } else { 0.4 })
+            };
+            let start = positions[a];
+            let end = positions[b];
+            let delta = end - start;
+            let normal = egui::vec2(-delta.y, delta.x).normalized() * 22.0;
+            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                [
+                    start,
+                    start + delta * 0.33 + normal,
+                    start + delta * 0.66 + normal,
+                    end,
+                ],
+                false,
+                Color32::TRANSPARENT,
+                egui::Stroke::new(if active { 2.0 } else { 1.0 }, color),
+            ));
+        }
+        let mut labels = Vec::<egui::Rect>::new();
+        for (i, node) in graph.nodes.iter().enumerate() {
+            let pos = positions[i];
+            if !rect.shrink(18.0).contains(pos) {
+                continue;
+            }
+            let matching =
+                query.is_empty() || silex_desktop::editor::fold(&node.title).contains(&query);
+            let emphasized = matching && (focus.is_none() || related[i]);
+            let base = colors[node.group % colors.len()];
+            let color = if emphasized {
+                base
+            } else {
+                base.gamma_multiply(0.25)
+            };
+            let radius = 6.0 + (node.degree as f32).sqrt().min(6.0);
+            if emphasized {
+                painter.circle_filled(pos, radius + 8.0, color.gamma_multiply(0.08));
+                painter.circle_filled(pos, radius + 4.0, color.gamma_multiply(0.12));
+            }
+            painter.circle_filled(pos, radius, color);
+            if focus == Some(i) {
+                painter.circle_stroke(pos, radius + 5.0, egui::Stroke::new(1.5, base));
+            }
+            let text: String = node.title.chars().take(32).collect();
+            let galley = painter.layout_no_wrap(
+                text,
+                egui::FontId::proportional(12.0),
+                if emphasized {
+                    p.text
+                } else {
+                    p.text_faint.gamma_multiply(0.4)
+                },
+            );
+            let label = egui::Rect::from_min_size(
+                pos + egui::vec2(-galley.size().x / 2.0, radius + 9.0),
+                galley.size(),
+            )
+            .expand2(egui::vec2(5.0, 3.0));
+            if matching && (focus == Some(i) || !labels.iter().any(|r| r.intersects(label))) {
+                painter.rect_filled(label, 4.0, bg);
+                painter.galley(label.min + egui::vec2(5.0, 3.0), galley, p.text);
+                labels.push(label);
+            }
+            let hit = ui.interact(
+                egui::Rect::from_center_size(pos, egui::vec2(30.0, 30.0)),
+                egui::Id::unique("graph_node").with(&node.id),
+                egui::Sense::click(),
+            );
+            hit.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Abrir {}", node.title))
+            });
+            if hit.clicked() {
+                graph.selected = Some(node.id.clone());
+            }
+            if hit.double_clicked()
+                || (hit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+            {
+                open = Some(node.id.clone());
+            }
+            hit.on_hover_text(format!("{}\n{} conexiones", node.title, node.degree));
+        }
+        if graph.nodes.is_empty() {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Crea páginas y enlázalas con [[",
+                egui::FontId::proportional(16.0),
+                p.text_muted,
+            );
+        }
+        ui.add_space(5.0);
+        ui.label(egui::RichText::new("Arrastra para explorar · Rueda para zoom · Doble clic para abrir · Colores por grupo conectado").size(11.0).color(p.text_muted));
+        self.graph = Some(graph);
+        if refresh {
+            let result = self.rebuild_graph();
+            self.report(result);
+        }
         if let Some(id) = open {
-            let result = self.open_page(id);
+            let result = self.open_in_new_tab(&id);
             self.report(result);
         }
     }

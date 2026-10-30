@@ -6623,3 +6623,32 @@ fn a_card_dropped_within_its_column_changes_place() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn graph_tab_preserves_page_and_opens_links_in_another_tab() -> Result<()> {
+    let db = Database::open_in_memory()?;
+    let first = db.create_page("Primera", None)?;
+    let second = db.create_page("Segunda", None)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(first.clone())?;
+    app.title = "Editada antes del grafo".into();
+    app.mark_dirty();
+    app.open_graph(&egui::Context::default())?;
+    assert!(app.graph_active());
+    assert!(app.selected.is_none());
+    assert_eq!(
+        app.db.get_page(&first)?.unwrap().title,
+        "Editada antes del grafo"
+    );
+    app.open_page(second.clone())?;
+    assert_eq!(app.selected.as_deref(), Some(second.as_str()));
+    assert!(app.tabs.position(graph::TAB_ID).is_some());
+    app.select_tab(app.tabs.position(graph::TAB_ID).unwrap())?;
+    app.reload_pages()?;
+    assert!(app.graph_active());
+    app.close_tab(app.tabs.active())?;
+    assert!(!app.graph_active());
+    app.open_page(first)?;
+    assert_eq!(app.title, "Editada antes del grafo");
+    Ok(())
+}

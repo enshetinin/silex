@@ -133,5 +133,5 @@ Ordenado por prioridad. Cada hito es una versión menor (1.1, 1.2…). Las histo
 - [ ] Etiquetas globales y grafo de enlaces. *(H15.3. `#etiqueta` en el texto (depende de H12.1) con una página por etiqueta; grafo de páginas y enlaces.)*
 - [ ] Sincronización por carpeta y cifrado opcional. *(H15.4. Evaluado y aplazado en el ADR 0012; necesita su propio ADR, modelo de amenazas y pruebas de conflicto y pérdida de clave.)*
 
-## Explorador de relaciones — primera versión
-- [ ] Grafo accesible desde «Grafo» en la barra superior: enlaces entre páginas activas, búsqueda por título, zoom con rueda, desplazamiento y apertura con doble clic o Intro al enfocar un nodo. Colores inspirados en Kanagawa en modo oscuro. Distribución inicial en espiral; no incluye aún simulación de fuerzas ni etiquetas globales. Verificación visual manual pendiente.
+## Explorador de relaciones — pestaña del espacio
+- [ ] Grafo accesible desde «Grafo» en la barra superior y mostrado en una pestaña junto a los documentos. Agrupación por componentes conectados, colores Kanagawa en oscuro y adaptados en claro, conexiones curvas, tamaño según conexiones, selección y búsqueda. Zoom con rueda y botones, encajar y actualizar. Abrir un nodo conserva el grafo y abre la página en otra pestaña. La cámara se conserva al alternar pestañas durante la sesión. Prueba de navegación/guardado y captura oscura verificadas; prueba manual del propietario pendiente.

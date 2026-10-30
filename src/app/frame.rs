@@ -89,7 +89,6 @@ impl SilexApp {
                 });
             },
         );
-        self.graph_window(ui.ctx());
         if let Some(id) = open {
             let result = self.open_page(id);
             self.report(result);

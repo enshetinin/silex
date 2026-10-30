@@ -2053,6 +2053,11 @@ impl SilexApp {
 
     /// The open page: top bar, notices and the centered document column.
     pub(super) fn editor(&mut self, ui: &mut egui::Ui) {
+        self.tab_bar(ui);
+        if self.graph_active() {
+            self.graph_view(ui);
+            return;
+        }
         let p = theme::current(ui.ctx());
         let Some(page_id) = self.selected.clone() else {
             ui.vertical_centered(|ui| {
@@ -2069,7 +2074,6 @@ impl SilexApp {
             });
             return;
         };
-        self.tab_bar(ui);
         if self.selected.as_deref() != Some(page_id.as_str()) {
             // Another tab was chosen or closed: drawn on the next frame.
             ui.ctx().request_repaint();
