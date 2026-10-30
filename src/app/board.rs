@@ -776,6 +776,14 @@ impl CardLook<'_> {
                         paint_tag_on(ui, painter, at, option, width);
                     }
                 }
+                CellValue::MultiSelect(ids) => {
+                    let options: Vec<&SelectOption> = property
+                        .options
+                        .iter()
+                        .filter(|o| ids.contains(&o.id))
+                        .collect();
+                    paint_tags(ui, painter, at, &options, width);
+                }
                 CellValue::Checkbox(_) => {
                     let icon = painter.text(
                         at,

@@ -4206,3 +4206,202 @@ fn relationship_graph_dark() -> anyhow::Result<()> {
         harness.run();
     })
 }
+
+// ---- H13.2, ADR 0018: multi-select ----
+
+/// «Lecturas» with «Géneros» (Novela, Cuento): Rayuela is a Novela.
+fn multi_select_app() -> anyhow::Result<(SilexApp, String, Vec<String>, String)> {
+    use silex_desktop::property::{CellValue, OptionColor, PropertyKind};
+    let (mut app, base, rows) = database_app()?;
+    let generos = app
+        .db
+        .add_property(&base, "Géneros", PropertyKind::MultiSelect)?;
+    let novela = app
+        .db
+        .add_select_option(&generos, "Novela", OptionColor::Purple)?;
+    app.db
+        .add_select_option(&generos, "Cuento", OptionColor::Orange)?;
+    app.db.set_value(
+        &rows[0],
+        &generos,
+        Some(&CellValue::MultiSelect(vec![novela])),
+    )?;
+    app.open_page(base.clone())?;
+    Ok((app, base, rows, generos))
+}
+
+/// The names of a multi-select cell as stored.
+fn stored_names(harness: &Harness<'_, SilexApp>, base: &str, row: &str, property: &str) -> String {
+    let state = harness.state();
+    let Some(property) = state
+        .db
+        .database_properties(base)
+        .ok()
+        .and_then(|ps| ps.into_iter().find(|p| p.id == property))
+    else {
+        return String::new();
+    };
+    state
+        .db
+        .database_values(base)
+        .ok()
+        .and_then(|values| values.get(row)?.get(&property.id).cloned())
+        .map(|v| v.display(&property))
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_multi_select_cell_adds_and_takes_out_options_with_the_menu_open() -> anyhow::Result<()> {
+    let (app, base, rows, generos) = multi_select_app()?;
+    let mut harness = a11y_harness(app);
+    let names = |h: &Harness<'_, SilexApp>| stored_names(h, &base, &rows[0], &generos);
+    click_action(&mut harness, "Géneros, Rayuela: Novela");
+    assert_accessible(&harness, "multi-select menu");
+    assert_steady(&mut harness, "Opciones de Géneros, Rayuela");
+    // Each click adds or takes out one, and the menu stays open.
+    menu_item(&harness, "Cuento").expect("«Cuento»").click();
+    harness.run();
+    assert_eq!(names(&harness), "Novela, Cuento");
+    assert!(
+        harness
+            .query_by_label("Opciones de Géneros, Rayuela")
+            .is_some()
+    );
+    menu_item(&harness, "Novela").expect("«Novela»").click();
+    harness.run();
+    assert_eq!(names(&harness), "Cuento");
+    // Typing a new name and Intro creates it, in the cell with the others.
+    harness.get_by_label("Opciones de Géneros, Rayuela").focus();
+    harness.run();
+    harness.event(egui::Event::Text("Ensayo".into()));
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(names(&harness), "Cuento, Ensayo");
+    // «Quitar todas» empties it and closes the menu.
+    menu_item(&harness, "Quitar todas")
+        .expect("«Quitar todas»")
+        .click();
+    harness.run();
+    assert_eq!(names(&harness), "");
+    assert!(
+        harness
+            .query_by_label("Opciones de Géneros, Rayuela")
+            .is_none()
+    );
+    // Each change was one step of the table's undo.
+    harness.state_mut().undo_table();
+    harness.run();
+    assert_eq!(names(&harness), "Cuento, Ensayo");
+    Ok(())
+}
+
+#[test]
+fn a_multi_select_is_offered_and_filtered_by_its_options() -> anyhow::Result<()> {
+    let (app, _, rows, _) = multi_select_app()?;
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Añadir una propiedad");
+    assert!(menu_item(&harness, "Selección múltiple").is_some());
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+    // «Contiene» Novela: only Rayuela.
+    let state = harness.state_mut();
+    if let Some(db) = state.database.as_mut()
+        && let Some(property) = db.properties.iter().find(|p| p.name == "Géneros").cloned()
+        && let Some(view) = db.views.get_mut(db.view)
+    {
+        view.config.filters.push(silex_desktop::view::Filter {
+            property: property.id.clone(),
+            op: silex_desktop::view::FilterOp::Contains,
+            value: property.options[0].id.clone(),
+        });
+        db.view_changed();
+    }
+    harness.run();
+    let shown: Vec<String> = harness
+        .state()
+        .database
+        .as_ref()
+        .map(|d| d.order.iter().map(|&i| d.rows[i].id.clone()).collect())
+        .unwrap_or_default();
+    assert_eq!(shown, [rows[0].clone()]);
+    Ok(())
+}
+
+/// A multi-select cell's menu: the options with a tick on the chosen ones.
+#[test]
+fn database_multi_select_menu() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (app, _, _, _) = multi_select_app()?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    click_action(&mut harness, "Géneros, Rayuela: Novela");
+    menu_item(&harness, "Cuento").expect("«Cuento»").click();
+    harness.run();
+    harness.snapshot("database_multi_select_menu_light");
+    Ok(())
+}
+
+/// Multi-select cells: their tags, and «+N» for those that do not fit.
+#[test]
+fn database_multi_select_cells() -> anyhow::Result<()> {
+    use silex_desktop::property::{CellValue, OptionColor};
+    if !enabled() {
+        return Ok(());
+    }
+    let (mut app, base, rows, generos) = multi_select_app()?;
+    let mut ids: Vec<String> = app
+        .db
+        .database_properties(&base)?
+        .into_iter()
+        .find(|p| p.id == generos)
+        .map(|p| p.options.into_iter().map(|o| o.id).collect())
+        .unwrap_or_default();
+    for (name, color) in [
+        ("Ensayo", OptionColor::Green),
+        ("Poesía", OptionColor::Pink),
+    ] {
+        ids.push(app.db.add_select_option(&generos, name, color)?);
+    }
+    app.db.set_value(
+        &rows[1],
+        &generos,
+        Some(&CellValue::MultiSelect(ids.clone())),
+    )?;
+    app.db.set_value(
+        &rows[2],
+        &generos,
+        Some(&CellValue::MultiSelect(vec![
+            ids[1].clone(),
+            ids[2].clone(),
+        ])),
+    )?;
+    app.open_page(base.clone())?;
+    // Only «Géneros» in sight.
+    if let Some(state) = app.database.as_mut()
+        && let Some(view) = state.views.get_mut(state.view)
+    {
+        for property in &state.properties {
+            if property.id != generos {
+                view.config.set_hidden(&property.id, true);
+            }
+        }
+        state.view_changed();
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot("database_multi_select_cells_light");
+    Ok(())
+}

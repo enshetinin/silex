@@ -118,6 +118,7 @@ CREATE TABLE db_views (
 - **Valores en filas separadas (EAV).** Cargar una base son cuatro consultas (filas, propiedades, opciones y valores), no una por celda.
 - **Números como `REAL`.** Sumas tipo moneda pueden mostrar errores de redondeo; si hace falta, un tipo «moneda» guardado en céntimos.
 - **Fuera de alcance**, cada uno con su ADR si llega: bases de datos dentro de una página (como bloque), relaciones, fórmulas y rollups, selección múltiple, personas, adjuntos, plantillas de filas, importar CSV.
+  - *Actualización (ADR 0018):* la selección múltiple llega con una tabla de unión `db_multi_values` y la migración 0014, que reconstruye `db_properties` con los tipos nuevos.
 
 ## Decisiones del propietario (2026-10-18)
 1. Las filas no aparecen en la barra lateral, como en Notion.

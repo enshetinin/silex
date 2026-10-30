@@ -1741,11 +1741,10 @@ fn database_scale_smoke() -> anyhow::Result<()> {
         for round in 0..2 {
             for kind in PropertyKind::ALL {
                 let id = db.add_property(&base, &format!("{} {round}", kind.label()), kind)?;
-                let option = match kind {
-                    PropertyKind::Select => {
-                        Some(db.add_select_option(&id, "Hecho", OptionColor::Green)?)
-                    }
-                    _ => None,
+                let option = if kind.has_options() {
+                    Some(db.add_select_option(&id, "Hecho", OptionColor::Green)?)
+                } else {
+                    None
                 };
                 properties.push((id, kind, option));
             }
@@ -1760,6 +1759,9 @@ fn database_scale_smoke() -> anyhow::Result<()> {
                     PropertyKind::Checkbox => Some(CellValue::Checkbox(i % 2 == 0)),
                     PropertyKind::Date => date.clone(),
                     PropertyKind::Select => option.clone().map(CellValue::Select),
+                    PropertyKind::MultiSelect => {
+                        option.clone().map(|o| CellValue::MultiSelect(vec![o]))
+                    }
                 };
                 db.set_value(&row, property, value.as_ref())?;
             }

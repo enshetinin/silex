@@ -572,3 +572,152 @@ fn options_move_within_their_property() -> anyhow::Result<()> {
     assert_eq!(z, ["Z"]);
     Ok(())
 }
+
+// ---- H13.2, ADR 0018: multi-select ----
+
+/// «Lecturas» with a row and «Géneros» (Novela, Cuento, Ensayo).
+fn generos() -> anyhow::Result<(Database, String, String, String, [String; 3])> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let row = db.create_row(&base, "Rayuela")?;
+    let generos = db.add_property(&base, "Géneros", PropertyKind::MultiSelect)?;
+    let novela = db.add_select_option(&generos, "Novela", OptionColor::Blue)?;
+    let cuento = db.add_select_option(&generos, "Cuento", OptionColor::Green)?;
+    let ensayo = db.add_select_option(&generos, "Ensayo", OptionColor::Red)?;
+    Ok((db, base, row, generos, [novela, cuento, ensayo]))
+}
+
+fn multi(ids: &[&String]) -> CellValue {
+    CellValue::MultiSelect(ids.iter().map(|id| (*id).clone()).collect())
+}
+
+#[test]
+fn a_multi_select_keeps_its_options_in_the_property_order() -> anyhow::Result<()> {
+    let (mut db, base, row, generos, [novela, cuento, ensayo]) = generos()?;
+    // Chosen in any order, repeated: read once each, in the options' order.
+    let chosen = CellValue::MultiSelect(vec![ensayo.clone(), novela.clone(), ensayo.clone()]);
+    db.set_value(&row, &generos, Some(&chosen))?;
+    assert_eq!(
+        cell(&db, &base, &row, &generos)?,
+        Some(multi(&[&novela, &ensayo]))
+    );
+    assert_eq!(
+        db.row_values(&row)?.get(&generos),
+        Some(&multi(&[&novela, &ensayo]))
+    );
+    // Moving an option moves it in every cell.
+    db.move_select_option(&ensayo, Shift::Up)?;
+    db.move_select_option(&ensayo, Shift::Up)?;
+    assert_eq!(
+        cell(&db, &base, &row, &generos)?,
+        Some(multi(&[&ensayo, &novela]))
+    );
+    // Writing replaces the whole cell; no options empties it.
+    db.set_value(&row, &generos, Some(&multi(&[&cuento])))?;
+    assert_eq!(cell(&db, &base, &row, &generos)?, Some(multi(&[&cuento])));
+    db.set_value(&row, &generos, Some(&CellValue::MultiSelect(Vec::new())))?;
+    assert_eq!(cell(&db, &base, &row, &generos)?, None);
+    db.set_value(&row, &generos, Some(&multi(&[&cuento])))?;
+    db.set_value(&row, &generos, None)?;
+    assert_eq!(cell(&db, &base, &row, &generos)?, None);
+    Ok(())
+}
+
+#[test]
+fn a_multi_select_takes_only_its_own_options_all_or_nothing() -> anyhow::Result<()> {
+    let (mut db, base, row, generos, [novela, ..]) = generos()?;
+    let estado = db.add_property(&base, "Estado", PropertyKind::Select)?;
+    let leyendo = db.add_select_option(&estado, "Leyendo", OptionColor::Blue)?;
+    db.set_value(&row, &generos, Some(&multi(&[&novela])))?;
+    // An option of another property: nothing changes.
+    assert!(
+        db.set_value(&row, &generos, Some(&multi(&[&novela, &leyendo])))
+            .is_err()
+    );
+    assert_eq!(cell(&db, &base, &row, &generos)?, Some(multi(&[&novela])));
+    // Nor a single select in it, nor a list in a single select.
+    assert!(
+        db.set_value(&row, &generos, Some(&CellValue::Select(novela.clone())))
+            .is_err()
+    );
+    assert!(
+        db.set_value(&row, &estado, Some(&multi(&[&leyendo])))
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn deleting_an_option_takes_it_out_of_every_cell() -> anyhow::Result<()> {
+    let (mut db, base, row, generos, [novela, cuento, _]) = generos()?;
+    let other = db.create_row(&base, "Ficciones")?;
+    db.set_value(&row, &generos, Some(&multi(&[&novela, &cuento])))?;
+    db.set_value(&other, &generos, Some(&multi(&[&cuento])))?;
+    db.delete_select_option(&cuento)?;
+    assert_eq!(cell(&db, &base, &row, &generos)?, Some(multi(&[&novela])));
+    assert_eq!(cell(&db, &base, &other, &generos)?, None);
+    Ok(())
+}
+
+#[test]
+fn multi_selects_follow_rows_and_properties_out_and_back() -> anyhow::Result<()> {
+    let (mut db, base, row, generos, [novela, ..]) = generos()?;
+    db.set_value(&row, &generos, Some(&multi(&[&novela])))?;
+    db.trash_page(&row)?;
+    assert!(!db.database_values(&base)?.contains_key(&row));
+    db.restore_page(&row)?;
+    db.delete_property(&generos)?;
+    assert!(!db.database_values(&base)?.contains_key(&row));
+    assert!(db.row_values(&row)?.is_empty());
+    db.restore_property(&generos)?;
+    assert_eq!(cell(&db, &base, &row, &generos)?, Some(multi(&[&novela])));
+    Ok(())
+}
+
+#[test]
+fn duplicating_keeps_multi_selects_with_the_copys_options() -> anyhow::Result<()> {
+    let (mut db, base, row, generos, [novela, _, ensayo]) = generos()?;
+    db.set_value(&row, &generos, Some(&multi(&[&novela, &ensayo])))?;
+    // A row: same property, same options.
+    let copy = db.duplicate_page(&row, false)?;
+    assert_eq!(
+        cell(&db, &base, &copy, &generos)?,
+        Some(multi(&[&novela, &ensayo]))
+    );
+    // The whole database: its own property and options.
+    let other = db.duplicate_page(&base, true)?;
+    let property = db
+        .database_properties(&other)?
+        .into_iter()
+        .find(|p| p.kind == PropertyKind::MultiSelect)
+        .expect("copied");
+    assert_ne!(property.id, generos);
+    let values = db.database_values(&other)?;
+    let names: Vec<String> = values
+        .values()
+        .filter_map(|cells| cells.get(&property.id))
+        .map(|v| v.display(&property))
+        .collect();
+    // The row and its copy made above.
+    assert_eq!(names, ["Novela, Ensayo", "Novela, Ensayo"]);
+    Ok(())
+}
+
+#[test]
+fn multi_selects_export_as_names_separated_by_commas() -> anyhow::Result<()> {
+    use silex_desktop::csv::{CsvScope, database_to_csv};
+    use silex_desktop::markdown::database_to_markdown;
+    let (mut db, base, row, generos, [novela, cuento, _]) = generos()?;
+    db.set_value(&row, &generos, Some(&multi(&[&novela, &cuento])))?;
+    let properties = db.database_properties(&base)?;
+    let rows = db.database_rows(&base)?;
+    let values = db.database_values(&base)?;
+    let markdown = database_to_markdown("Lecturas", &properties, &rows, &values);
+    assert!(
+        markdown.contains("| Rayuela | Novela, Cuento |"),
+        "{markdown}"
+    );
+    let csv = database_to_csv(&properties, &rows, &values, CsvScope::All);
+    assert!(csv.contains("Rayuela,\"Novela, Cuento\""), "{csv}");
+    Ok(())
+}

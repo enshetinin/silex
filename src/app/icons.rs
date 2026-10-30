@@ -235,6 +235,8 @@ pub const TEXT_ALIGN_LEFT: &str = "\u{e185}"; // text-align-start
 pub const HASH: &str = "\u{e0ef}"; // hash
 pub const CALENDAR: &str = "\u{e063}"; // calendar
 pub const CARET_CIRCLE_DOWN: &str = "\u{e4dd}"; // circle-chevron-down
+/// Multi-select (H13.2).
+pub const TAGS: &str = "\u{e35c}"; // tags
 pub const ARROW_LEFT: &str = "\u{e048}"; // arrow-left
 pub const ARROW_RIGHT: &str = "\u{e049}"; // arrow-right
 /// View menus (H6.3a): filter, sort, columns shown or hidden.
@@ -247,6 +249,7 @@ pub const EYE_SLASH: &str = "\u{e0bb}"; // eye-off
 #[cfg(test)]
 pub const ALL: &[(&str, &str)] = &[
     ("PLUS", PLUS),
+    ("TAGS", TAGS),
     ("DOTS_THREE", DOTS_THREE),
     ("DOTS_THREE_VERTICAL", DOTS_THREE_VERTICAL),
     ("DRAG_HANDLE", DRAG_HANDLE),

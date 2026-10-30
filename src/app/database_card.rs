@@ -195,6 +195,20 @@ pub(super) fn database_card(
                     let center = egui::pos2(cell.left() + CELL_PAD + 8.0, cell.center().y);
                     paint_check_box(ui, center, on, &response);
                 }
+                (_, Some(CellValue::MultiSelect(ids))) => {
+                    let options: Vec<_> = property
+                        .options
+                        .iter()
+                        .filter(|o| ids.contains(&o.id))
+                        .collect();
+                    paint_tags(
+                        ui,
+                        &painter,
+                        egui::pos2(cell.left() + CELL_PAD, cell.center().y),
+                        &options,
+                        cell.width() - 2.0 * CELL_PAD,
+                    );
+                }
                 (_, Some(CellValue::Select(option))) => {
                     if let Some(option) = property.option(option) {
                         paint_tag_on(

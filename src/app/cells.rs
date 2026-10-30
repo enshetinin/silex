@@ -23,6 +23,7 @@ pub(super) fn property_icon(kind: PropertyKind) -> &'static str {
         PropertyKind::Checkbox => icons::TODO,
         PropertyKind::Date => icons::CALENDAR,
         PropertyKind::Select => icons::CARET_CIRCLE_DOWN,
+        PropertyKind::MultiSelect => icons::TAGS,
     }
 }
 
@@ -123,6 +124,7 @@ pub(super) fn property_cell(
         PropertyKind::Date => date_cell(ui, cell, editing, option_filter, actions),
         PropertyKind::Checkbox => checkbox_cell(ui, cell, actions),
         PropertyKind::Select => select_cell(ui, cell, editing, option_filter, actions),
+        PropertyKind::MultiSelect => multi_select_cell(ui, cell, editing, option_filter, actions),
     }
 }
 
@@ -363,6 +365,128 @@ pub(super) fn select_cell(
         });
 }
 
+/// A multi-select cell (H13.2, ADR 0018): its options as colored tags, and
+/// «+N» for those that do not fit. A click opens a menu where each click
+/// on an option adds or takes it out (the menu stays open), to search the
+/// options, create one or empty the cell.
+pub(super) fn multi_select_cell(
+    ui: &mut egui::Ui,
+    cell: &Cell<'_>,
+    editing: &mut Option<CellEdit>,
+    filter: &mut String,
+    actions: &mut Vec<CellAction>,
+) {
+    let chosen: Vec<&SelectOption> = cell
+        .property
+        .options
+        .iter()
+        .filter(|o| CellValue::option_ids(cell.value).contains(&o.id))
+        .collect();
+    let button = cell_button(ui, cell, &cell.shown());
+    if !chosen.is_empty() {
+        paint_tags(
+            ui,
+            ui.painter(),
+            egui::pos2(cell.rect.left() + CELL_PAD, cell.rect.center().y),
+            &chosen,
+            cell.rect.width() - 2.0 * CELL_PAD,
+        );
+    } else if cell.place == CellPlace::Page {
+        let p = theme::current(ui.ctx());
+        paint_cell_text(
+            ui,
+            cell.rect,
+            "Vacío",
+            egui::Align2::LEFT_CENTER,
+            p.text_faint,
+        );
+    }
+    let menu = select_menu_id(&cell.row.id, &cell.property.id);
+    let opening = button.clicked() && !egui::Popup::is_id_open(ui.ctx(), menu);
+    if opening {
+        filter.clear();
+        if let Some(old) = editing.take() {
+            actions.push(CellAction::Commit(old));
+        }
+    }
+    egui::Popup::menu(&button)
+        .id(menu)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(240.0)
+        .show(|ui| {
+            menu_spacing(ui);
+            let field = menu_field(
+                ui,
+                filter,
+                "Busca o crea una opción",
+                &format!("Opciones de {}", cell.name()),
+            );
+            if opening {
+                field.request_focus();
+            }
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let typed = filter.trim().to_owned();
+            let (matches, exact) = cell.property.matching_options(&typed);
+            let toggle = |option: &SelectOption| CellAction::SetValue {
+                row: cell.row.id.clone(),
+                property: cell.property.id.clone(),
+                value: CellValue::toggled(cell.property, cell.value, &option.id),
+            };
+            let create = || CellAction::CreateOption {
+                row: cell.row.id.clone(),
+                property: cell.property.id.clone(),
+                name: typed.clone(),
+            };
+            let mut action = None;
+            ui.add_space(theme::space::XS);
+            for option in &matches {
+                let on = chosen.iter().any(|c| c.id == option.id);
+                if option_row(ui, option, on).clicked() {
+                    action = Some(toggle(option));
+                }
+            }
+            if !typed.is_empty() && exact.is_none() {
+                let label = format!("Crear «{typed}»");
+                if ui
+                    .button((icons::icon(icons::PLUS), format!(" {label}")))
+                    .clicked()
+                {
+                    action = Some(create());
+                }
+            }
+            if cell.property.options.is_empty() && typed.is_empty() {
+                menu_caption(ui, "Escribe para crear la primera opción.");
+            }
+            // Enter adds or takes out the option with that name, else the
+            // first match, else creates it; the search is cleared to go on.
+            if enter && action.is_none() && !typed.is_empty() {
+                action = Some(match exact.or(matches.first().copied()) {
+                    Some(option) => toggle(option),
+                    None => create(),
+                });
+                filter.clear();
+                ui.memory_mut(|m| m.request_focus(field.id));
+            }
+            if !chosen.is_empty() {
+                ui.separator();
+                if ui
+                    .button((icons::icon(icons::CLOSE), " Quitar todas"))
+                    .clicked()
+                {
+                    action = Some(CellAction::SetValue {
+                        row: cell.row.id.clone(),
+                        property: cell.property.id.clone(),
+                        value: None,
+                    });
+                    ui.close();
+                }
+            }
+            if let Some(action) = action {
+                actions.push(action);
+            }
+        });
+}
+
 /// One option in a select menu: its tag, and a tick on the current one.
 pub(super) fn option_row(
     ui: &mut egui::Ui,
@@ -462,6 +586,46 @@ pub(super) fn paint_tag(
     max_width: f32,
 ) {
     paint_tag_on(ui, ui.painter(), left_center, option, max_width);
+}
+
+/// Options as pills in a row from `left_center`, within `max_width`; those
+/// that do not fit are counted in a «+N» at the end.
+pub(super) fn paint_tags(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    left_center: egui::Pos2,
+    options: &[&SelectOption],
+    max_width: f32,
+) {
+    let p = theme::current(ui.ctx());
+    let right = left_center.x + max_width;
+    let gap = 4.0;
+    // Room kept for «+N» while more options follow.
+    let more = 32.0;
+    let mut x = left_center.x;
+    for (i, option) in options.iter().enumerate() {
+        let left = options.len() - i;
+        let room = right - x - if left > 1 { more + gap } else { 0.0 };
+        // A pill narrower than this would show only its dot.
+        if room < 48.0 && i > 0 {
+            painter.text(
+                egui::pos2(x, left_center.y),
+                egui::Align2::LEFT_CENTER,
+                format!("+{left}"),
+                egui::TextStyle::Small.resolve(ui.style()),
+                p.text_muted,
+            );
+            return;
+        }
+        let rect = paint_tag_on(
+            ui,
+            painter,
+            egui::pos2(x, left_center.y),
+            option,
+            room.max(0.0),
+        );
+        x = rect.right() + gap;
+    }
 }
 
 /// Height of an option pill.
@@ -741,9 +905,12 @@ impl SilexApp {
     }
 
     /// Creates an option named `name` in a select property (next color in
-    /// turn) and puts it in the cell of `row`.
+    /// turn) and puts it in the cell of `row` (in a multi-select, with the
+    /// options it already has).
     pub(super) fn create_option(&mut self, row: &str, property: &str, name: &str) -> Result<()> {
-        let existing = self.cell_info(row, property).map_or(0, |(_, n, _)| n);
+        let Some((kind, existing, current)) = self.cell_info(row, property) else {
+            return Ok(());
+        };
         let option = self.db.add_select_option(
             property,
             name.trim(),
@@ -751,7 +918,27 @@ impl SilexApp {
         )?;
         self.reload_properties()?;
         self.reload_row_page()?;
-        self.set_cell(row, property, Some(CellValue::Select(option)))
+        let value = if kind == PropertyKind::MultiSelect {
+            let Some(property) = self.find_property(property) else {
+                return Ok(());
+            };
+            CellValue::with_option(&property, current.as_ref(), &option)
+        } else {
+            Some(CellValue::Select(option))
+        };
+        self.set_cell(row, property, value)
+    }
+
+    /// A live property of the open table or the open row's page, as just read.
+    fn find_property(&self, id: &str) -> Option<Property> {
+        let in_table = self.database.as_ref().map(|d| &d.properties);
+        let in_page = self.row_page.as_ref().map(|page| &page.properties);
+        in_table
+            .into_iter()
+            .chain(in_page)
+            .flatten()
+            .find(|p| p.id == id)
+            .cloned()
     }
 
     /// Applies what the user did to cells this frame. Text typed in a cell

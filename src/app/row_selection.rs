@@ -316,6 +316,25 @@ fn bulk_menu(ui: &mut egui::Ui, state: &mut DatabaseState, actions: &mut Vec<Tab
                 }
             }
         }
+        // Each chosen row gets just that option, or none (H13.2).
+        PropertyKind::MultiSelect => {
+            if property.options.is_empty() {
+                menu_caption(ui, "Esta propiedad aún no tiene opciones.");
+            }
+            for option in &property.options {
+                if ui.button(format!("Solo «{}»", option.name)).clicked() {
+                    set(Some(CellValue::MultiSelect(vec![option.id.clone()])));
+                    ui.close();
+                }
+            }
+            if ui
+                .button((icons::icon(icons::CLOSE), " Quitar todas"))
+                .clicked()
+            {
+                set(None);
+                ui.close();
+            }
+        }
         PropertyKind::Text | PropertyKind::Number | PropertyKind::Date => {
             let hint = match property.kind {
                 PropertyKind::Number => "0",

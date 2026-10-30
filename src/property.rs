@@ -13,19 +13,23 @@ pub enum PropertyKind {
     Checkbox,
     Date,
     Select,
+    /// Zero or more options of the property (H13.2, ADR 0018).
+    MultiSelect,
 }
 
 impl PropertyKind {
     /// Menu order.
-    pub const ALL: [PropertyKind; 5] = [
+    pub const ALL: [PropertyKind; 6] = [
         PropertyKind::Text,
         PropertyKind::Number,
         PropertyKind::Checkbox,
         PropertyKind::Date,
         PropertyKind::Select,
+        PropertyKind::MultiSelect,
     ];
 
-    /// Name stored in SQLite (must match the CHECK in migration 0005).
+    /// Name stored in SQLite (must match the CHECK in migrations 0005 and
+    /// 0014).
     pub fn as_str(self) -> &'static str {
         match self {
             PropertyKind::Text => "text",
@@ -33,7 +37,13 @@ impl PropertyKind {
             PropertyKind::Checkbox => "checkbox",
             PropertyKind::Date => "date",
             PropertyKind::Select => "select",
+            PropertyKind::MultiSelect => "multi_select",
         }
+    }
+
+    /// Whether its cells take options of the property (and it has some).
+    pub fn has_options(self) -> bool {
+        matches!(self, PropertyKind::Select | PropertyKind::MultiSelect)
     }
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -48,6 +58,7 @@ impl PropertyKind {
             PropertyKind::Checkbox => "Casilla",
             PropertyKind::Date => "Fecha",
             PropertyKind::Select => "Selección",
+            PropertyKind::MultiSelect => "Selección múltiple",
         }
     }
 }
@@ -134,7 +145,8 @@ pub struct SelectOption {
     pub color: OptionColor,
 }
 
-/// A typed column of a database. `options` is empty unless it is a select.
+/// A typed column of a database. `options` is empty unless it is a select
+/// or a multi-select.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Property {
     pub id: String,
@@ -424,6 +436,9 @@ pub enum CellValue {
     Date(Date),
     /// The id of one of the property's options.
     Select(String),
+    /// Ids of the property's options, in the property's order (ADR 0018).
+    /// No ids is an empty cell.
+    MultiSelect(Vec<String>),
 }
 
 impl CellValue {
@@ -434,16 +449,62 @@ impl CellValue {
             CellValue::Checkbox(_) => PropertyKind::Checkbox,
             CellValue::Date(_) => PropertyKind::Date,
             CellValue::Select(_) => PropertyKind::Select,
+            CellValue::MultiSelect(_) => PropertyKind::MultiSelect,
         }
     }
 
-    /// Values stored as "no value": empty text and an unticked box.
+    /// Values stored as "no value": empty text, an unticked box and a
+    /// multi-select with no options.
     pub fn is_empty(&self) -> bool {
         match self {
             CellValue::Text(text) => text.is_empty(),
             CellValue::Checkbox(on) => !on,
+            CellValue::MultiSelect(ids) => ids.is_empty(),
             _ => false,
         }
+    }
+
+    /// The options of a multi-select (none for any other value or none).
+    pub fn option_ids(value: Option<&CellValue>) -> &[String] {
+        match value {
+            Some(CellValue::MultiSelect(ids)) => ids,
+            _ => &[],
+        }
+    }
+
+    /// A click on `option` in a multi-select's menu: `current` with it
+    /// added, or taken out if it was there. `None` if no option is left.
+    pub fn toggled(property: &Property, current: Option<&CellValue>, option: &str) -> Option<Self> {
+        let mut ids = Self::option_ids(current).to_vec();
+        if ids.iter().any(|id| id == option) {
+            ids.retain(|id| id != option);
+        } else {
+            ids.push(option.to_owned());
+        }
+        Self::multi_select(property, &ids)
+    }
+
+    /// `current` with `option` added (a new option created from the cell).
+    pub fn with_option(
+        property: &Property,
+        current: Option<&CellValue>,
+        option: &str,
+    ) -> Option<Self> {
+        let mut ids = Self::option_ids(current).to_vec();
+        ids.push(option.to_owned());
+        Self::multi_select(property, &ids)
+    }
+
+    /// A multi-select of `ids`: those that are options of `property`, once
+    /// each and in the property's order. `None` if none is left.
+    pub fn multi_select(property: &Property, ids: &[String]) -> Option<Self> {
+        let ids: Vec<String> = property
+            .options
+            .iter()
+            .filter(|o| ids.contains(&o.id))
+            .map(|o| o.id.clone())
+            .collect();
+        (!ids.is_empty()).then_some(CellValue::MultiSelect(ids))
     }
 
     /// The value read from the `db_values` columns for a property of
@@ -464,6 +525,8 @@ impl CellValue {
             PropertyKind::Checkbox => CellValue::Checkbox(flag? == 1),
             PropertyKind::Date => CellValue::Date(Date::parse(&date?)?),
             PropertyKind::Select => CellValue::Select(option?),
+            // Not in `db_values` (ADR 0018): read from `db_multi_values`.
+            PropertyKind::MultiSelect => return None,
         };
         (!value.is_empty()).then_some(value)
     }
@@ -481,6 +544,14 @@ impl CellValue {
                 .option(id)
                 .map(|o| o.name.clone())
                 .unwrap_or_default(),
+            // «Novela, Cuento», in the property's order.
+            CellValue::MultiSelect(ids) => property
+                .options
+                .iter()
+                .filter(|o| ids.contains(&o.id))
+                .map(|o| o.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
         }
     }
 }
@@ -506,7 +577,7 @@ pub fn parse_input(kind: PropertyKind, input: &str) -> Result<Option<CellValue>,
             .ok_or_else(|| {
                 format!("«{shown}» no es una fecha válida (AAAA-MM-DD, por ejemplo 2026-10-19).")
             }),
-        PropertyKind::Checkbox | PropertyKind::Select => Err(format!(
+        PropertyKind::Checkbox | PropertyKind::Select | PropertyKind::MultiSelect => Err(format!(
             "Una {} no se escribe.",
             kind.label().to_lowercase()
         )),
@@ -794,5 +865,73 @@ mod tests {
         assert_eq!(CellValue::Select("o1".into()).display(&property), "Leído");
         assert_eq!(CellValue::Select("gone".into()).display(&property), "");
         assert_eq!(CellValue::Number(1.5).display(&property), "1,5");
+    }
+
+    fn generos() -> Property {
+        Property {
+            id: "g".into(),
+            name: "Géneros".into(),
+            kind: PropertyKind::MultiSelect,
+            options: ["novela", "cuento", "ensayo"]
+                .into_iter()
+                .map(|id| SelectOption {
+                    id: id.into(),
+                    name: id.to_uppercase(),
+                    color: OptionColor::Gray,
+                })
+                .collect(),
+        }
+    }
+
+    fn multi(ids: &[&str]) -> CellValue {
+        CellValue::MultiSelect(ids.iter().map(|id| (*id).to_owned()).collect())
+    }
+
+    #[test]
+    fn a_click_adds_or_takes_out_an_option_in_the_property_order() {
+        let property = generos();
+        let one = CellValue::toggled(&property, None, "ensayo");
+        assert_eq!(one, Some(multi(&["ensayo"])));
+        let two = CellValue::toggled(&property, one.as_ref(), "novela");
+        assert_eq!(two, Some(multi(&["novela", "ensayo"])));
+        let back = CellValue::toggled(&property, two.as_ref(), "novela");
+        assert_eq!(back, one);
+        assert_eq!(CellValue::toggled(&property, one.as_ref(), "ensayo"), None);
+        // Unknown ids are left out; adding one twice keeps one.
+        assert_eq!(CellValue::toggled(&property, None, "otra"), None);
+        assert_eq!(
+            CellValue::with_option(&property, one.as_ref(), "ensayo"),
+            one
+        );
+        assert_eq!(
+            CellValue::with_option(&property, one.as_ref(), "cuento"),
+            Some(multi(&["cuento", "ensayo"]))
+        );
+    }
+
+    #[test]
+    fn a_multi_select_shows_its_names_and_empty_is_no_value() {
+        let property = generos();
+        assert_eq!(
+            multi(&["novela", "ensayo"]).display(&property),
+            "NOVELA, ENSAYO"
+        );
+        assert!(multi(&[]).is_empty());
+        assert_eq!(multi(&["cuento"]).kind(), PropertyKind::MultiSelect);
+        assert!(PropertyKind::MultiSelect.has_options());
+        assert!(!PropertyKind::Text.has_options());
+        // Never in `db_values`.
+        assert_eq!(
+            CellValue::from_columns(
+                PropertyKind::MultiSelect,
+                None,
+                None,
+                None,
+                None,
+                Some("x".into())
+            ),
+            None
+        );
+        assert!(parse_input(PropertyKind::MultiSelect, "x").is_err());
     }
 }

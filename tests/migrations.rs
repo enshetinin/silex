@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 13;
+const LATEST: i64 = 14;
 
 struct TempDir(PathBuf);
 
@@ -291,17 +291,14 @@ mod v3 {
     fn failed_rebuild_leaves_the_v2_database_untouched() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         write_v2_database(&tmp.db())?;
-        // An orphan block (only possible with foreign keys off) makes the copy
-        // into the new table fail after it was created: all must roll back.
-        let conn = Connection::open(tmp.db())?;
-        conn.execute_batch(
-            "PRAGMA foreign_keys = OFF;
-             INSERT INTO blocks (id, page_id, kind) VALUES ('huerfano', 'no-existe', 'paragraph');",
-        )?;
-        drop(conn);
+        // A table already named `settings` makes the next migration (0004)
+        // fail after `blocks` was rebuilt, in the same transaction: all must
+        // roll back. (Until v14 an orphan block made the copy itself fail,
+        // but foreign keys are off while migrating since then, ADR 0018.)
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE settings (x);")?;
 
         let err = Database::open(tmp.db()).err().expect("migration must fail");
-        assert!(format!("{err:#}").contains("esquema 3"), "{err:#}");
+        assert!(format!("{err:#}").contains("esquema 4"), "{err:#}");
 
         let conn = Connection::open(tmp.db())?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -317,7 +314,7 @@ mod v3 {
         let blocks: i64 =
             Connection::open(tmp.db())?
                 .query_row("SELECT COUNT(*) FROM blocks", [], |r| r.get(0))?;
-        assert_eq!(blocks, 4, "nothing lost");
+        assert_eq!(blocks, 3, "nothing lost");
         Ok(())
     }
 
@@ -1555,7 +1552,7 @@ mod v13 {
     const SCHEMA_V12: &str = include_str!("../src/db/migrations/0012_toggle.sql");
 
     /// A database exactly as Silex v12 left it (v11 content plus a toggle).
-    fn write_v12_database(path: &Path) -> anyhow::Result<()> {
+    pub(super) fn write_v12_database(path: &Path) -> anyhow::Result<()> {
         write_v11_database(path)?;
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA_V12)?;
@@ -1639,6 +1636,229 @@ mod v13 {
         assert_eq!(db.schema_version()?, LATEST);
         assert!(db.get_page(&page)?.is_none());
         db.set_page_icon("p2", Some("🌾"))?;
+        Ok(())
+    }
+}
+
+mod v14 {
+    use super::v13::write_v12_database;
+    use super::*;
+    use silex_desktop::property::{CellValue, PropertyKind};
+
+    const SCHEMA_V13: &str = include_str!("../src/db/migrations/0013_page_icon.sql");
+
+    /// A database exactly as Silex v13 left it (v12 content plus an icon,
+    /// and properties, options and values in the database «Lecturas»: what
+    /// a rebuild of `db_properties` with foreign keys on would cascade away).
+    fn write_v13_database(path: &Path) -> anyhow::Result<()> {
+        write_v12_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V13)?;
+        conn.execute_batch(
+            "UPDATE pages SET icon = '🌾' WHERE id = 'p2';
+             INSERT INTO pages (id, title, parent_id, sort_order) VALUES ('fila', 'Rayuela', 'base', 0);
+             INSERT INTO db_properties (id, database_id, name, kind, position) VALUES
+                 ('autor', 'base', 'Autor', 'text', 0),
+                 ('estado', 'base', 'Estado', 'select', 1);
+             INSERT INTO db_properties (id, database_id, name, kind, position, deleted_at) VALUES
+                 ('vieja', 'base', 'Vieja', 'number', 2, '2026-01-01T00:00:00.000Z');
+             INSERT INTO db_select_options (id, property_id, name, color, position) VALUES
+                 ('leyendo', 'estado', 'Leyendo', 'blue', 0),
+                 ('hecho', 'estado', 'Hecho', 'green', 1);
+             INSERT INTO db_values (page_id, property_id, text_value) VALUES ('fila', 'autor', 'Cortázar');
+             INSERT INTO db_values (page_id, property_id, option_id) VALUES ('fila', 'estado', 'hecho');
+             INSERT INTO db_values (page_id, property_id, number_value) VALUES ('fila', 'vieja', 7);
+             PRAGMA user_version = 13;",
+        )?;
+        Ok(())
+    }
+
+    fn count(path: &Path, table: &str) -> anyhow::Result<i64> {
+        Ok(Connection::open(path)?.query_row(
+            &format!("SELECT COUNT(*) FROM {table}"),
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    #[test]
+    fn v13_database_gets_multi_selects_keeping_properties_options_and_values() -> anyhow::Result<()>
+    {
+        let tmp = TempDir::new()?;
+        write_v13_database(&tmp.db())?;
+        let rowids = |path: &Path| -> anyhow::Result<Vec<(String, i64)>> {
+            Ok(Connection::open(path)?
+                .prepare("SELECT id, rowid FROM db_properties ORDER BY id")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        };
+        let before = rowids(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(rowids(&tmp.db())?, before, "rowids kept");
+        assert_eq!(count(&tmp.db(), "db_select_options")?, 2, "options kept");
+        assert_eq!(count(&tmp.db(), "db_values")?, 3, "values kept");
+        // As before: live properties, the deleted one restorable.
+        let names: Vec<String> = db
+            .database_properties("base")?
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["Autor", "Estado"]);
+        let values = db.database_values("base")?;
+        assert_eq!(values["fila"]["estado"], CellValue::Select("hecho".into()));
+        assert_eq!(db.page_icons()?.get("p2").map(String::as_str), Some("🌾"));
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v13 copy first"
+        );
+        // A multi-select works.
+        let generos = db.add_property("base", "Géneros", PropertyKind::MultiSelect)?;
+        let novela = db.add_select_option(
+            &generos,
+            "Novela",
+            silex_desktop::property::OptionColor::Blue,
+        )?;
+        db.set_value(
+            "fila",
+            &generos,
+            Some(&CellValue::MultiSelect(vec![novela.clone()])),
+        )?;
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let broken: i64 =
+            conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })?;
+        assert_eq!(broken, 0);
+        // Foreign keys still point at the rebuilt table: deleting a
+        // property takes its options and values.
+        conn.execute("DELETE FROM db_properties WHERE id = 'estado'", [])?;
+        assert_eq!(count(&tmp.db(), "db_select_options")?, 1);
+        // The CHECK takes the new kinds and nothing else.
+        for kind in ["url", "created", "edited"] {
+            conn.execute(
+                "INSERT INTO db_properties (id, database_id, name, kind, position)
+                 VALUES (?1, 'base', ?1, ?1, 9)",
+                [kind],
+            )?;
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO db_properties (id, database_id, name, kind, position)
+                 VALUES ('f', 'base', 'f', 'formula', 9)",
+                [],
+            )
+            .is_err()
+        );
+        // A cell cannot hold an option of another property.
+        assert!(
+            conn.execute(
+                "INSERT INTO db_multi_values (page_id, property_id, option_id)
+                 VALUES ('fila', ?1, 'leyendo')",
+                [&generos],
+            )
+            .is_err()
+        );
+        // Deleting an option takes it out of every cell.
+        conn.execute("DELETE FROM db_select_options WHERE id = ?1", [&novela])?;
+        assert_eq!(count(&tmp.db(), "db_multi_values")?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v14() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        let base = db.create_database("Lecturas", None)?;
+        let row = db.create_row(&base, "Rayuela")?;
+        let generos = db.add_property(&base, "Géneros", PropertyKind::MultiSelect)?;
+        let novela = db.add_select_option(
+            &generos,
+            "Novela",
+            silex_desktop::property::OptionColor::Blue,
+        )?;
+        db.set_value(
+            &row,
+            &generos,
+            Some(&CellValue::MultiSelect(vec![novela.clone()])),
+        )?;
+        assert_eq!(
+            db.database_values(&base)?[&row][&generos],
+            CellValue::MultiSelect(vec![novela])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v13_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v13_database(&tmp.db())?;
+        // Another tool already made a `db_multi_values` table: 0014 fails
+        // after `db_properties` was rebuilt, so all must roll back.
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE db_multi_values (x);")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 14"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 13);
+        let leftover: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'db_properties_v14')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(!leftover, "new table rolled back");
+        assert_eq!(count(&tmp.db(), "db_values")?, 3, "nothing lost");
+        assert_eq!(count(&tmp.db(), "db_select_options")?, 2);
+        // The old CHECK is still there.
+        assert!(
+            conn.execute(
+                "INSERT INTO db_properties (id, database_id, name, kind, position)
+                 VALUES ('u', 'base', 'u', 'url', 9)",
+                [],
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_orphan_from_an_older_version_does_not_stop_the_upgrade() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v13_database(&tmp.db())?;
+        Connection::open(tmp.db())?.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO blocks (id, page_id, kind) VALUES ('huerfano', 'no-existe', 'paragraph');",
+        )?;
+        let db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        // Foreign keys are on again: a new orphan is refused.
+        assert!(db.create_page("Hija", Some("no-existe")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn v13_backup_restores_into_v14() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v13_database(&old_db)?;
+        let v13_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v13_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(
+            db.database_values("base")?["fila"]["estado"],
+            CellValue::Select("hecho".into())
+        );
+        db.add_property("base", "Géneros", PropertyKind::MultiSelect)?;
         Ok(())
     }
 }

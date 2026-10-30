@@ -38,6 +38,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (11, include_str!("db/migrations/0011_divider_callout.sql")),
     (12, include_str!("db/migrations/0012_toggle.sql")),
     (13, include_str!("db/migrations/0013_page_icon.sql")),
+    (14, include_str!("db/migrations/0014_property_kinds.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -207,6 +208,12 @@ impl Database {
     /// Applies all pending migrations in ONE transaction: the database ends
     /// either fully upgraded or exactly as it was. An existing file database
     /// is backed up (verified copy) before an upgrade.
+    ///
+    /// Foreign keys are off while migrating (ADR 0018, SQLite's procedure for
+    /// changing a table): rebuilding a table that others point at with
+    /// `ON DELETE CASCADE` would otherwise empty them. Before committing, no
+    /// more foreign keys may be broken than before; they are on again after,
+    /// also if something failed.
     fn migrate(&mut self, pre_backup: PreMigrationBackup) -> Result<()> {
         let version: i64 = self
             .conn
@@ -225,12 +232,30 @@ impl Database {
                 "No se pudo crear la copia previa a la actualización; la base no se ha modificado",
             )?;
         }
+        // Has no effect inside a transaction.
+        self.conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let migrated = self.apply_migrations(version);
+        let on = self.conn.pragma_update(None, "foreign_keys", "ON");
+        migrated?;
+        on?;
+        Ok(())
+    }
+
+    /// The migrations after `version`, in one transaction.
+    fn apply_migrations(&mut self, version: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
+        let broken_before = broken_foreign_keys(&tx)?;
         for (target, sql) in MIGRATIONS.iter().filter(|(v, _)| *v > version) {
             tx.execute_batch(sql)
                 .with_context(|| format!("La migración al esquema {target} falló"))?;
             tx.pragma_update(None, "user_version", target)?;
         }
+        let broken = broken_foreign_keys(&tx)?;
+        ensure!(
+            broken <= broken_before,
+            "La actualización del esquema dejaría {} referencias rotas; la base no se ha modificado",
+            broken - broken_before
+        );
         tx.commit()?;
         Ok(())
     }
@@ -1311,7 +1336,7 @@ impl Database {
         Ok(())
     }
 
-    /// Adds an option at the end of a live select property.
+    /// Adds an option at the end of a live select or multi-select property.
     pub fn add_select_option(
         &mut self,
         property_id: &str,
@@ -1328,7 +1353,7 @@ impl Database {
             .optional()?
             .context("La propiedad no existe o está borrada")?;
         ensure!(
-            PropertyKind::parse(&kind) == Some(PropertyKind::Select),
+            PropertyKind::parse(&kind).is_some_and(PropertyKind::has_options),
             "Solo las propiedades de selección tienen opciones"
         );
         let id = Uuid::new_v4().to_string();
@@ -1366,6 +1391,25 @@ impl Database {
                     .insert(r.get(1)?, value);
             }
         }
+        // Multi-selects (ADR 0018), in the order of their options.
+        let multi = read_multi_values(
+            &self.conn,
+            "SELECT m.page_id, m.property_id, m.option_id
+             FROM db_multi_values m
+             JOIN db_properties p ON p.id = m.property_id
+             JOIN db_select_options o ON o.id = m.option_id
+             JOIN pages r ON r.id = m.page_id
+             WHERE p.database_id = ?1 AND p.deleted_at IS NULL AND p.kind = 'multi_select'
+               AND r.parent_id = ?1 AND r.deleted_at IS NULL
+             ORDER BY m.page_id, m.property_id, o.position, o.id",
+            database_id,
+        )?;
+        for ((row, property), ids) in multi {
+            values
+                .entry(row)
+                .or_default()
+                .insert(property, CellValue::MultiSelect(ids));
+        }
         Ok(values)
     }
 
@@ -1388,6 +1432,21 @@ impl Database {
             if let Some(value) = read_cell(r, 1)? {
                 values.insert(r.get(0)?, value);
             }
+        }
+        let multi = read_multi_values(
+            &self.conn,
+            "SELECT m.page_id, m.property_id, m.option_id
+             FROM pages r
+             JOIN db_properties p ON p.database_id = r.parent_id AND p.deleted_at IS NULL
+                                  AND p.kind = 'multi_select'
+             JOIN db_multi_values m ON m.page_id = r.id AND m.property_id = p.id
+             JOIN db_select_options o ON o.id = m.option_id
+             WHERE r.id = ?1 AND r.deleted_at IS NULL
+             ORDER BY m.property_id, o.position, o.id",
+            row_id,
+        )?;
+        for ((_, property), ids) in multi {
+            values.insert(property, CellValue::MultiSelect(ids));
         }
         Ok(values)
     }
@@ -2583,6 +2642,27 @@ fn read_cell(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Option<CellVa
     ))
 }
 
+/// The options of one multi-select cell: (row id, property id) and the
+/// option ids in their order.
+type MultiCell = ((String, String), Vec<String>);
+
+/// The options of multi-select cells read by `sql` (page id, property id,
+/// option id, ordered by cell and then option), by cell.
+fn read_multi_values(conn: &Connection, sql: &str, param: &str) -> Result<Vec<MultiCell>> {
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query([param])?;
+    let mut cells: Vec<MultiCell> = Vec::new();
+    while let Some(r) = rows.next()? {
+        let cell: (String, String) = (r.get(0)?, r.get(1)?);
+        let option: String = r.get(2)?;
+        match cells.last_mut() {
+            Some((last, ids)) if *last == cell => ids.push(option),
+            _ => cells.push((cell, vec![option])),
+        }
+    }
+    Ok(cells)
+}
+
 /// Writes one cell inside `tx` (see [`Database::set_value`] for the rules).
 fn write_value(
     tx: &Connection,
@@ -2617,12 +2697,36 @@ fn write_value(
             kind.label()
         );
     }
+    // A multi-select's options are rows of their own (ADR 0018).
+    tx.execute(
+        "DELETE FROM db_multi_values WHERE page_id = ?1 AND property_id = ?2",
+        params![row_id, property_id],
+    )?;
     match value.filter(|v| !v.is_empty()) {
         None => {
             tx.execute(
                 "DELETE FROM db_values WHERE page_id = ?1 AND property_id = ?2",
                 params![row_id, property_id],
             )?;
+        }
+        Some(CellValue::MultiSelect(ids)) => {
+            tx.execute(
+                "DELETE FROM db_values WHERE page_id = ?1 AND property_id = ?2",
+                params![row_id, property_id],
+            )?;
+            let mut insert = tx.prepare(
+                "INSERT OR IGNORE INTO db_multi_values (page_id, property_id, option_id)
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for id in ids {
+                let belongs: bool = tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM db_select_options WHERE id = ?1 AND property_id = ?2)",
+                    params![id, property_id],
+                    |r| r.get(0),
+                )?;
+                ensure!(belongs, "La opción no es de esta propiedad");
+                insert.execute(params![row_id, property_id, id])?;
+            }
         }
         Some(value) => {
             let (mut text, mut number, mut flag, mut date, mut option) =
@@ -2644,6 +2748,7 @@ fn write_value(
                     ensure!(belongs, "La opción no es de esta propiedad");
                     option = Some(id.as_str());
                 }
+                CellValue::MultiSelect(_) => bail!("La selección múltiple se escribe aparte"),
             }
             tx.execute(
                 "INSERT INTO db_values
@@ -2702,6 +2807,14 @@ fn restore_branch(tx: &Connection, id: &str) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// How many rows break a foreign key (`PRAGMA foreign_key_check`).
+fn broken_foreign_keys(conn: &Connection) -> Result<usize> {
+    let count: i64 = conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+        r.get(0)
+    })?;
+    Ok(usize::try_from(count).unwrap_or(0))
 }
 
 /// Kind of a live page; `None` if it is missing or in the trash.
@@ -3064,6 +3177,17 @@ fn copy_page_tree(
                 date,
                 option.as_ref().map(mapped)
             ],
+        )?;
+    }
+    // A row's multi-select cells (ADR 0018).
+    let chosen: Vec<(String, String)> = tx
+        .prepare("SELECT property_id, option_id FROM db_multi_values WHERE page_id = ?1")?
+        .query_map([from], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (property, option) in &chosen {
+        tx.execute(
+            "INSERT INTO db_multi_values (page_id, property_id, option_id) VALUES (?1, ?2, ?3)",
+            params![id, mapped(property), mapped(option)],
         )?;
     }
     if children {

@@ -162,6 +162,8 @@ impl FilterOp {
             Some(PropertyKind::Checkbox) => &[Checked, Unchecked],
             Some(PropertyKind::Date) => &[Is, Before, After, Empty, NotEmpty],
             Some(PropertyKind::Select) => &[Is, IsNot, Empty, NotEmpty],
+            // One of its options (ADR 0018).
+            Some(PropertyKind::MultiSelect) => &[Contains, NotContains, Empty, NotEmpty],
         }
     }
 
@@ -366,7 +368,7 @@ impl Filter {
             None | Some(PropertyKind::Text) => !self.value.trim().is_empty(),
             Some(PropertyKind::Number) => parse_number(&self.value).is_some(),
             Some(PropertyKind::Date) => Date::parse(&self.value).is_some(),
-            Some(PropertyKind::Select) => properties
+            Some(PropertyKind::Select | PropertyKind::MultiSelect) => properties
                 .iter()
                 .any(|p| p.id == self.property && p.option(&self.value).is_some()),
             Some(PropertyKind::Checkbox) => true,
@@ -441,13 +443,25 @@ impl Filter {
                     _ => true,
                 }
             }
+            Some(PropertyKind::MultiSelect) => {
+                let has = matches!(
+                    subject,
+                    Subject::Value(_, Some(CellValue::MultiSelect(ids))) if ids.contains(&self.value)
+                );
+                match self.op {
+                    Contains => has,
+                    NotContains => !has,
+                    _ => true,
+                }
+            }
             Some(PropertyKind::Checkbox) => true,
         }
     }
 }
 
 /// Orders two cells of the same column, ascending. Text ignores case and
-/// accents; a select goes by the order of its options.
+/// accents; a select goes by the order of its options, and a multi-select
+/// by its first option.
 fn compare(a: Subject<'_>, b: Subject<'_>) -> Ordering {
     if let (Some(x), Some(y)) = (a.text(), b.text()) {
         return fold(x.trim()).cmp(&fold(y.trim())).then_with(|| x.cmp(y));
@@ -462,6 +476,15 @@ fn compare(a: Subject<'_>, b: Subject<'_>) -> Ordering {
         (Some(CellValue::Select(x)), Some(CellValue::Select(y))) => {
             let position = |id: &str| property.options.iter().position(|o| o.id == id);
             position(x).cmp(&position(y))
+        }
+        // By its first option, then the next ones (ADR 0018).
+        (Some(CellValue::MultiSelect(x)), Some(CellValue::MultiSelect(y))) => {
+            let positions = |ids: &[String]| -> Vec<Option<usize>> {
+                ids.iter()
+                    .map(|id| property.options.iter().position(|o| o.id == *id))
+                    .collect()
+            };
+            positions(x).cmp(&positions(y))
         }
         _ => Ordering::Equal,
     }
@@ -1245,5 +1268,76 @@ mod tests {
         assert!(config.is_sorted(&properties));
         config.sorts = vec![sort(NAME)];
         assert!(config.is_sorted(&properties));
+    }
+
+    #[test]
+    fn a_multi_select_filters_by_one_option_and_sorts_by_its_first() {
+        use FilterOp::*;
+        let mut generos = property("generos", PropertyKind::Select);
+        generos.kind = PropertyKind::MultiSelect;
+        let properties = vec![generos];
+        let rows = vec![
+            page("1", "Rayuela"),
+            page("2", "Ficciones"),
+            page("3", "Aleph"),
+            page("4", "Sin géneros"),
+        ];
+        let multi =
+            |ids: &[&str]| CellValue::MultiSelect(ids.iter().map(|i| (*i).into()).collect());
+        let mut values = TableValues::new();
+        for (row, ids) in [
+            ("1", &["leyendo", "leido"][..]),
+            ("2", &["leido"][..]),
+            ("3", &["pendiente", "leido"][..]),
+        ] {
+            values
+                .entry(row.into())
+                .or_default()
+                .insert("generos".into(), multi(ids));
+        }
+        let with = |rules: &[(&str, FilterOp, &str)]| {
+            let config = ViewConfig {
+                filters: rules
+                    .iter()
+                    .map(|(property, op, value)| Filter {
+                        property: (*property).into(),
+                        op: *op,
+                        value: (*value).into(),
+                    })
+                    .collect(),
+                ..ViewConfig::default()
+            };
+            ids(&rows, &visible_rows(&rows, &values, &properties, &config))
+        };
+        assert_eq!(
+            FilterOp::for_kind(Some(PropertyKind::MultiSelect))[0],
+            Contains
+        );
+        assert_eq!(with(&[("generos", Contains, "leido")]), ["1", "2", "3"]);
+        assert_eq!(with(&[("generos", Contains, "leyendo")]), ["1"]);
+        // A row without options contains none of them.
+        assert_eq!(
+            with(&[("generos", NotContains, "leyendo")]),
+            ["2", "3", "4"]
+        );
+        assert_eq!(with(&[("generos", Empty, "")]), ["4"]);
+        assert_eq!(with(&[("generos", NotEmpty, "")]), ["1", "2", "3"]);
+        // An option of no property, or `Is`, does not apply.
+        assert_eq!(with(&[("generos", Contains, "otra")]), ["1", "2", "3", "4"]);
+        assert_eq!(with(&[("generos", Is, "leido")]), ["1", "2", "3", "4"]);
+        // Sorted by the first option (pendiente, leyendo, leido), empty last
+        // either way.
+        let sorted = |direction| {
+            let config = ViewConfig {
+                sorts: vec![Sort {
+                    property: "generos".into(),
+                    direction,
+                }],
+                ..ViewConfig::default()
+            };
+            ids(&rows, &visible_rows(&rows, &values, &properties, &config))
+        };
+        assert_eq!(sorted(Direction::Ascending), ["3", "1", "2", "4"]);
+        assert_eq!(sorted(Direction::Descending), ["2", "1", "3", "4"]);
     }
 }

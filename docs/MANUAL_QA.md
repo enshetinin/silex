@@ -549,3 +549,18 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - En el tablero, arrastra una tarjeta dentro de su columna: una línea indica dónde irá y queda ahí; a otra columna, la columna se ilumina y la tarjeta cambia de valor, como antes. Con un orden activo, soltarla en otro sitio de su columna da el aviso.
 - Manda una fila a la papelera, mueve otras y restáurala: vuelve junto a la fila que tenía delante.
 - Tema oscuro: el asa, la línea y la etiqueta se ven bien. Con VoiceOver, el asa se anuncia «Mover «…»» y no es una parada de Tab.
+
+## 59. Selección múltiple (H13.2)
+- Antes de abrir la versión nueva, haz una copia de un archivo con bases de datos de la versión anterior y ábrelo: se crea la copia previa, y las propiedades, opciones y valores siguen ahí (también las propiedades borradas, para restaurar).
+- En una base, «+» → «Selección múltiple»: una columna con el icono de etiquetas.
+- Clic en una celda: escribe «Novela» e Intro (se crea y queda marcada), escribe «Cuento» e Intro. El menú sigue abierto y la celda enseña las dos etiquetas en el orden de las opciones.
+- Clic en una opción marcada: se quita; en una sin marcar: se añade. Esc o un clic fuera cierran el menú. «Quitar todas» vacía la celda.
+- Cmd/Ctrl+Z deshace cada cambio de uno en uno.
+- Con muchas opciones en una celda estrecha, las que no caben salen como «+N».
+- En el menú de la propiedad, mueve una opción: se mueve en todas las celdas. Bórrala: el aviso dice de cuántas filas se quitará, y las demás opciones de esas celdas siguen.
+- Filtrar → la propiedad → «contiene» / «no contiene» una opción, «está vacío»: se ven las filas correctas. Ordenar por ella: por la primera opción, las vacías al final.
+- Abre una fila como página: la propiedad se edita igual. En el tablero, las tarjetas enseñan sus etiquetas, y «Agrupar» no ofrece la selección múltiple. La tarjeta de la base en una página enseña las etiquetas.
+- Elige varias filas → «Poner valor…» → la propiedad → «Solo «Novela»» o «Quitar todas».
+- Duplica una fila y la base entera: las celdas se copian.
+- Exporta a Markdown y a CSV: «Novela, Cuento» (en el CSV, entre comillas).
+- Tema oscuro y VoiceOver: la celda se anuncia «Géneros, Rayuela: Novela, Cuento» y cada opción del menú dice si está marcada.

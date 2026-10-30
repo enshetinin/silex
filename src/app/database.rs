@@ -174,6 +174,7 @@ fn column_width(kind: PropertyKind) -> f32 {
         PropertyKind::Checkbox => 96.0,
         PropertyKind::Date => 124.0,
         PropertyKind::Select => 150.0,
+        PropertyKind::MultiSelect => 200.0,
     }
 }
 
@@ -914,7 +915,7 @@ impl SilexApp {
                 *option_colors = None;
                 *option_delete = None;
             }
-            let width = if property.kind == PropertyKind::Select {
+            let width = if property.kind.has_options() {
                 280.0
             } else {
                 220.0
@@ -1413,7 +1414,7 @@ impl PropertyMenu<'_> {
         }
         ui.add_space(theme::space::XS);
         menu_caption(ui, &format!("Tipo: {}", property.kind.label()));
-        if property.kind == PropertyKind::Select {
+        if property.kind.has_options() {
             ui.separator();
             self.options(ui, property, actions);
         }
@@ -1471,7 +1472,7 @@ impl PropertyMenu<'_> {
         }
         for (number, option) in (1..).zip(property.options.iter()) {
             if self.option_delete.as_deref() == Some(option.id.as_str()) {
-                self.confirm_delete(ui, option, actions);
+                self.confirm_delete(ui, property.kind, option, actions);
                 continue;
             }
             ui.horizontal(|ui| {
@@ -1540,6 +1541,7 @@ impl PropertyMenu<'_> {
     fn confirm_delete(
         &mut self,
         ui: &mut egui::Ui,
+        kind: PropertyKind,
         option: &SelectOption,
         actions: &mut Vec<TableAction>,
     ) {
@@ -1548,12 +1550,22 @@ impl PropertyMenu<'_> {
             .values
             .values()
             .flat_map(|cells| cells.values())
-            .filter(|v| matches!(v, CellValue::Select(id) if *id == option.id))
+            .filter(|v| match v {
+                CellValue::Select(id) => *id == option.id,
+                CellValue::MultiSelect(ids) => ids.contains(&option.id),
+                _ => false,
+            })
             .count();
+        // A select is emptied; a multi-select keeps its other options.
+        let verb = if kind == PropertyKind::MultiSelect {
+            "Se quitará de"
+        } else {
+            "Se vaciará en"
+        };
         let effect = match uses {
             0 => "Ninguna fila la usa.".to_owned(),
-            1 => "Se vaciará en 1 fila.".to_owned(),
-            n => format!("Se vaciará en {n} filas."),
+            1 => format!("{verb} 1 fila."),
+            n => format!("{verb} {n} filas."),
         };
         menu_caption(ui, &format!("¿Borrar «{}»? {effect}", option.name));
         // The buttons' padding lines their text up with the question.
