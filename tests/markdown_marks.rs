@@ -323,3 +323,45 @@ fn line_breaks_at_the_end_of_a_block_are_left_out() {
     )];
     assert_eq!(body(&blocks), "> [dos](https://a.es)\n");
 }
+
+/// H12.7: what pasted text counts as Markdown.
+#[test]
+fn pasted_text_is_markdown_only_with_markdown_in_it() {
+    use silex_desktop::markdown::looks_like_markdown;
+    for markdown in [
+        "# Título\ntexto",
+        "- uno\n- dos",
+        "1. a\n2. b",
+        "- [ ] tarea",
+        "> una cita",
+        "texto con **negrita**",
+        "un [enlace](https://a.es) aquí",
+        "```\nlet x = 1;\n```",
+        "arriba\n\n---\n\nabajo",
+        "<details>\n<summary>Más</summary>\n\ndentro\n\n</details>",
+    ] {
+        assert!(looks_like_markdown(markdown), "{markdown:?}");
+    }
+    for plain in [
+        "una línea",
+        "hola\nmundo",
+        "párrafo\n\notro párrafo",
+        "    sangrado como código\n    sin valla",
+        "5 * 3 * 2 = 30",
+        "nombre_de_archivo_largo.txt",
+        "<div>html</div>",
+        "Tom &amp; Jerry",
+        "",
+    ] {
+        assert!(!looks_like_markdown(plain), "{plain:?}");
+    }
+}
+
+#[test]
+fn pasted_markdown_keeps_a_first_heading_as_a_block() {
+    use silex_desktop::markdown::markdown_to_blocks;
+    let blocks = markdown_to_blocks("# Título\n\ntexto");
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].kind, BlockKind::Heading1);
+    assert_eq!(blocks[0].content, "Título");
+}

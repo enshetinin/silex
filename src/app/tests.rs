@@ -5981,3 +5981,129 @@ fn a_toggle_becomes_a_subpage_with_it_and_a_used_subpage_stays() -> anyhow::Resu
     assert_eq!(stored_texts(&app, &sub.id)?, ["escrito después"]);
     Ok(())
 }
+
+// ---- Pasting Markdown and copying a page as Markdown (H12.7) ----
+
+#[test]
+fn pasted_markdown_becomes_blocks_in_one_undo_step() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "antes"), (Par, 0, "")], 1, 0)?;
+    app.mark_dirty();
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![paste(
+            "# Receta\n\n- harina **fuerte**\n- [x] agua\n\n> Ojo con el horno",
+        )],
+    );
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        contents(&app),
+        [
+            (Par, 0, "antes".into()),
+            (H1, 0, "Receta".into()),
+            (Bul, 0, "harina fuerte".into()),
+            (BlockKind::Todo, 0, "agua".into()),
+            (BlockKind::Quote, 0, "Ojo con el horno".into()),
+        ]
+    );
+    assert_eq!(marked_words(&app, 2), ["fuerte"]);
+    assert!(app.blocks[3].checked);
+    app.undo();
+    assert_eq!(
+        contents(&app),
+        [(Par, 0, "antes".into()), (Par, 0, String::new())]
+    );
+    Ok(())
+}
+
+#[test]
+fn plain_lines_are_still_pasted_line_by_line() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+    app_frame(&mut app, &ctx, vec![paste("uno\ndos")]);
+    let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(texts, ["uno", "dos"]);
+    Ok(())
+}
+
+#[test]
+fn one_line_of_markdown_is_pasted_with_its_formatting() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "Dice: ")], 0, 6)?;
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![paste("**hola** y [web](https://a.es)")],
+    );
+    assert_eq!(app.blocks[0].content, "Dice: hola y web");
+    let marked: Vec<(String, bool)> = app.blocks[0]
+        .marks
+        .iter()
+        .map(|m| {
+            let text: String = app.blocks[0]
+                .content
+                .chars()
+                .skip(m.start)
+                .take(m.end - m.start)
+                .collect();
+            (text, m.url().is_some())
+        })
+        .collect();
+    assert_eq!(marked, [("hola".into(), false), ("web".into(), true)]);
+    // A heading on one line is pasted as typed.
+    app_frame(&mut app, &ctx, vec![paste(" # no")]);
+    assert!(app.blocks[0].content.ends_with(" # no"));
+    Ok(())
+}
+
+#[test]
+fn cmd_shift_v_pastes_plain_text() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+    // The system answers the request with a paste next frame.
+    app_frame(&mut app, &ctx, vec![key(Key::V, M::COMMAND | M::SHIFT)]);
+    app_frame(&mut app, &ctx, vec![paste("# Título\n- **uno**")]);
+    let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(texts, ["# Título", "- **uno**"]);
+    assert!(
+        app.blocks
+            .iter()
+            .all(|b| b.kind == Par && b.marks.is_empty())
+    );
+    // One line, inside bold: no formatting either.
+    app.blocks[1].marks = vec![bold(0, 9)];
+    app.pending_focus = Some((app.blocks[1].id.clone(), 4));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::V, M::COMMAND | M::SHIFT)]);
+    app_frame(&mut app, &ctx, vec![paste("**x**")]);
+    assert_eq!(app.blocks[1].content, "- ****x**uno**", "inserted as typed");
+    assert_eq!(app.blocks[1].marks, vec![bold(0, 4), bold(9, 14)]);
+    // The next paste is not plain any more.
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![paste("**y**")]);
+    assert!(app.blocks[1].content.contains('y'));
+    assert!(!app.blocks[1].content.contains("**y**"));
+    Ok(())
+}
+
+#[test]
+fn copy_as_markdown_puts_the_page_on_the_clipboard() -> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let (mut app, ctx) = editor_app(&[(H2, 0, "Sección"), (Bul, 0, "punto")], 1, 0)?;
+    app.blocks[1].marks = vec![bold(0, 5)];
+    app.title = "Mi página".into();
+    app.run_command(&ctx, Command::CopyMarkdown)?;
+    let commands = app_frame_commands(&mut app, &ctx, vec![]);
+    let copied: Vec<String> = commands
+        .iter()
+        .filter_map(|c| match c {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(copied, ["# Mi página\n\n## Sección\n\n- **punto**\n"]);
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Markdown"))
+    );
+    Ok(())
+}

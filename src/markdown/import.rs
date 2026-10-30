@@ -55,6 +55,19 @@ enum Open {
 /// - A GitHub alert (`> [!NOTE]`, `> [!TIP]`…) or an Obsidian callout
 ///   (`> [!info]` on a line of its own) becomes callouts (H12.3).
 pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
+    let mut blocks = markdown_to_blocks(source);
+    let title = match blocks.first() {
+        Some(first) if first.kind == BlockKind::Heading1 && first.indent == 0 => {
+            blocks.remove(0).content
+        }
+        _ => fallback_title.to_owned(),
+    };
+    ImportedPage { title, blocks }
+}
+
+/// The blocks of some Markdown, as [`markdown_to_page`] reads them, but a
+/// first `# Title` stays a block (pasting, H12.7).
+pub fn markdown_to_blocks(source: &str) -> Vec<NewBlock> {
     let source = source.trim_start_matches('\u{feff}');
     let mut blocks: Vec<NewBlock> = Vec::new();
     let mut lists: Vec<bool> = Vec::new(); // ordered?
@@ -350,13 +363,21 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
         }
     }
 
-    let title = match blocks.first() {
-        Some(first) if first.kind == BlockKind::Heading1 && first.indent == 0 => {
-            blocks.remove(0).content
-        }
-        _ => fallback_title.to_owned(),
-    };
-    ImportedPage { title, blocks }
+    blocks
+}
+
+/// Whether pasted text is written in Markdown (H12.7): read as Markdown,
+/// it has something other than plain paragraphs (headings, lists, quotes,
+/// dividers, toggles, fenced code) or inline formatting. Plain lines and
+/// blank lines are not Markdown; nor text indented with spaces, which
+/// Markdown would read as code, unless it has a ``` or ~~~ fence.
+pub fn looks_like_markdown(text: &str) -> bool {
+    let fenced = text.contains("```") || text.contains("~~~");
+    markdown_to_blocks(text).iter().any(|b| match b.kind {
+        BlockKind::Paragraph => !b.marks.is_empty(),
+        BlockKind::Code => fenced,
+        _ => true,
+    })
 }
 
 /// An Obsidian callout marker (`[!info]`, `[!warning]`…) on the first

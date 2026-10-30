@@ -475,3 +475,13 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - En una plantilla, «Convertir en subpágina» no aparece en la paleta, y desde el menú un aviso dice que una plantilla no puede tener subpáginas.
 - «Mover a…» con un bloque sangrado: llega al borde izquierdo de la otra página; al deshacer vuelve con su sangría.
 - Manda a la papelera una página con un título larguísimo (pega un texto muy largo como título) y abre la papelera: el diálogo cabe en la ventana, el título sale recortado con «…» (entero al pasar el ratón) y los botones se ven y funcionan, también «Vaciar la papelera» y su confirmación. Prueba también con la ventana estrecha.
+
+## 52. Pegar Markdown y copiar como Markdown (H12.7)
+- Copia de un README de GitHub (o de un `.md` en otro editor) unas líneas con un título, una lista, una tarea, una cita y un bloque de código entre ```, y pégalas en un párrafo vacío: salen como bloques de esos tipos, con negrita y enlaces. Un Cmd/Ctrl+Z lo quita todo.
+- Pega dos líneas normales sin Markdown: un bloque por línea, como siempre. Un texto sangrado con espacios (un poema, código sin valla) también se pega tal cual.
+- Pega en medio de un párrafo «**hola** y [web](https://ejemplo.com)»: entra «hola y web» con «hola» en negrita y «web» como enlace.
+- Cmd/Ctrl+Mayús+V con el mismo texto: entra tal cual, con los asteriscos y corchetes, y sin la negrita del texto de alrededor. Con varias líneas, una por bloque y sin interpretar.
+- Copia bloques dentro de Silex y pégalos: siguen saliendo con su formato exacto.
+- Pegado dentro de un bloque de código: el texto entra tal cual.
+- «…» de la página → «Copiar como Markdown» (o Cmd/Ctrl+K «Copiar la página como Markdown») y pega en otro editor: la página con su título, con formato, listas, avisos y desplegables en Markdown. Pegado otra vez en Silex, vuelve como bloques.
+- «Atajos de teclado» lista Cmd/Ctrl+Mayús+V.

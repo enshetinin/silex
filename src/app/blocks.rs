@@ -951,6 +951,19 @@ pub(super) fn ime_composing_after(ctx: &egui::Context, mut composing: bool) -> b
     composing
 }
 
+/// One pasted line written in Markdown with inline formatting (H12.7): its
+/// text without the syntax, and the formatting. `None` if it has none (or
+/// is a heading, a list item… on one line: those stay as typed).
+fn inline_markdown(text: &str) -> Option<(String, Vec<silex_desktop::marks::Mark>)> {
+    let blocks = silex_desktop::markdown::markdown_to_blocks(text);
+    match blocks.as_slice() {
+        [block] if block.kind == BlockKind::Paragraph && !block.marks.is_empty() => {
+            Some((block.content.clone(), block.marks.clone()))
+        }
+        _ => None,
+    }
+}
+
 /// Takes Cmd/Ctrl+B, I, E or Shift+X from this frame's input, if pressed.
 fn take_format_shortcut(ctx: &egui::Context) -> Option<Format> {
     use egui::{Key, KeyboardShortcut, Modifiers as M};
@@ -1021,28 +1034,62 @@ impl SilexApp {
             self.pending_key = Some((EditorKey::Format(format), block.id.clone()));
             return;
         }
-        // Text copied in Silex keeps its formatting when pasted on one
-        // line (ADR 0015); the field inserts it, the editor applies it.
+        // Cmd+Mayús+V (H12.7): asks the system for the clipboard; that
+        // paste comes next frame and is plain text.
+        if focused
+            && block.kind.is_text()
+            && ctx.input_mut(|i| {
+                i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::V,
+                ))
+            })
+        {
+            self.plain_paste = Some(3);
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            return;
+        }
+        // A paste on one line: the field inserts it, the editor gives it
+        // its formatting. Plain (Cmd+Mayús+V): none. Copied in Silex: its
+        // own (ADR 0015). Markdown with inline formatting (H12.7): the
+        // text without the syntax, with that formatting.
         if focused
             && block.kind.takes_marks()
-            && let Some(clip) = &self.clip
             && let Some(text) = ctx.input(|i| {
                 i.events.iter().find_map(|e| match e {
                     egui::Event::Paste(text) if !text.contains(['\n', '\r']) => Some(text.clone()),
                     _ => None,
                 })
             })
-            && let Some(marks) = clip.marks_for(&text)
         {
-            let start = egui::text_edit::TextEditState::load(ctx, self.block_field_id(&block.id))
-                .and_then(|s| s.cursor.char_range())
-                .map_or(caret.char, |r| r.primary.index.0.min(r.secondary.index.0));
-            self.paste_marks = Some((
-                block.id.clone(),
-                start,
-                text.chars().count(),
-                marks.to_vec(),
-            ));
+            let plain = self.plain_paste.take().is_some();
+            let pasted = if plain {
+                Some((text.clone(), Vec::new()))
+            } else if let Some(marks) = self.clip.as_ref().and_then(|c| c.marks_for(&text)) {
+                Some((text.clone(), marks.to_vec()))
+            } else {
+                inline_markdown(&text)
+            };
+            if let Some((plain_text, marks)) = pasted {
+                if plain_text != text {
+                    // The field inserts the text without the Markdown.
+                    ctx.input_mut(|i| {
+                        for event in &mut i.events {
+                            if let egui::Event::Paste(t) = event
+                                && *t == text
+                            {
+                                *t = plain_text.clone();
+                            }
+                        }
+                    });
+                }
+                let start =
+                    egui::text_edit::TextEditState::load(ctx, self.block_field_id(&block.id))
+                        .and_then(|s| s.cursor.char_range())
+                        .map_or(caret.char, |r| r.primary.index.0.min(r.secondary.index.0));
+                self.paste_marks =
+                    Some((block.id.clone(), start, plain_text.chars().count(), marks));
+            }
         }
         // Cmd+Intro opens the link the cursor is in (H12.1d).
         if focused
@@ -1088,7 +1135,8 @@ impl SilexApp {
                 _ => false,
             });
             if let Some(text) = pasted {
-                self.pending_paste = Some((block.id.clone(), text));
+                let plain = self.plain_paste.take().is_some();
+                self.pending_paste = Some((block.id.clone(), text, plain));
                 self.slash = None;
                 return;
             }
@@ -1156,7 +1204,7 @@ impl SilexApp {
     /// typed earlier in the same frame (so the cursor position is current).
     /// Runs a multi-line paste taken this frame, at the current cursor.
     pub(super) fn run_paste(&mut self, ctx: &egui::Context) {
-        let Some((block_id, text)) = self.pending_paste.take() else {
+        let Some((block_id, text, plain)) = self.pending_paste.take() else {
             return;
         };
         let Some(index) = self.blocks.iter().position(|b| b.id == block_id) else {
@@ -1165,17 +1213,23 @@ impl SilexApp {
         let cursor = egui::text_edit::TextEditState::load(ctx, self.block_field_id(&block_id))
             .and_then(|s| s.cursor.char_range())
             .map_or(0, |r| r.primary.index.0);
-        // Text copied in Silex brings back its formatting (ADR 0015) and
-        // the indent of plain lines (ADR 0016).
-        let marks = self
+        // Plain (Cmd+Mayús+V): line by line, as typed. Copied in Silex: its
+        // formatting (ADR 0015) and the indent of plain lines (ADR 0016).
+        // Markdown: its blocks (H12.7). Otherwise line by line.
+        let copied = self
             .clip
             .as_ref()
             .and_then(|clip| clip.marks_for(&text))
-            .map(<[_]>::to_vec);
+            .map(<[_]>::to_vec)
+            .filter(|_| !plain);
         let new_id = || uuid::Uuid::new_v4().to_string();
-        let caret = match marks {
+        let caret = match copied {
             Some(marks) => {
                 editor::paste_lines_marked(&mut self.blocks, index, cursor, &text, &marks, new_id)
+            }
+            None if !plain && silex_desktop::markdown::looks_like_markdown(&text) => {
+                let pasted = silex_desktop::markdown::markdown_to_blocks(&text);
+                editor::paste_blocks(&mut self.blocks, index, cursor, pasted, new_id)
             }
             None => editor::paste_lines(&mut self.blocks, index, cursor, &text, new_id),
         };
@@ -1774,6 +1828,20 @@ impl SilexApp {
         self.pending_focus = Some((inside.id.clone(), 0));
         self.blocks.insert(index + 1, inside);
         self.mark_dirty();
+    }
+
+    /// «Copiar como Markdown» (H12.7): the open page, title included, as
+    /// its Markdown export writes it (links to pages and files as their
+    /// names), on the clipboard.
+    pub(super) fn copy_page_as_markdown(&mut self, ctx: &egui::Context) {
+        if self.selected.is_none() || self.database.is_some() {
+            return;
+        }
+        let markdown = silex_desktop::markdown::page_to_markdown(&self.title, &self.blocks);
+        ctx.copy_text(markdown);
+        // Pasted back in Silex, it is Markdown, not this page's own copy.
+        self.clip = None;
+        self.notice = Some("Página copiada como Markdown.".into());
     }
 
     /// Copying or cutting text selected in a block remembers it with its
@@ -2536,6 +2604,15 @@ impl SilexApp {
                         extra = Some("history");
                         ui.close();
                     }
+                    // The page as Markdown, to paste anywhere (H12.7).
+                    if self.database.is_none()
+                        && ui
+                            .button((icons::icon(icons::COPY), " Copiar como Markdown"))
+                            .clicked()
+                    {
+                        extra = Some("copy_markdown");
+                        ui.close();
+                    }
                     if ui
                         .button((icons::icon(icons::EXPORT), " Exportar a Markdown"))
                         .clicked()
@@ -2606,6 +2683,7 @@ impl SilexApp {
                 self.report(result);
             }
             Some("outline") => self.toggle_outline(&ui.ctx().clone()),
+            Some("copy_markdown") => self.copy_page_as_markdown(ui.ctx()),
             _ => {}
         }
         if let Some(action) = action {

@@ -176,7 +176,12 @@ pub struct SilexApp {
     /// The find bar of the open page (H11.7).
     find: Option<FindBar>,
     /// Multi-line paste taken this frame (block id, text), run after layout.
-    pending_paste: Option<(String, String)>,
+    /// A paste of several lines taken this frame: block id, text, and
+    /// whether it is plain (Cmd+Mayús+V, H12.7).
+    pending_paste: Option<(String, String, bool)>,
+    /// Cmd+Mayús+V (H12.7): the next paste, asked for from the system, is
+    /// plain text. Frames left to wait for it.
+    plain_paste: Option<u8>,
     /// Last exported file, offered with "Abrir carpeta".
     last_export: Option<PathBuf>,
     /// Markdown files being read on a worker thread.
@@ -346,6 +351,7 @@ impl SilexApp {
             pending_anchor: None,
             find: None,
             pending_paste: None,
+            plain_paste: None,
             last_export: None,
             import_job: None,
             export_job: None,
@@ -946,6 +952,8 @@ impl SilexApp {
         ui.painter()
             .rect_filled(ctx.content_rect(), 0.0, theme::current(&ctx).bg);
         self.handle_shortcuts(&ctx);
+        // Cmd+Mayús+V waits a couple of frames for its paste, no more.
+        self.plain_paste = self.plain_paste.and_then(|n| n.checked_sub(1));
         self.remember_copy(&ctx);
         self.handle_dropped_files(&ctx);
         // The search window has the keyboard while it is open.

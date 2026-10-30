@@ -1227,3 +1227,54 @@ mod outline {
         assert!(outline(&[b("p", Paragraph, 0, "nada")]).is_empty());
     }
 }
+
+/// H12.7: pasting the blocks of some Markdown.
+mod paste_markdown {
+    use super::*;
+    use silex_desktop::editor::paste_blocks;
+    use silex_desktop::markdown::markdown_to_blocks;
+
+    fn ids() -> impl FnMut() -> String {
+        let mut n = 0;
+        move || {
+            n += 1;
+            format!("n{n}")
+        }
+    }
+
+    #[test]
+    fn into_an_empty_block_the_first_one_gives_its_kind() {
+        let mut blocks = vec![b("a", Paragraph, 0, "")];
+        let pasted = markdown_to_blocks("## Lista\n\n- **uno**\n  - dos\n\nfin");
+        let caret = paste_blocks(&mut blocks, 0, 0, pasted, ids());
+        let got: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.indent, b.content.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (BlockKind::Heading2, 0, "Lista"),
+                (Bulleted, 0, "uno"),
+                (Bulleted, 1, "dos"),
+                (Paragraph, 0, "fin"),
+            ]
+        );
+        assert_eq!(blocks[1].marks.len(), 1, "bold kept");
+        assert_eq!(caret, Some(Caret { block: 3, char: 3 }));
+    }
+
+    #[test]
+    fn in_the_middle_of_text_the_text_around_stays() {
+        let mut blocks = vec![b("a", Paragraph, 1, "antes|después")];
+        paste_blocks(&mut blocks, 0, 6, markdown_to_blocks("uno\n\n- dos"), ids());
+        let got: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.indent, b.content.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [(Paragraph, 1, "antes|uno"), (Bulleted, 1, "dosdespués")]
+        );
+    }
+}

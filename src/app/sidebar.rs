@@ -968,6 +968,7 @@ impl SilexApp {
                         format!("{cmd}+Intro en un desplegable"),
                         "Plegar o desplegar",
                     ),
+                    (format!("{cmd}+Mayús+V"), "Pegar como texto plano"),
                     (
                         "Arrastrar el asa".to_owned(),
                         "Mover el bloque (Esc cancela)",

@@ -1080,11 +1080,11 @@ fn paste(
     text: &str,
     pasted: &[marks::Mark],
     copied: bool,
-    mut new_id: impl FnMut() -> String,
+    new_id: impl FnMut() -> String,
 ) -> Option<Caret> {
     let text = normalize_pasted(text);
     let mut at = 0;
-    let mut lines: Vec<(PastedLine, Vec<marks::Mark>)> = text
+    let lines: Vec<(PastedLine, Vec<marks::Mark>)> = text
         .split('\n')
         .map(|raw| {
             let line = parse_line(raw, copied);
@@ -1096,6 +1096,44 @@ fn paste(
             (line, line_marks)
         })
         .collect();
+    paste_parsed(blocks, index, cursor, lines, new_id)
+}
+
+/// Pastes Markdown at `cursor` in block `index` (H12.7): its blocks, read
+/// by [`crate::markdown::markdown_to_blocks`], go in as copied lines do
+/// (the first joins the text before the cursor, the text after it ends up
+/// after the last one), with their formatting.
+pub fn paste_blocks(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    cursor: usize,
+    pasted: Vec<crate::model::NewBlock>,
+    new_id: impl FnMut() -> String,
+) -> Option<Caret> {
+    let lines = pasted
+        .into_iter()
+        .map(|b| {
+            let line = PastedLine {
+                kind: b.kind,
+                indent: b.indent,
+                checked: b.checked,
+                content: b.content,
+            };
+            (line, b.marks)
+        })
+        .collect();
+    paste_parsed(blocks, index, cursor, lines, new_id)
+}
+
+/// Puts pasted lines, each with its formatting, at `cursor` in block
+/// `index`.
+fn paste_parsed(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    cursor: usize,
+    mut lines: Vec<(PastedLine, Vec<marks::Mark>)>,
+    mut new_id: impl FnMut() -> String,
+) -> Option<Caret> {
     let block = blocks.get_mut(index)?;
     // A divider never takes text (H12.2): one pasted after some text goes
     // on a line of its own.
