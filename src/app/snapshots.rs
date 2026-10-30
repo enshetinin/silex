@@ -3527,3 +3527,27 @@ fn toggle_arrows_are_named_and_fold_with_a_click() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// H12.4b: dragging a folded toggle by its handle takes what it hides.
+#[test]
+fn a_dragged_toggle_takes_its_content() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(toggles_app()?);
+    let below =
+        block_rect(&harness, "Fuera de los desplegables.").center_bottom() + egui::vec2(0.0, 6.0);
+    start_drag(&mut harness, "Plegado: esconde lo que tiene", below);
+    harness.drop_at(below);
+    harness.run();
+    let ids: Vec<String> = harness
+        .state()
+        .blocks
+        .iter()
+        .map(|b| b.id.clone())
+        .collect();
+    assert_eq!(
+        ids,
+        ["b0", "b1", "b2", "b3", "b4", "b7", "b8", "b5", "b6"],
+        "the toggle and the paragraph it hides, at the end"
+    );
+    assert!(harness.state().folds.is_folded("b5"), "still folded");
+    Ok(())
+}

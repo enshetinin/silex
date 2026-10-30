@@ -1155,17 +1155,20 @@ impl SilexApp {
         let cursor = egui::text_edit::TextEditState::load(ctx, self.block_field_id(&block_id))
             .and_then(|s| s.cursor.char_range())
             .map_or(0, |r| r.primary.index.0);
-        // Text copied in Silex brings back its formatting (ADR 0015).
+        // Text copied in Silex brings back its formatting (ADR 0015) and
+        // the indent of plain lines (ADR 0016).
         let marks = self
             .clip
             .as_ref()
             .and_then(|clip| clip.marks_for(&text))
-            .map(<[_]>::to_vec)
-            .unwrap_or_default();
-        let caret =
-            editor::paste_lines_marked(&mut self.blocks, index, cursor, &text, &marks, || {
-                uuid::Uuid::new_v4().to_string()
-            });
+            .map(<[_]>::to_vec);
+        let new_id = || uuid::Uuid::new_v4().to_string();
+        let caret = match marks {
+            Some(marks) => {
+                editor::paste_lines_marked(&mut self.blocks, index, cursor, &text, &marks, new_id)
+            }
+            None => editor::paste_lines(&mut self.blocks, index, cursor, &text, new_id),
+        };
         self.mark_dirty();
         if let Some(caret) = caret
             && let Some(target) = self.blocks.get(caret.block)
@@ -1280,7 +1283,8 @@ impl SilexApp {
             EditorKey::Delete => editor::delete_at_end(&mut self.blocks, index),
             EditorKey::Indent | EditorKey::Outdent => {
                 let delta = if command == EditorKey::Indent { 1 } else { -1 };
-                editor::change_indent(&mut self.blocks, index, delta);
+                // A toggle takes its content along (ADR 0016).
+                editor::change_indent_with_content(&mut self.blocks, index, delta);
                 Some(editor::Caret {
                     block: index,
                     char: cursor,
@@ -1338,20 +1342,25 @@ impl SilexApp {
             }
             EditorKey::MoveUp | EditorKey::MoveDown => {
                 let up = command == EditorKey::MoveUp;
-                editor::move_range(&mut self.blocks, index, index, up).then(|| editor::Caret {
-                    block: if up { index - 1 } else { index + 1 },
-                    char: cursor,
+                editor::move_with_content(&mut self.blocks, index, index, up).map(|(first, _)| {
+                    editor::Caret {
+                        block: first,
+                        char: cursor,
+                    }
                 })
             }
             // Run above, before the cursor logic.
             EditorKey::Format(_) | EditorKey::FormatBlock(_) | EditorKey::LinkBlock => None,
-            EditorKey::Duplicate => editor::duplicate_range(&mut self.blocks, index, index, || {
-                uuid::Uuid::new_v4().to_string()
-            })
-            .map(|(copy, _)| editor::Caret {
-                block: copy,
-                char: cursor,
-            }),
+            EditorKey::Duplicate => {
+                let last = editor::with_content(&self.blocks, index, index);
+                editor::duplicate_range(&mut self.blocks, index, last, || {
+                    uuid::Uuid::new_v4().to_string()
+                })
+                .map(|(copy, _)| editor::Caret {
+                    block: copy,
+                    char: cursor,
+                })
+            }
         };
         if !matches!(command, EditorKey::Up | EditorKey::Down) {
             // One undo step per command (egui's per-field undo is not used, ADR 0004).
@@ -1387,7 +1396,7 @@ impl SilexApp {
         let (first, last) = self
             .selection_range()
             .filter(|(a, b)| (*a..=*b).contains(&index))
-            .unwrap_or((index, index));
+            .unwrap_or((index, editor::with_content(&self.blocks, index, index)));
         let pointer = ctx.pointer_interact_pos()?;
         let page = ui.clip_rect();
         // Scroll when near the top or bottom of the page.
@@ -1480,7 +1489,9 @@ impl SilexApp {
         let sel = self.selection.as_ref()?;
         let a = self.blocks.iter().position(|b| b.id == sel.anchor)?;
         let h = self.blocks.iter().position(|b| b.id == sel.head)?;
-        Some((a.min(h), a.max(h)))
+        // A selected toggle includes its content (ADR 0016).
+        let (first, last) = (a.min(h), a.max(h));
+        Some((first, editor::with_content(&self.blocks, first, last)))
     }
 
     /// Keys while blocks are selected (no text field has focus):
@@ -1527,11 +1538,11 @@ impl SilexApp {
                 });
             }
         } else if step(Key::ArrowUp, M::ALT | M::SHIFT) {
-            if editor::move_range(&mut self.blocks, first, last, true) {
+            if editor::move_with_content(&mut self.blocks, first, last, true).is_some() {
                 self.mark_dirty();
             }
         } else if step(Key::ArrowDown, M::ALT | M::SHIFT) {
-            if editor::move_range(&mut self.blocks, first, last, false) {
+            if editor::move_with_content(&mut self.blocks, first, last, false).is_some() {
                 self.mark_dirty();
             }
         } else if ctx
@@ -1568,6 +1579,8 @@ impl SilexApp {
     }
 
     pub(super) fn delete_selection(&mut self, first: usize, last: usize) {
+        // A toggle goes with its content (ADR 0016).
+        let last = editor::with_content(&self.blocks, first, last);
         let deleted = editor::delete_range(&mut self.blocks, first, last);
         if deleted.removed.is_empty() {
             return;
@@ -1856,10 +1869,15 @@ impl SilexApp {
                 }
                 changed
             }
-            BlockAction::MoveUp => editor::move_range(&mut self.blocks, index, index, true),
-            BlockAction::MoveDown => editor::move_range(&mut self.blocks, index, index, false),
+            BlockAction::MoveUp => {
+                editor::move_with_content(&mut self.blocks, index, index, true).is_some()
+            }
+            BlockAction::MoveDown => {
+                editor::move_with_content(&mut self.blocks, index, index, false).is_some()
+            }
             BlockAction::Duplicate => {
-                editor::duplicate_range(&mut self.blocks, index, index, || {
+                let last = editor::with_content(&self.blocks, index, index);
+                editor::duplicate_range(&mut self.blocks, index, last, || {
                     uuid::Uuid::new_v4().to_string()
                 })
                 .is_some()

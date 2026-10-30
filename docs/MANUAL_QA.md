@@ -431,4 +431,12 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Con uno plegado, Retroceso al inicio del párrafo de debajo lo despliega (no une el texto con nada oculto). «Buscar en la página» una palabra que está dentro: se despliega al mostrarla.
 - Un desplegable vacío y abierto muestra «Desplegable vacío: haz clic para escribir dentro»; el clic crea un bloque dentro.
 - Con VoiceOver, la flecha se anuncia como «Plegar «título»» o «Desplegar «título»».
-- Pendiente para H12.4b: mover, duplicar, arrastrar o borrar un desplegable todavía no lleva su contenido.
+
+## 47. Desplegable con su contenido (H12.4b, ADR 0016)
+- Esc sobre un desplegable abierto: se seleccionan él y su contenido. Copia (Cmd/Ctrl+C) y pega en un párrafo vacío de otra página: vuelve el desplegable con su contenido y sangría. Pegado en otra app, es texto con «▸ » y espacios.
+- Alt+Mayús+↓ sobre el bloque de encima de un desplegable: lo pasa entero, no entra en él. Sobre el desplegable: se mueve con todo lo que tiene, plegado o no.
+- Cmd/Ctrl+D o «…» → «Duplicar» en un desplegable: la copia lleva el contenido y empieza abierta.
+- «…» → «Eliminar» en un desplegable plegado: se va con su contenido; el aviso dice cuántos bloques, y Cmd/Ctrl+Z los devuelve.
+- Arrastra un desplegable plegado por su asa: lo oculto va con él y sigue plegado.
+- Tab en el título de un desplegable (con un bloque encima): él y su contenido se sangran un nivel. Mayús+Tab los saca.
+- Retroceso al inicio del título lo vuelve párrafo y su contenido se queda donde está.

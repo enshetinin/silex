@@ -5495,3 +5495,137 @@ fn an_empty_toggle_offers_to_write_inside_it() -> anyhow::Result<()> {
     assert!(!painted.iter().any(|t| t.starts_with("Desplegable vacío")));
     Ok(())
 }
+
+// ---- Toggles with their content (H12.4b, ADR 0016) ----
+
+fn ids_and_indents(app: &SilexApp) -> Vec<(String, u8)> {
+    app.blocks
+        .iter()
+        .map(|b| (b.content.clone(), b.indent))
+        .collect()
+}
+
+#[test]
+fn deleting_a_folded_toggle_takes_its_content_and_undo_brings_it_back() -> anyhow::Result<()> {
+    let (mut app, ctx) = toggle_app(3, 0)?;
+    let toggle = app.blocks[0].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    app_frame(&mut app, &ctx, vec![]);
+    app.block_action(BlockAction::Delete, &toggle);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(contents(&app), [(Par, 0, "después".into())]);
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("3 bloque"))
+    );
+    app.undo();
+    assert_eq!(app.blocks.len(), 4);
+    assert_eq!(app.blocks[1].content, "oculto uno");
+    Ok(())
+}
+
+#[test]
+fn duplicating_a_toggle_copies_its_content_open() -> anyhow::Result<()> {
+    let (mut app, ctx) = toggle_app(0, 0)?;
+    let toggle = app.blocks[0].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    app_frame(&mut app, &ctx, vec![key(Key::D, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let got = ids_and_indents(&app);
+    assert_eq!(got.len(), 7);
+    assert_eq!(got[3..6], got[0..3], "the copy, content included");
+    assert_eq!(focused_block(&app, &ctx), Some(3));
+    assert!(
+        !app.folds.is_folded(&app.blocks[3].id),
+        "a copy starts open"
+    );
+    Ok(())
+}
+
+#[test]
+fn moving_passes_a_toggle_whole_and_moves_it_with_its_content() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (Par, 0, "arriba"),
+            (TOG, 0, "Detalles"),
+            (Par, 1, "dentro"),
+            (Par, 0, "abajo"),
+        ],
+        0,
+        0,
+    )?;
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::ALT | M::SHIFT)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let order: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(order, ["Detalles", "dentro", "arriba", "abajo"]);
+    assert_eq!(focused_block(&app, &ctx), Some(2));
+    // The toggle itself, down past «arriba» and «abajo», one step each.
+    focus_at(&mut app, &ctx, 0, 0);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::ALT | M::SHIFT)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let order: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(order, ["arriba", "Detalles", "dentro", "abajo"]);
+    // One undo step each.
+    app.undo();
+    let order: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(order, ["Detalles", "dentro", "arriba", "abajo"]);
+    Ok(())
+}
+
+#[test]
+fn tab_on_a_toggle_indents_its_content_too() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[(Par, 0, "antes"), (TOG, 0, "Detalles"), (Par, 1, "dentro")],
+        1,
+        0,
+    )?;
+    app_frame(&mut app, &ctx, vec![key(Key::Tab, M::NONE)]);
+    let indents: Vec<u8> = app.blocks.iter().map(|b| b.indent).collect();
+    assert_eq!(indents, [0, 1, 2]);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Tab, M::SHIFT)]);
+    let indents: Vec<u8> = app.blocks.iter().map(|b| b.indent).collect();
+    assert_eq!(indents, [0, 0, 1]);
+    Ok(())
+}
+
+#[test]
+fn a_selected_toggle_is_copied_and_pasted_with_its_content() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (TOG, 0, "Detalles"),
+            (Par, 1, "dentro"),
+            (Bul, 1, "punto"),
+            (Par, 0, ""),
+        ],
+        0,
+        0,
+    )?;
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        app.selection_range(),
+        Some((0, 2)),
+        "its content is selected too"
+    );
+    app_frame(&mut app, &ctx, vec![egui::Event::Copy]);
+    let copied = app
+        .clip
+        .as_ref()
+        .map(|c| c.text.clone())
+        .unwrap_or_default();
+    assert_eq!(copied, "▸ Detalles\n  dentro\n  • punto");
+    app.selection = None;
+    focus_at(&mut app, &ctx, 3, 0);
+    app_frame(&mut app, &ctx, vec![paste(&copied)]);
+    assert_eq!(
+        contents(&app)[3..],
+        [
+            (TOG, 0, "Detalles".into()),
+            (Par, 1, "dentro".into()),
+            (Bul, 1, "punto".into()),
+        ]
+    );
+    Ok(())
+}

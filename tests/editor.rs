@@ -1072,3 +1072,123 @@ mod toggles {
         assert_eq!(summary(&blocks)[1], ("nuevo", Bulleted, 0, "b"));
     }
 }
+
+/// H12.4b: a toggle moves, copies, indents and goes with its content
+/// (ADR 0016).
+mod toggle_content {
+    use super::*;
+    use BlockKind::Toggle;
+    use silex_desktop::editor::{
+        change_indent_with_content, move_with_content, paste_lines, paste_lines_marked,
+        selection_text, with_content,
+    };
+
+    /// x ; T (0) > [a, U (1) > [b]] ; y
+    fn doc() -> Vec<Block> {
+        vec![
+            b("x", Paragraph, 0, "x"),
+            b("T", Toggle, 0, "T"),
+            b("a", Paragraph, 1, "a"),
+            b("U", Toggle, 1, "U"),
+            b("b", Paragraph, 2, "b"),
+            b("y", Paragraph, 0, "y"),
+        ]
+    }
+
+    fn ids(blocks: &[Block]) -> Vec<&str> {
+        blocks.iter().map(|b| b.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_range_with_toggles_takes_their_content() {
+        let blocks = doc();
+        assert_eq!(with_content(&blocks, 0, 0), 0);
+        assert_eq!(with_content(&blocks, 1, 1), 4);
+        assert_eq!(with_content(&blocks, 3, 3), 4);
+        assert_eq!(with_content(&blocks, 0, 2), 4, "a toggle in the range");
+        assert_eq!(with_content(&blocks, 2, 2), 2, "no toggle in the range");
+        assert_eq!(with_content(&blocks, 5, 9), 9, "past the end is kept");
+    }
+
+    #[test]
+    fn moving_takes_the_content_and_passes_toggles_whole() {
+        // The toggle down: past «y», with everything inside.
+        let mut blocks = doc();
+        assert_eq!(move_with_content(&mut blocks, 1, 1, false), Some((2, 5)));
+        assert_eq!(ids(&blocks), ["x", "y", "T", "a", "U", "b"]);
+        // «x» down: past the whole toggle, not into it.
+        let mut blocks = doc();
+        assert_eq!(move_with_content(&mut blocks, 0, 0, false), Some((4, 4)));
+        assert_eq!(ids(&blocks), ["T", "a", "U", "b", "x", "y"]);
+        // «y» up: the same, above the toggle.
+        let mut blocks = doc();
+        assert_eq!(move_with_content(&mut blocks, 5, 5, true), Some((1, 1)));
+        assert_eq!(ids(&blocks), ["x", "y", "T", "a", "U", "b"]);
+        // Inside: «a» down passes the inner toggle whole, and stays inside.
+        let mut blocks = doc();
+        assert_eq!(move_with_content(&mut blocks, 2, 2, false), Some((4, 4)));
+        assert_eq!(ids(&blocks), ["x", "T", "U", "b", "a", "y"]);
+        // Edges.
+        let mut blocks = doc();
+        assert_eq!(move_with_content(&mut blocks, 0, 0, true), None);
+        assert_eq!(
+            move_with_content(&mut blocks, 1, 1, false).map(|_| ()),
+            Some(())
+        );
+        assert_eq!(
+            move_with_content(&mut blocks, 2, 2, false),
+            None,
+            "already last"
+        );
+    }
+
+    #[test]
+    fn indenting_a_toggle_takes_its_content() {
+        let mut blocks = doc();
+        assert!(change_indent_with_content(&mut blocks, 1, 1));
+        let indents: Vec<u8> = blocks.iter().map(|b| b.indent).collect();
+        assert_eq!(indents, [0, 1, 2, 2, 3, 0]);
+        assert!(change_indent_with_content(&mut blocks, 1, -1));
+        assert_eq!(blocks, doc());
+        // Not past the deepest level.
+        let mut deep = vec![
+            b("p", Paragraph, 0, "p"),
+            b("T", Toggle, 0, "T"),
+            b("c", Paragraph, MAX_INDENT, "c"),
+        ];
+        assert!(!change_indent_with_content(&mut deep, 1, 1));
+        assert_eq!(deep[1].indent, 0);
+        // Other blocks: as before, alone.
+        let mut blocks = doc();
+        assert!(change_indent_with_content(&mut blocks, 5, 1));
+        assert_eq!(blocks[5].indent, 1);
+    }
+
+    #[test]
+    fn a_copied_toggle_is_pasted_back_with_its_content() {
+        let original = doc();
+        let copied = selection_text(&original, 1, with_content(&original, 1, 1));
+        assert_eq!(copied, "▸ T\n  a\n  ▸ U\n    b");
+        // Copied in Silex: indented lines keep their indent.
+        let mut blocks = vec![b("n", Paragraph, 0, "")];
+        paste_lines_marked(&mut blocks, 0, 0, &copied, &[], || "p".into());
+        let got: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.indent, b.content.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (Toggle, 0, "T"),
+                (Paragraph, 1, "a"),
+                (Toggle, 1, "U"),
+                (Paragraph, 2, "b"),
+            ]
+        );
+        // From another app, leading spaces are text, as before.
+        let mut blocks = vec![b("n", Paragraph, 0, "")];
+        paste_lines(&mut blocks, 0, 0, "uno\n  dos", || "p".into());
+        assert_eq!(blocks[1].indent, 0);
+        assert_eq!(blocks[1].content, "  dos");
+    }
+}

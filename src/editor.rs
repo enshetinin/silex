@@ -599,6 +599,84 @@ pub fn ancestors(blocks: &[Block], index: usize) -> Vec<usize> {
     out
 }
 
+/// The last block of `first..=last` with the content of the toggles in it
+/// (ADR 0016): moving, copying or deleting a toggle takes its content.
+pub fn with_content(blocks: &[Block], first: usize, last: usize) -> usize {
+    (first..=last.min(blocks.len().saturating_sub(1)))
+        .filter(|&i| blocks[i].kind == BlockKind::Toggle)
+        .map(|i| subtree_end(blocks, i) - 1)
+        .fold(last, usize::max)
+}
+
+/// Moves blocks `first..=last`, with the content of their toggles, one
+/// place up or down. A toggle next to them is passed whole, content
+/// included, never entered (Tab puts a block inside one). Returns the new
+/// range, or `None` at the edges.
+pub fn move_with_content(
+    blocks: &mut [Block],
+    first: usize,
+    last: usize,
+    up: bool,
+) -> Option<(usize, usize)> {
+    let (first, last) = (first.min(last), first.max(last));
+    if last >= blocks.len() {
+        return None;
+    }
+    let last = with_content(blocks, first, last);
+    let to = if up {
+        let above = first.checked_sub(1)?;
+        // The outermost toggle that ends right here, not shallower than
+        // the moved blocks: all of it is passed.
+        (0..first)
+            .find(|&t| {
+                blocks[t].kind == BlockKind::Toggle
+                    && blocks[t].indent >= blocks[first].indent
+                    && subtree_end(blocks, t) == first
+            })
+            .unwrap_or(above)
+    } else {
+        let below = last + 1;
+        if below >= blocks.len() {
+            return None;
+        }
+        if blocks[below].kind == BlockKind::Toggle {
+            subtree_end(blocks, below)
+        } else {
+            below + 1
+        }
+    };
+    move_range_to(blocks, first, last, to)
+}
+
+/// Tab (`delta` = 1) or Shift+Tab (`delta` = -1) on block `index`, as
+/// [`change_indent`]; a toggle takes its content along. Tab does nothing
+/// if that would push its content past [`MAX_INDENT`].
+pub fn change_indent_with_content(blocks: &mut [Block], index: usize, delta: i8) -> bool {
+    let Some(block) = blocks.get(index) else {
+        return false;
+    };
+    if block.kind != BlockKind::Toggle {
+        return change_indent(blocks, index, delta);
+    }
+    let end = subtree_end(blocks, index);
+    if delta > 0 && blocks[index..end].iter().any(|b| b.indent >= MAX_INDENT) {
+        return false;
+    }
+    let before = blocks[index].indent;
+    if !change_indent(blocks, index, delta) {
+        return false;
+    }
+    let after = blocks[index].indent;
+    for block in &mut blocks[index + 1..end] {
+        block.indent = if after > before {
+            block.indent + (after - before)
+        } else {
+            block.indent - (before - after)
+        };
+    }
+    true
+}
+
 /// Enter at `at_char` in block `index`, knowing whether it is a folded
 /// toggle (ADR 0016). In a toggle, the text after the cursor goes inside
 /// it, first, when it is open; after all its content when it is folded;
@@ -738,6 +816,7 @@ pub fn selection_clip(blocks: &[Block], first: usize, last: usize) -> Clip {
             BlockKind::Numbered => format!("{}. ", number.unwrap_or(1)),
             BlockKind::Todo if block.checked => "[x] ".to_owned(),
             BlockKind::Todo => "[ ] ".to_owned(),
+            BlockKind::Toggle => TOGGLE_MARKER.to_owned(),
             _ => String::new(),
         };
         let marker = if block.kind == BlockKind::Divider {
@@ -849,6 +928,10 @@ pub struct PastedLine {
     pub content: String,
 }
 
+/// How a toggle's line starts when copied (ADR 0016), so pasting it in
+/// Silex gives a toggle back.
+const TOGGLE_MARKER: &str = "▸ ";
+
 /// Line endings to `\n`, and invisible control characters removed (tabs kept).
 pub fn normalize_pasted(text: &str) -> String {
     text.replace("\r\n", "\n")
@@ -859,6 +942,13 @@ pub fn normalize_pasted(text: &str) -> String {
 }
 
 pub fn parse_pasted_line(line: &str) -> PastedLine {
+    parse_line(line, false)
+}
+
+/// [`parse_pasted_line`]; `copied` (text copied inside Silex) also reads
+/// two leading spaces per level as the indent of plain text, as Silex
+/// copies it (ADR 0016: a toggle's content is often plain paragraphs).
+fn parse_line(line: &str, copied: bool) -> PastedLine {
     let spaces = line.chars().take_while(|c| *c == ' ').count();
     let indent = u8::try_from(spaces / 2)
         .unwrap_or(MAX_INDENT)
@@ -875,12 +965,16 @@ pub fn parse_pasted_line(line: &str) -> PastedLine {
     }
     let (kind, checked, content) = if let Some(text) = rest.strip_prefix("• ") {
         (BlockKind::Bulleted, false, text)
+    } else if let Some(text) = rest.strip_prefix(TOGGLE_MARKER) {
+        (BlockKind::Toggle, false, text)
     } else if let Some(text) = rest.strip_prefix("[ ] ") {
         (BlockKind::Todo, false, text)
     } else if let Some(text) = rest.strip_prefix("[x] ") {
         (BlockKind::Todo, true, text)
     } else if let Some(text) = numbered_text(rest) {
         (BlockKind::Numbered, false, text)
+    } else if copied {
+        (BlockKind::Paragraph, false, rest)
     } else {
         // Plain text keeps its leading spaces only beyond the indent we took.
         return PastedLine {
@@ -918,7 +1012,7 @@ pub fn paste_lines(
     text: &str,
     new_id: impl FnMut() -> String,
 ) -> Option<Caret> {
-    paste_lines_marked(blocks, index, cursor, text, &[], new_id)
+    paste(blocks, index, cursor, text, &[], false, new_id)
 }
 
 /// [`paste_lines`] of text copied inside Silex: `pasted` is its formatting
@@ -930,6 +1024,19 @@ pub fn paste_lines_marked(
     cursor: usize,
     text: &str,
     pasted: &[marks::Mark],
+    new_id: impl FnMut() -> String,
+) -> Option<Caret> {
+    paste(blocks, index, cursor, text, pasted, true, new_id)
+}
+
+/// [`paste_lines`] (`copied` false) or [`paste_lines_marked`] (true).
+fn paste(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    cursor: usize,
+    text: &str,
+    pasted: &[marks::Mark],
+    copied: bool,
     mut new_id: impl FnMut() -> String,
 ) -> Option<Caret> {
     let text = normalize_pasted(text);
@@ -937,7 +1044,7 @@ pub fn paste_lines_marked(
     let mut lines: Vec<(PastedLine, Vec<marks::Mark>)> = text
         .split('\n')
         .map(|raw| {
-            let line = parse_pasted_line(raw);
+            let line = parse_line(raw, copied);
             let len = char_len(raw);
             // The content is the end of the line, after its marker.
             let start = at + len - char_len(&line.content);
