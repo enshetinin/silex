@@ -3742,3 +3742,56 @@ fn the_outline_marks_the_heading_chosen_and_then_follows_the_scroll() -> anyhow:
     );
     Ok(())
 }
+
+/// A page with a very, very long title in the trash: the window stays on
+/// screen, the title is cut, and every button can be reached, also in the
+/// question «¿Borrar para siempre?».
+#[test]
+fn a_huge_title_never_pushes_the_trash_buttons_off_screen() -> anyhow::Result<()> {
+    let db = Database::open_in_memory()?;
+    let huge = format!("Título enorme {} fin", "sinespacios".repeat(300));
+    let page = db.create_page(&huge, None)?;
+    db.create_page("Otra", None)?;
+    db.trash_page(&page)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_trash_dialog();
+    let mut harness = Harness::builder()
+        .with_size([900.0, 600.0])
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+    let on_screen = |harness: &Harness<'_, SilexApp>, label: &str| {
+        let rect = harness
+            .get_all_by_label_contains(label)
+            .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Button)
+            .unwrap_or_else(|| panic!("button {label:?}"))
+            .rect();
+        assert!(screen.contains_rect(rect), "{label}: {rect:?}");
+    };
+    for label in ["Restaurar", "Borrar «", "Cerrar", "Vaciar la papelera"] {
+        on_screen(&harness, label);
+    }
+    click_button(&mut harness, "Vaciar la papelera");
+    for label in ["Confirmar: borrar para siempre", "Cancelar"] {
+        on_screen(&harness, label);
+    }
+    harness
+        .get_all_by_label("Cancelar")
+        .next()
+        .expect("cancel")
+        .click();
+    harness.run();
+    // Deleting the item asks with its title cut short.
+    harness
+        .get_all_by_label_contains("Borrar «")
+        .next()
+        .expect("item")
+        .click();
+    harness.run();
+    for label in ["Confirmar: borrar para siempre", "Cancelar"] {
+        on_screen(&harness, label);
+    }
+    Ok(())
+}

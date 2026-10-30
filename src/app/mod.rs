@@ -266,6 +266,20 @@ fn display_title(title: &str) -> &str {
     }
 }
 
+/// Longest title a sentence in a dialog or a notice quotes whole.
+const SHORT_TITLE: usize = 80;
+
+/// [`display_title`] for a sentence: on one line, and a very long title
+/// cut with «…», so no window grows past the screen with it.
+fn short_title(title: &str) -> String {
+    let title = display_title(title).replace(['\n', '\r'], " ");
+    if title.chars().count() <= SHORT_TITLE {
+        return title;
+    }
+    let cut: String = title.chars().take(SHORT_TITLE - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
 impl SilexApp {
     /// Prints, on the second frame (the first one is on screen by then),
     /// how long it took since `started` (H9.3b). `exit` closes the app then.

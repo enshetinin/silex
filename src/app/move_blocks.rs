@@ -6,7 +6,7 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 use silex_desktop::editor;
 use silex_desktop::history::{Moved, Snapshot};
-use silex_desktop::model::{Page, PageKind};
+use silex_desktop::model::{BlockKind, Page, PageKind};
 
 use super::*;
 
@@ -53,6 +53,7 @@ impl SilexApp {
             Moved {
                 ids: ids.to_vec(),
                 to: page.id.clone(),
+                created: false,
             },
         );
         self.save.mark_dirty(Instant::now());
@@ -72,7 +73,7 @@ impl SilexApp {
                 1 => "Se movió 1 bloque".to_owned(),
                 n => format!("Se movieron {n} bloques"),
             },
-            display_title(&page.title),
+            short_title(&page.title),
             if cfg!(target_os = "macos") {
                 "Cmd"
             } else {
@@ -100,9 +101,11 @@ impl SilexApp {
         let from = self.db.move_blocks(&found, &open)?;
         let mut target = previous;
         for block in &mut target.blocks {
+            // What was written there, at the indent it had here.
             if let Some(latest) = now.iter().find(|b| b.id == block.id) {
                 *block = Block {
                     page_id: open.clone(),
+                    indent: block.indent,
                     ..latest.clone()
                 };
             }
@@ -111,7 +114,21 @@ impl SilexApp {
         for page in from {
             self.forget_history_of(&page);
         }
-        self.save_now()
+        self.save_now()?;
+        // A subpage made by «Convertir en subpágina», left empty: to the
+        // trash (it can be restored from there).
+        if moved.created
+            && self.db.list_blocks(&moved.to)?.is_empty()
+            && !self
+                .pages
+                .iter()
+                .any(|p| p.parent_id.as_deref() == Some(moved.to.as_str()))
+        {
+            self.db.trash_page(&moved.to)?;
+            self.reload_pages()?;
+            self.close_tabs_not_live();
+        }
+        Ok(())
     }
 
     /// Redoes a move: the blocks go to the end of their page again.
@@ -122,6 +139,11 @@ impl SilexApp {
         moved: &Moved,
     ) -> Result<()> {
         self.save_now()?;
+        // The subpage it made, back from the trash.
+        if moved.created && !self.pages.iter().any(|p| p.id == moved.to) {
+            self.db.restore_page(&moved.to)?;
+            self.reload_pages()?;
+        }
         let present: Vec<String> = moved
             .ids
             .iter()
@@ -134,6 +156,74 @@ impl SilexApp {
         target.blocks.retain(|b| !moved.ids.contains(&b.id));
         self.apply_snapshot(target, current);
         self.forget_history_of(&moved.to);
+        self.save_now()
+    }
+
+    /// «Convertir en subpágina» (H12.6b, ADR 0017): blocks `first..=last`
+    /// (with the content of their toggles) go to a new subpage of the open
+    /// page, «Sin título» like any new page, and a link to it takes their
+    /// place.
+    pub(super) fn convert_to_subpage(&mut self, first: usize, last: usize) -> Result<()> {
+        let Some(open) = self.selected.clone() else {
+            return Ok(());
+        };
+        let Some(head) = self.blocks.get(first) else {
+            return Ok(());
+        };
+        let indent = head.indent;
+        let last = editor::with_content(&self.blocks, first, last.min(self.blocks.len() - 1));
+        let ids: Vec<String> = self.blocks[first..=last]
+            .iter()
+            .map(|b| b.id.clone())
+            .collect();
+        // What goes is what was last written.
+        self.save_now()?;
+        let title = "Sin título";
+        let page = self.db.create_page(title, Some(&open))?;
+        let before = self.snapshot();
+        self.db.move_blocks(&ids, &page)?;
+        self.blocks.retain(|b| !ids.contains(&b.id));
+        let link = Block {
+            id: uuid::Uuid::new_v4().to_string(),
+            page_id: open.clone(),
+            kind: BlockKind::PageLink,
+            content: title.to_owned(),
+            checked: false,
+            position: 0,
+            indent,
+            attachment: None,
+            link: Some(page.clone()),
+            marks: Vec::new(),
+        };
+        let link_id = link.id.clone();
+        self.blocks.insert(first.min(self.blocks.len()), link);
+        self.shadow = self.snapshot();
+        let count = ids.len();
+        self.history.record_move(
+            before,
+            Moved {
+                ids,
+                to: page,
+                created: true,
+            },
+        );
+        self.save.mark_dirty(Instant::now());
+        self.selection = None;
+        self.expanded.insert(open);
+        self.reload_pages()?;
+        self.pending_focus = Some((link_id, 0));
+        self.notice = Some(format!(
+            "{} a una subpágina nueva. {}+Z para deshacer.",
+            match count {
+                1 => "Se pasó 1 bloque".to_owned(),
+                n => format!("Se pasaron {n} bloques"),
+            },
+            if cfg!(target_os = "macos") {
+                "Cmd"
+            } else {
+                "Ctrl"
+            },
+        ));
         self.save_now()
     }
 

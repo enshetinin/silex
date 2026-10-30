@@ -5849,3 +5849,135 @@ fn a_selected_toggle_moves_with_its_content_and_databases_are_not_offered() -> a
     );
     Ok(())
 }
+
+// ---- Converting blocks into a subpage (H12.6b, ADR 0017) ----
+
+/// The live subpages of the open page.
+fn subpages(app: &SilexApp) -> Vec<Page> {
+    let open = app.selected.clone().unwrap_or_default();
+    app.pages
+        .iter()
+        .filter(|p| p.parent_id.as_deref() == Some(open.as_str()))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn blocks_become_an_untitled_subpage_and_undo_takes_them_back() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (H2, 0, "Receta de pan"),
+            (Par, 0, "harina"),
+            (Par, 1, "agua"),
+            (Par, 0, "fuera"),
+        ],
+        0,
+        0,
+    )?;
+    let origin = app.selected.clone().expect("page");
+    let heading = app.blocks[0].id.clone();
+    // The first three, selected.
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::SHIFT)]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::SHIFT)]);
+    assert_eq!(app.selection_range(), Some((0, 2)));
+    app.block_action(BlockAction::ToSubpage, &heading);
+    app_frame(&mut app, &ctx, vec![]);
+    let pages = subpages(&app);
+    assert_eq!(pages.len(), 1);
+    assert_eq!(
+        pages[0].title, "Sin título",
+        "a plain title, like any new page"
+    );
+    let sub = pages[0].id.clone();
+    let inside: Vec<(BlockKind, String, u8)> = app
+        .db
+        .list_blocks(&sub)?
+        .into_iter()
+        .map(|b| (b.kind, b.content, b.indent))
+        .collect();
+    assert_eq!(
+        inside,
+        [
+            (H2, "Receta de pan".into(), 0),
+            (Par, "harina".into(), 0),
+            (Par, "agua".into(), 1),
+        ],
+        "every block, the first one too"
+    );
+    // A link in their place.
+    assert_eq!(app.blocks.len(), 2);
+    assert_eq!(app.blocks[0].kind, BlockKind::PageLink);
+    assert_eq!(app.blocks[0].link.as_deref(), Some(sub.as_str()));
+    assert_eq!(app.blocks[1].content, "fuera");
+    assert_eq!(focused_block(&app, &ctx), Some(0));
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Se pasaron 3 bloques")),
+        "{:?}",
+        app.notice
+    );
+    // Undo: the blocks come back, and the empty subpage goes to the trash.
+    app.undo();
+    assert_eq!(
+        contents(&app),
+        [
+            (H2, 0, "Receta de pan".into()),
+            (Par, 0, "harina".into()),
+            (Par, 1, "agua".into()),
+            (Par, 0, "fuera".into()),
+        ]
+    );
+    assert!(subpages(&app).is_empty());
+    assert!(app.db.list_trash()?.iter().any(|t| t.page.id == sub));
+    assert_eq!(stored_texts(&app, &origin)?.len(), 4);
+    // Redo: back from the trash, with its blocks.
+    app.redo();
+    assert_eq!(subpages(&app).len(), 1);
+    assert_eq!(stored_texts(&app, &sub)?.len(), 3);
+    assert_eq!(app.blocks[0].kind, BlockKind::PageLink);
+    Ok(())
+}
+
+#[test]
+fn a_toggle_becomes_a_subpage_with_it_and_a_used_subpage_stays() -> anyhow::Result<()> {
+    let (mut app, _ctx) = editor_app(
+        &[
+            (TOG, 1, "Notas"),
+            (Par, 2, "una"),
+            (Bul, 3, "dos"),
+            (Par, 0, "fuera"),
+        ],
+        3,
+        0,
+    )?;
+    app.convert_to_subpage(0, 0)?;
+    let sub = subpages(&app)[0].clone();
+    let inside: Vec<(String, u8)> = app
+        .db
+        .list_blocks(&sub.id)?
+        .into_iter()
+        .map(|b| (b.content, b.indent))
+        .collect();
+    assert_eq!(
+        inside,
+        [("Notas".into(), 0), ("una".into(), 1), ("dos".into(), 2)],
+        "the toggle with its content, from the left edge"
+    );
+    assert_eq!(app.blocks[0].indent, 1, "the link where the toggle was");
+    // Something new is written in the subpage: undo brings the blocks
+    // back but leaves the page, which is not empty.
+    let mut blocks = app.db.list_blocks(&sub.id)?;
+    let mut extra = blocks[0].clone();
+    extra.id = "nuevo".into();
+    extra.kind = Par;
+    extra.content = "escrito después".into();
+    blocks.push(extra);
+    app.db.save_document(&sub.id, &sub.title, &blocks)?;
+    app.undo();
+    assert_eq!(app.blocks.len(), 4);
+    assert_eq!(subpages(&app).len(), 1, "kept, not empty");
+    assert_eq!(stored_texts(&app, &sub.id)?, ["escrito después"]);
+    Ok(())
+}

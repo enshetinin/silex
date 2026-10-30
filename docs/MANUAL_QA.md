@@ -465,3 +465,13 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Mueve un bloque, abre la página de destino en otra pestaña (Cmd/Ctrl+clic), cambia su texto, vuelve a la primera pestaña y pulsa Cmd/Ctrl+Z: vuelve con el texto cambiado. En la pestaña de destino ya no hay nada que deshacer de antes.
 - Con la página de destino abierta al lado (Alt+clic), al mover se ve llegar el bloque.
 - Un bloque con un archivo o un enlace a otra página se mueve y sigue abriendo su archivo o su página; la búsqueda lo encuentra en la página nueva.
+
+## 51. Convertir en subpágina (H12.6b, ADR 0017)
+- Un título seguido de dos párrafos: selecciónalos (Esc, Mayús+↓ dos veces) y «…» → «Convertir en subpágina». En su sitio queda un enlace a una subpágina «Sin título»; en la barra lateral aparece, y dentro están los tres bloques, el título incluido.
+- Con un solo bloque: la subpágina «Sin título» lo tiene dentro.
+- En un desplegable: la subpágina lo tiene con su contenido, empezando en el borde izquierdo.
+- Cmd/Ctrl+Z: los bloques vuelven, el enlace desaparece y la subpágina va a la papelera. Cmd/Ctrl+Mayús+Z: vuelve todo.
+- Si escribes algo en la subpágina antes de deshacer, deshacer devuelve los bloques pero deja la subpágina con lo nuevo.
+- En una plantilla, «Convertir en subpágina» no aparece en la paleta, y desde el menú un aviso dice que una plantilla no puede tener subpáginas.
+- «Mover a…» con un bloque sangrado: llega al borde izquierdo de la otra página; al deshacer vuelve con su sangría.
+- Manda a la papelera una página con un título larguísimo (pega un texto muy largo como título) y abre la papelera: el diálogo cabe en la ventana, el título sale recortado con «…» (entero al pasar el ratón) y los botones se ven y funcionan, también «Vaciar la papelera» y su confirmación. Prueba también con la ventana estrecha.

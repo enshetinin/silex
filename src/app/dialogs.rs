@@ -84,7 +84,11 @@ impl SilexApp {
         let mut ask = None;
         let mut confirmed = false;
         let mut cancel = false;
+        // As wide as fits on screen: long titles wrap or are cut, never
+        // push the buttons out of sight.
+        let width = (ctx.content_rect().width() - 64.0).clamp(260.0, 560.0);
         let response = egui::Modal::new(egui::Id::unique("silex_trash")).show(ctx, |ui| {
+            ui.set_width(width);
             // Deleting for good asks first, in the same window (ADR 0013).
             if let Some(purge) = &dialog.confirm {
                 ui.heading("¿Borrar para siempre?");
@@ -119,25 +123,34 @@ impl SilexApp {
                 .id_salt("silex_trash_list")
                 .max_height(300.0)
                 .show(ui, |ui| {
-                    for item in &dialog.items {
+                    for (n, item) in dialog.items.iter().enumerate() {
+                        if n > 0 {
+                            ui.separator();
+                        }
+                        // The title on its own line, cut to the window
+                        // (whole on hover); below, when and the buttons.
+                        let title = display_title(&item.page.title).replace(['\n', '\r'], " ");
+                        ui.add(egui::Label::new(&title).truncate())
+                            .on_hover_text(&title);
+                        let short = short_title(&item.page.title);
                         ui.horizontal(|ui| {
-                            let title = display_title(&item.page.title);
-                            ui.label(title);
-                            if item.subpages > 0 {
-                                ui.weak(format!("+{} subpágina(s)", item.subpages));
-                            }
-                            ui.weak(describe_timestamp(&item.deleted_at));
+                            let when = describe_timestamp(&item.deleted_at);
+                            let meta = match item.subpages {
+                                0 => when,
+                                n => format!("+{n} subpágina(s) · {when}"),
+                            };
+                            ui.weak(meta);
                             if ui.button("Restaurar").clicked() {
                                 restore = Some(item.page.id.clone());
                             }
                             if ui
                                 .button(egui::RichText::new("Borrar para siempre").color(p.danger))
-                                .accessible_name(format!("Borrar «{title}» para siempre"))
+                                .accessible_name(format!("Borrar «{short}» para siempre"))
                                 .clicked()
                             {
                                 ask = Some(Purge::Item(
                                     item.page.id.clone(),
-                                    title.to_owned(),
+                                    short.clone(),
                                     item.subpages,
                                 ));
                             }

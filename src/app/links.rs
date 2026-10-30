@@ -373,7 +373,7 @@ impl SilexApp {
             ui.add_space(theme::space::SM);
             ui.label(format!(
                 "«{}» está en la papelera. ¿Quieres restaurarla y abrirla?",
-                display_title(&title)
+                short_title(&title)
             ));
             ui.add_space(theme::space::MD);
             ui.horizontal(|ui| {

@@ -122,6 +122,7 @@ fn a_move_step_carries_its_blocks_both_ways() {
     let moved = Moved {
         ids: vec!["a".into(), "b".into()],
         to: "p2".into(),
+        created: false,
     };
     let mut h = History::default();
     h.record(snap("v0"), text("x"), t0);

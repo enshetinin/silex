@@ -28,6 +28,8 @@ pub enum Command {
     /// «Mover a otra página…»: the selected blocks, or the last block
     /// edited (ADR 0017).
     MoveBlocks,
+    /// «Convertir en subpágina»: the same blocks (ADR 0017).
+    ToSubpage,
     AddFavorite,
     RemoveFavorite,
     ExportPage,
@@ -94,7 +96,7 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 39] = [
+    pub const ALL: [Command; 40] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
@@ -111,6 +113,7 @@ impl Command {
         Command::Link,
         Command::ToggleOutline,
         Command::MoveBlocks,
+        Command::ToSubpage,
         Command::AddFavorite,
         Command::RemoveFavorite,
         Command::ExportPage,
@@ -150,6 +153,7 @@ impl Command {
             Command::Link => "Enlace…",
             Command::ToggleOutline => "Mostrar u ocultar el índice",
             Command::MoveBlocks => "Mover a otra página…",
+            Command::ToSubpage => "Convertir en subpágina",
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
@@ -194,6 +198,7 @@ impl Command {
             Command::Format(Format::Strike) => &["formato", "tachar", "rayado", "strikethrough"],
             Command::Link => &["formato", "url", "web", "vinculo", "hipervinculo", "link"],
             Command::MoveBlocks => &["mover", "bloques", "trasladar", "llevar", "move"],
+            Command::ToSubpage => &["subpagina", "pagina", "nueva", "extraer", "page"],
             Command::ToggleOutline => &[
                 "indice",
                 "titulos",
@@ -265,6 +270,10 @@ impl Command {
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
             Command::ToggleOutline => cx.page_open && !cx.database_open,
             Command::MoveBlocks => cx.page_open && !cx.database_open && cx.blocks_target,
+            // A template has no subpages (ADR 0010).
+            Command::ToSubpage => {
+                cx.page_open && !cx.database_open && cx.blocks_target && !cx.template_open
+            }
             Command::Format(_) | Command::Link => {
                 cx.page_open && !cx.database_open && cx.format_block
             }
@@ -382,6 +391,11 @@ mod tests {
             matching_commands("mover a", &editing),
             [Command::MoveBlocks]
         );
+        assert!(matching_commands("convertir en sub", &editing).contains(&Command::ToSubpage));
+        assert!(!Command::ToSubpage.available(&PaletteContext {
+            template_open: true,
+            ..editing
+        }));
         assert!(!Command::MoveBlocks.available(&PaletteContext {
             database_open: true,
             ..editing

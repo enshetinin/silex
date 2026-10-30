@@ -36,6 +36,9 @@ pub struct Moved {
     pub ids: Vec<String>,
     /// The page they went to.
     pub to: String,
+    /// The step created that page («Convertir en subpágina»): undoing it
+    /// sends the page, if left empty, to the trash; redoing brings it back.
+    pub created: bool,
 }
 
 /// A step: the state on one side of it, and what it did to other pages.

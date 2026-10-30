@@ -42,6 +42,7 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::Link => icons::LINK,
         Command::ToggleOutline => icons::TABLE_OF_CONTENTS,
         Command::MoveBlocks => icons::ARROW_RIGHT,
+        Command::ToSubpage => icons::PAGE,
     }
 }
 
@@ -116,14 +117,18 @@ impl SilexApp {
                 }
             }
             (Command::ToggleOutline, Some(_)) => self.toggle_outline(ctx),
-            (Command::MoveBlocks, Some(_)) => {
+            (Command::MoveBlocks | Command::ToSubpage, Some(_)) => {
                 let target = self.selection_range().or_else(|| {
                     let (id, _, _) = self.format_target.as_ref()?;
                     let index = self.blocks.iter().position(|b| &b.id == id)?;
                     Some((index, index))
                 });
                 if let Some((first, last)) = target {
-                    self.open_move_picker(first, last);
+                    if command == Command::MoveBlocks {
+                        self.open_move_picker(first, last);
+                    } else {
+                        self.convert_to_subpage(first, last)?;
+                    }
                 }
             }
             (Command::Link, Some(_)) => {

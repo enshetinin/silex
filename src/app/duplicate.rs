@@ -121,7 +121,8 @@ impl SilexApp {
         let mut answer = None;
         let mut cancel = false;
         let response = egui::Modal::new(egui::Id::unique("silex_duplicate")).show(ctx, |ui| {
-            ui.heading(format!("Duplicar «{}»", dialog.title));
+            ui.set_max_width(460.0);
+            ui.heading(format!("Duplicar «{}»", short_title(&dialog.title)));
             ui.add_space(theme::space::SM);
             let (has, with, without) = match (dialog.database, dialog.children) {
                 (true, 1) => (

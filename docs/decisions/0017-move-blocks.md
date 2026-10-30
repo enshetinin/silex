@@ -9,13 +9,15 @@ El deshacer del documento (ADR 0004) guarda instantáneas de la página abierta.
 
 ## Decisión
 - **Mover cambia `blocks.page_id`** en una transacción (`Database::move_blocks`), conservando los ids. Con ellos se conservan los `rowid` (la búsqueda no se reindexa), los adjuntos, los enlaces y los backlinks. Antes se guarda la página de origen, así que lo que se mueve es lo último escrito.
-- **Destino:** al final de la página elegida (decisión del propietario), en su orden y con su sangría. Se elige con el mismo buscador de páginas que los enlaces (ADR 0008). No se puede mover a la misma página ni a una base de datos. Un desplegable va con su contenido (ADR 0016).
+- **Destino:** al final de la página elegida (decisión del propietario), en su orden y con su sangría.
+  - *Actualización (H12.6b):* el menos sangrado de los bloques movidos va al borde izquierdo y los demás conservan su sangría respecto a él, para no quedar colgando del último bloque de la otra página. Al deshacer, cada uno vuelve con la sangría que tenía. Se elige con el mismo buscador de páginas que los enlaces (ADR 0008). No se puede mover a la misma página ni a una base de datos. Un desplegable va con su contenido (ADR 0016).
 - **Deshacer entre páginas.** Un paso de deshacer puede llevar, además de la instantánea, la lista de bloques que movió y a qué página (`history::Moved`).
   - **Cmd+Z en la página de origen** los trae desde donde estén ahora (también si después se movieron a una tercera página). Vuelven **con lo que se editó en el destino** (decisión del propietario): se leen de la base antes de restaurar. Un bloque que ya no existe vuelve como era.
   - **Cmd+Mayús+Z** los manda otra vez al final de su página de destino.
   - Si algo falla, el paso no se pierde y no cambia nada.
 - **Las demás páginas olvidan su deshacer.** Una página a la que llegan bloques, o de la que se van al deshacer, pierde el historial que guardaba su pestaña, porque sus instantáneas ya no cuadran con la base. El panel de al lado se vuelve a leer si la muestra.
-- **«Convertir en subpágina»** (H12.6b) usa lo mismo: crea una subpágina de la página abierta, le mueve los bloques y deja en su sitio un enlace a ella. El texto del primer bloque pasa a ser el título (decisión del propietario), y ese bloque no se repite dentro. Si no tiene texto (un archivo, un separador), la página se llama «Sin título» y todo es contenido. Deshacer devuelve los bloques y quita el enlace; la subpágina, vacía, va a la papelera.
+- **«Convertir en subpágina»** (H12.6b) usa lo mismo: crea una subpágina de la página abierta, le mueve **todos** los bloques elegidos y deja en su sitio un enlace a ella. Deshacer devuelve los bloques y quita el enlace; la subpágina, vacía, va a la papelera.
+  - *Actualización (H12.6b, decisión del propietario tras probarlo):* la subpágina se llama «Sin título», como cualquier página nueva, y su contenido son todos los bloques elegidos, el primero incluido. Se descartó la primera decisión (el texto del primer bloque como título), porque ese bloque desaparecía del contenido. Una subpágina en la que se escribió algo, o que tiene subpáginas, no va a la papelera al deshacer. Rehacer la saca de la papelera. No se ofrece en la paleta de una plantilla, que no puede tener subpáginas (ADR 0010).
 
 ## Consecuencias
 - `History` guarda junto a cada paso un efecto opcional. Las instantáneas no cambian: el formato del historial de versiones (ADR 0009) y las plantillas no se tocan.

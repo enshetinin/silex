@@ -1286,9 +1286,11 @@ impl Database {
 
     /// Moves blocks to the end of page `to`, in the order given, in one
     /// transaction (ADR 0017). Their ids stay, and with them their search
-    /// index, attachments and links. Ids not found are skipped. Returns the
-    /// pages they were in, other than `to`. `to` must be a page (not a
-    /// database), also one in the trash (undoing and redoing a move).
+    /// index, attachments and links. The shallowest of them goes to the
+    /// left edge, and the others keep their indent relative to it. Ids not
+    /// found are skipped. Returns the pages they were in, other than `to`.
+    /// `to` must be a page (not a database), also one in the trash
+    /// (undoing and redoing a move).
     pub fn move_blocks(&mut self, ids: &[String], to: &str) -> Result<Vec<String>> {
         let tx = self.conn.transaction()?;
         let kind: Option<String> = tx
@@ -1303,21 +1305,31 @@ impl Database {
             [to],
             |r| r.get(0),
         )?;
-        let mut from = Vec::new();
+        let mut found = Vec::with_capacity(ids.len());
         for id in ids {
-            let page: Option<String> = tx
-                .query_row("SELECT page_id FROM blocks WHERE id = ?1", [id], |r| {
-                    r.get(0)
-                })
+            let row: Option<(String, u8)> = tx
+                .query_row(
+                    "SELECT page_id, indent FROM blocks WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
                 .optional()?;
-            let Some(page) = page else {
-                continue;
-            };
+            if let Some((page, indent)) = row {
+                found.push((id, page, indent));
+            }
+        }
+        let left = found
+            .iter()
+            .map(|(_, _, indent)| *indent)
+            .min()
+            .unwrap_or(0);
+        let mut from = Vec::new();
+        for (id, page, indent) in found {
             tx.execute(
-                "UPDATE blocks SET page_id = ?2, position = ?3,
+                "UPDATE blocks SET page_id = ?2, position = ?3, indent = ?4,
                      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                  WHERE id = ?1",
-                params![id, to, position],
+                params![id, to, position, indent - left],
             )?;
             position += 1;
             if page != to && !from.contains(&page) {

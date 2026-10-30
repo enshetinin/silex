@@ -98,6 +98,8 @@ pub(super) enum BlockAction {
     ToggleFold,
     /// «Mover a…» (ADR 0017): the block, or the selection it is in.
     MoveTo,
+    /// «Convertir en subpágina» (ADR 0017): the same blocks.
+    ToSubpage,
 }
 
 /// What a block reported while being drawn.
@@ -803,6 +805,11 @@ fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<
                 (icons::ARROW_DOWN, " Mover abajo", BlockAction::MoveDown),
                 (icons::COPY, " Duplicar", BlockAction::Duplicate),
                 (icons::ARROW_RIGHT, " Mover a…", BlockAction::MoveTo),
+                (
+                    icons::PAGE,
+                    " Convertir en subpágina",
+                    BlockAction::ToSubpage,
+                ),
             ] {
                 if ui.button((icons::icon(icon), label)).clicked() {
                     action = Some(chosen);
@@ -1848,13 +1855,18 @@ impl SilexApp {
                 self.set_folded(id, !folded);
                 return;
             }
-            BlockAction::MoveTo => {
+            BlockAction::MoveTo | BlockAction::ToSubpage => {
                 // The selection, if this block is in it.
                 let (first, last) = self
                     .selection_range()
                     .filter(|(a, b)| (*a..=*b).contains(&index))
                     .unwrap_or((index, index));
-                self.open_move_picker(first, last);
+                if action == BlockAction::MoveTo {
+                    self.open_move_picker(first, last);
+                } else {
+                    let result = self.convert_to_subpage(first, last);
+                    self.report(result);
+                }
                 return;
             }
             BlockAction::OpenFile | BlockAction::SaveFile | BlockAction::RevealFile => {

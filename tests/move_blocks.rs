@@ -69,3 +69,22 @@ fn blocks_never_go_to_a_database_or_a_page_that_does_not_exist() -> anyhow::Resu
     assert_eq!(contents(&db, &a)?, ["uno"], "nothing moved");
     Ok(())
 }
+
+#[test]
+fn moved_blocks_start_at_the_left_edge_keeping_their_relative_indent() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let a = db.create_page("Origen", None)?;
+    let b = db.create_page("Destino", None)?;
+    let mut blocks = vec![
+        block(&a, "1", "padre"),
+        block(&a, "2", "hijo"),
+        block(&a, "3", "nieto"),
+    ];
+    blocks[1].indent = 1;
+    blocks[2].indent = 2;
+    db.save_document(&a, "Origen", &blocks)?;
+    db.move_blocks(&["2".into(), "3".into()], &b)?;
+    let indents: Vec<u8> = db.list_blocks(&b)?.into_iter().map(|b| b.indent).collect();
+    assert_eq!(indents, [0, 1]);
+    Ok(())
+}
