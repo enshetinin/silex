@@ -15,7 +15,9 @@ use crate::marks;
 use crate::model::{
     Block, BlockKind, DatabaseView, MAX_INDENT, NewBlock, Page, PageKind, TrashItem, ViewKind,
 };
-use crate::property::{CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues};
+use crate::property::{
+    CellValue, Moment, OptionColor, Property, PropertyKind, SelectOption, TableValues,
+};
 use crate::search::{self, BlockMatch, Candidate, SearchHit};
 use crate::settings::Settings;
 use crate::versions::{self, VersionBlocks, VersionInfo};
@@ -322,9 +324,13 @@ impl Database {
                 "El icono de una página es un emoji"
             );
         }
+        let now = now(&self.conn, self.clock.as_deref())?;
+        // «Editado» (H13.3) moves only if the icon changes.
         let changed = self.conn.execute(
-            "UPDATE pages SET icon = ?2 WHERE id = ?1",
-            params![id, icon],
+            "UPDATE pages SET icon = ?2,
+                 updated_at = CASE WHEN icon IS ?2 THEN updated_at ELSE ?3 END
+             WHERE id = ?1",
+            params![id, icon, now],
         )?;
         ensure!(changed == 1, "La página no existe");
         Ok(())
@@ -724,10 +730,13 @@ impl Database {
     /// their text is its title, for search and export), in one transaction.
     pub fn rename_page(&self, id: &str, title: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        let now = now(&tx, self.clock.as_deref())?;
+        // «Editado» (H13.3) moves only if the title changes.
         let affected = tx.execute(
-            "UPDATE pages SET title = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            "UPDATE pages SET title = ?2,
+                 updated_at = CASE WHEN title IS ?2 THEN updated_at ELSE ?3 END
              WHERE id = ?1 AND deleted_at IS NULL",
-            params![id, title],
+            params![id, title, now],
         )?;
         ensure!(affected == 1, "La página no existe o está en la papelera");
         retitle_links(&tx, id, title)?;
@@ -1410,7 +1419,42 @@ impl Database {
                 .or_default()
                 .insert(property, CellValue::MultiSelect(ids));
         }
+        // «Creado» and «Editado» (H13.3), from the rows' pages.
+        let times = read_times(
+            &self.conn,
+            &format!(
+                "SELECT r.id, p.id, p.kind, {ROW_TIME}
+                 FROM db_properties p
+                 JOIN pages r ON r.parent_id = p.database_id AND r.deleted_at IS NULL
+                 WHERE p.database_id = ?1 AND p.deleted_at IS NULL
+                   AND p.kind IN ('created', 'edited')"
+            ),
+            database_id,
+        )?;
+        for (row, property, value) in times {
+            values.entry(row).or_default().insert(property, value);
+        }
         Ok(values)
+    }
+
+    /// The «Creado» and «Editado» values of one live row (property id →
+    /// value): read again after the row changes (H13.3).
+    pub fn row_times(&self, row_id: &str) -> Result<HashMap<String, CellValue>> {
+        let times = read_times(
+            &self.conn,
+            &format!(
+                "SELECT r.id, p.id, p.kind, {ROW_TIME}
+                 FROM pages r
+                 JOIN db_properties p ON p.database_id = r.parent_id AND p.deleted_at IS NULL
+                                      AND p.kind IN ('created', 'edited')
+                 WHERE r.id = ?1 AND r.deleted_at IS NULL"
+            ),
+            row_id,
+        )?;
+        Ok(times
+            .into_iter()
+            .map(|(_, property, value)| (property, value))
+            .collect())
     }
 
     /// The values of one live row (property id → value) for the live
@@ -1448,6 +1492,7 @@ impl Database {
         for ((_, property), ids) in multi {
             values.insert(property, CellValue::MultiSelect(ids));
         }
+        values.extend(self.row_times(row_id)?);
         Ok(values)
     }
 
@@ -1524,7 +1569,9 @@ impl Database {
     /// Sets the value of one cell; `None` or an empty value (empty text, an
     /// unticked box) clears it. The row must be a live row of the property's
     /// database, the property live, and the value of its kind (a finite
-    /// number, an option of that property). Rejected values change nothing.
+    /// number, an option of that property). «Creado» and «Editado» cannot
+    /// be written. The row's «Editado» moves to now. Rejected values change
+    /// nothing.
     pub fn set_value(
         &mut self,
         row_id: &str,
@@ -1532,7 +1579,7 @@ impl Database {
         value: Option<&CellValue>,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        write_value(&tx, row_id, property_id, value)?;
+        write_value(&tx, self.clock.as_deref(), row_id, property_id, value)?;
         tx.commit()?;
         Ok(())
     }
@@ -1543,7 +1590,7 @@ impl Database {
     pub fn set_values(&mut self, cells: &[(&str, &str, Option<&CellValue>)]) -> Result<()> {
         let tx = self.conn.transaction()?;
         for (row_id, property_id, value) in cells {
-            write_value(&tx, row_id, property_id, *value)?;
+            write_value(&tx, self.clock.as_deref(), row_id, property_id, *value)?;
         }
         tx.commit()?;
         Ok(())
@@ -1757,8 +1804,7 @@ impl Database {
         };
         let mut changed = old_title != title;
         tx.execute(
-            "UPDATE pages SET title = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1 AND deleted_at IS NULL",
+            "UPDATE pages SET title = ?2 WHERE id = ?1 AND deleted_at IS NULL",
             params![page_id, title],
         )?;
         retitle_links(&tx, page_id, title)?;
@@ -1881,8 +1927,10 @@ impl Database {
             }
         }
         // The page as it was before this save, if its last version is old
-        // enough (ADR 0009).
+        // enough (ADR 0009). «Editado» (H13.3) moves only if something
+        // changed: saving an untouched page leaves it.
         if changed {
+            touch_page(&tx, self.clock.as_deref(), page_id)?;
             let mut before: Vec<Block> = stored.into_values().collect();
             before.sort_by(|a, b| (a.position, &a.id).cmp(&(b.position, &b.id)));
             save_version(
@@ -2663,9 +2711,63 @@ fn read_multi_values(conn: &Connection, sql: &str, param: &str) -> Result<Vec<Mu
     Ok(cells)
 }
 
+/// Now (`YYYY-MM-DDTHH:MM:SS.sssZ`, UTC): the clock fixed by
+/// [`Database::set_clock`] in tests, else SQLite's.
+fn now(conn: &Connection, clock: Option<&str>) -> Result<String> {
+    Ok(match clock {
+        Some(now) => now.to_owned(),
+        None => conn.query_row(&format!("SELECT {NOW}"), [], |r| r.get(0))?,
+    })
+}
+
+/// Marks a page as edited now: its «Editado» in a database (H13.3).
+fn touch_page(tx: &Connection, clock: Option<&str>, page_id: &str) -> Result<()> {
+    tx.execute(
+        "UPDATE pages SET updated_at = ?2 WHERE id = ?1",
+        params![page_id, now(tx, clock)?],
+    )?;
+    Ok(())
+}
+
+/// When rows were created and last edited, local time to the minute, as
+/// the values of a database's live «Creado» and «Editado» properties
+/// (H13.3): `(row, property, value)`. `sql` takes one parameter and
+/// selects the row id, the property id, its kind and the page's
+/// `created_at` or `updated_at`. A stamp that cannot be read is left out.
+fn read_times(
+    conn: &Connection,
+    sql: &str,
+    param: &str,
+) -> Result<Vec<(String, String, CellValue)>> {
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query([param])?;
+    let mut times = Vec::new();
+    while let Some(r) = rows.next()? {
+        let kind: String = r.get(2)?;
+        let local: Option<String> = r.get(3)?;
+        let Some(moment) = local.as_deref().and_then(Moment::parse) else {
+            continue;
+        };
+        let value = match PropertyKind::parse(&kind) {
+            Some(PropertyKind::Created) => CellValue::Created(moment),
+            Some(PropertyKind::Edited) => CellValue::Edited(moment),
+            _ => continue,
+        };
+        times.push((r.get(0)?, r.get(1)?, value));
+    }
+    Ok(times)
+}
+
+/// The local time of a page's creation or last edit for a property row
+/// `p` and a page `r`, to the minute: what [`read_times`] reads.
+const ROW_TIME: &str = "strftime('%Y-%m-%d %H:%M',
+                                 CASE p.kind WHEN 'created' THEN r.created_at ELSE r.updated_at END,
+                                 'localtime')";
+
 /// Writes one cell inside `tx` (see [`Database::set_value`] for the rules).
 fn write_value(
     tx: &Connection,
+    clock: Option<&str>,
     row_id: &str,
     property_id: &str,
     value: Option<&CellValue>,
@@ -2680,6 +2782,11 @@ fn write_value(
         .context("La propiedad no existe o está borrada")?;
     let kind = PropertyKind::parse(&kind)
         .with_context(|| format!("tipo de propiedad desconocido: {kind}"))?;
+    ensure!(
+        !kind.is_computed(),
+        "«{}» lo pone Silex: no se puede cambiar",
+        kind.label()
+    );
     let is_row: bool = tx.query_row(
         "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND parent_id = ?2 AND deleted_at IS NULL)",
         params![row_id, database],
@@ -2697,6 +2804,8 @@ fn write_value(
             kind.label()
         );
     }
+    // The row was edited (H13.3).
+    touch_page(tx, clock, row_id)?;
     // A multi-select's options are rows of their own (ADR 0018).
     tx.execute(
         "DELETE FROM db_multi_values WHERE page_id = ?1 AND property_id = ?2",
@@ -2732,7 +2841,7 @@ fn write_value(
             let (mut text, mut number, mut flag, mut date, mut option) =
                 (None, None, None, None, None);
             match value {
-                CellValue::Text(t) => text = Some(t.as_str()),
+                CellValue::Text(t) | CellValue::Url(t) => text = Some(t.as_str()),
                 CellValue::Number(n) => {
                     ensure!(n.is_finite(), "El número no es válido");
                     number = Some(*n);
@@ -2749,6 +2858,10 @@ fn write_value(
                     option = Some(id.as_str());
                 }
                 CellValue::MultiSelect(_) => bail!("La selección múltiple se escribe aparte"),
+                // Rejected above with the property's kind.
+                CellValue::Created(_) | CellValue::Edited(_) => {
+                    bail!("La fecha de creación o edición no se escribe")
+                }
             }
             tx.execute(
                 "INSERT INTO db_values
@@ -2996,10 +3109,7 @@ fn save_version(
     if blocks.iter().all(empty) {
         return Ok(false);
     }
-    let now: String = match clock {
-        Some(now) => now.to_owned(),
-        None => tx.query_row(&format!("SELECT {NOW}"), [], |r| r.get(0))?,
-    };
+    let now = now(tx, clock)?;
     let json = versions::blocks_to_json(blocks);
     let new_format = versions::format_of(blocks);
     let last: Option<(String, i64, String, bool)> = tx

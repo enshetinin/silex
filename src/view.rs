@@ -148,7 +148,9 @@ impl FilterOp {
     pub fn for_kind(kind: Option<PropertyKind>) -> &'static [FilterOp] {
         use FilterOp::*;
         match kind {
-            None | Some(PropertyKind::Text) => &[Contains, NotContains, Is, IsNot, Empty, NotEmpty],
+            None | Some(PropertyKind::Text | PropertyKind::Url) => {
+                &[Contains, NotContains, Is, IsNot, Empty, NotEmpty]
+            }
             Some(PropertyKind::Number) => &[
                 Is,
                 IsNot,
@@ -164,6 +166,8 @@ impl FilterOp {
             Some(PropertyKind::Select) => &[Is, IsNot, Empty, NotEmpty],
             // One of its options (ADR 0018).
             Some(PropertyKind::MultiSelect) => &[Contains, NotContains, Empty, NotEmpty],
+            // By the day (H13.3); never empty.
+            Some(PropertyKind::Created | PropertyKind::Edited) => &[Is, Before, After],
         }
     }
 
@@ -335,12 +339,19 @@ impl Subject<'_> {
         }
     }
 
-    /// The text of a name or text value, for comparing.
+    /// The text of a name, text or URL value, for comparing.
     fn text(&self) -> Option<&str> {
         match self {
             Subject::Name(title) => Some(title),
-            Subject::Value(_, Some(CellValue::Text(text))) => Some(text),
+            Subject::Value(_, Some(CellValue::Text(text) | CellValue::Url(text))) => Some(text),
             _ => None,
+        }
+    }
+
+    fn value(&self) -> Option<&CellValue> {
+        match self {
+            Subject::Name(_) => None,
+            Subject::Value(_, value) => *value,
         }
     }
 }
@@ -365,9 +376,11 @@ impl Filter {
             return true;
         }
         match kind {
-            None | Some(PropertyKind::Text) => !self.value.trim().is_empty(),
+            None | Some(PropertyKind::Text | PropertyKind::Url) => !self.value.trim().is_empty(),
             Some(PropertyKind::Number) => parse_number(&self.value).is_some(),
-            Some(PropertyKind::Date) => Date::parse(&self.value).is_some(),
+            Some(PropertyKind::Date | PropertyKind::Created | PropertyKind::Edited) => {
+                Date::parse(&self.value).is_some()
+            }
             Some(PropertyKind::Select | PropertyKind::MultiSelect) => properties
                 .iter()
                 .any(|p| p.id == self.property && p.option(&self.value).is_some()),
@@ -389,7 +402,7 @@ impl Filter {
             _ => {}
         }
         match subject.kind() {
-            None | Some(PropertyKind::Text) => {
+            None | Some(PropertyKind::Text | PropertyKind::Url) => {
                 let text = fold(subject.text().unwrap_or_default());
                 let wanted = fold(self.value.trim());
                 match self.op {
@@ -454,6 +467,25 @@ impl Filter {
                     _ => true,
                 }
             }
+            // The day of the moment, in local time.
+            Some(PropertyKind::Created | PropertyKind::Edited) => {
+                let Some(wanted) = Date::parse(&self.value) else {
+                    return true;
+                };
+                let Some(date) = subject
+                    .value()
+                    .and_then(CellValue::moment)
+                    .map(|m| m.date())
+                else {
+                    return false;
+                };
+                match self.op {
+                    Is => date == wanted,
+                    Before => date < wanted,
+                    After => date > wanted,
+                    _ => true,
+                }
+            }
             Some(PropertyKind::Checkbox) => true,
         }
     }
@@ -473,6 +505,8 @@ fn compare(a: Subject<'_>, b: Subject<'_>) -> Ordering {
         (Some(CellValue::Number(x)), Some(CellValue::Number(y))) => x.total_cmp(y),
         (Some(CellValue::Checkbox(x)), Some(CellValue::Checkbox(y))) => x.cmp(y),
         (Some(CellValue::Date(x)), Some(CellValue::Date(y))) => x.cmp(y),
+        (Some(CellValue::Created(x)), Some(CellValue::Created(y)))
+        | (Some(CellValue::Edited(x)), Some(CellValue::Edited(y))) => x.cmp(y),
         (Some(CellValue::Select(x)), Some(CellValue::Select(y))) => {
             let position = |id: &str| property.options.iter().position(|o| o.id == id);
             position(x).cmp(&position(y))
@@ -740,7 +774,7 @@ pub fn arrange(all: &[String], wanted: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::model::PageKind;
-    use crate::property::{OptionColor, SelectOption};
+    use crate::property::{Moment, OptionColor, SelectOption};
 
     fn page(id: &str, title: &str) -> Page {
         Page {
@@ -1339,5 +1373,102 @@ mod tests {
         };
         assert_eq!(sorted(Direction::Ascending), ["3", "1", "2", "4"]);
         assert_eq!(sorted(Direction::Descending), ["2", "1", "3", "4"]);
+    }
+
+    /// A view of `rows` with `values` filtered by `rules` and sorted by `by`.
+    fn shown(
+        rows: &[Page],
+        values: &TableValues,
+        properties: &[Property],
+        rules: &[(&str, FilterOp, &str)],
+        by: &[(&str, Direction)],
+    ) -> Vec<String> {
+        let config = ViewConfig {
+            filters: rules
+                .iter()
+                .map(|(property, op, value)| Filter {
+                    property: (*property).into(),
+                    op: *op,
+                    value: (*value).into(),
+                })
+                .collect(),
+            ..sorted(by)
+        };
+        ids(rows, &visible_rows(rows, values, properties, &config))
+    }
+
+    #[test]
+    fn a_url_filters_and_sorts_as_text() {
+        use FilterOp::*;
+        let properties = vec![property("web", PropertyKind::Url)];
+        let rows = vec![page("1", "a"), page("2", "b"), page("3", "c")];
+        let mut values = TableValues::new();
+        for (row, url) in [("1", "https://Zeta.es"), ("2", "https://alfa.es/docs")] {
+            values
+                .entry(row.into())
+                .or_default()
+                .insert("web".into(), CellValue::Url(url.into()));
+        }
+        let view = |rules: &[(&str, FilterOp, &str)], by: &[(&str, Direction)]| {
+            shown(&rows, &values, &properties, rules, by)
+        };
+        assert_eq!(
+            FilterOp::for_kind(Some(PropertyKind::Url)),
+            FilterOp::for_kind(None)
+        );
+        assert_eq!(view(&[("web", Contains, "ZETA")], &[]), ["1"]);
+        assert_eq!(view(&[("web", NotContains, "docs")], &[]), ["1", "3"]);
+        assert_eq!(view(&[("web", Is, "https://alfa.es/docs")], &[]), ["2"]);
+        assert_eq!(view(&[("web", Empty, "")], &[]), ["3"]);
+        assert_eq!(view(&[], &[("web", Direction::Ascending)]), ["2", "1", "3"]);
+        assert_eq!(
+            view(&[], &[("web", Direction::Descending)]),
+            ["1", "2", "3"]
+        );
+    }
+
+    #[test]
+    fn created_and_edited_filter_by_the_day_and_sort_to_the_minute() {
+        use FilterOp::*;
+        let properties = vec![
+            property("creado", PropertyKind::Created),
+            property("editado", PropertyKind::Edited),
+        ];
+        let rows = vec![page("1", "a"), page("2", "b"), page("3", "c")];
+        let at = |s: &str| Moment::parse(s).expect("moment");
+        let mut values = TableValues::new();
+        for (row, created, edited) in [
+            ("1", "2026-10-30 18:00", "2026-10-31 09:00"),
+            ("2", "2026-10-30 09:15", "2026-11-02 10:00"),
+            ("3", "2026-10-29 23:59", "2026-10-30 08:00"),
+        ] {
+            let cells = values.entry(row.into()).or_default();
+            cells.insert("creado".into(), CellValue::Created(at(created)));
+            cells.insert("editado".into(), CellValue::Edited(at(edited)));
+        }
+        let view = |rules: &[(&str, FilterOp, &str)], by: &[(&str, Direction)]| {
+            shown(&rows, &values, &properties, rules, by)
+        };
+        // Never empty: no «está vacío».
+        assert_eq!(
+            FilterOp::for_kind(Some(PropertyKind::Created)),
+            [Is, Before, After]
+        );
+        assert_eq!(view(&[("creado", Is, "2026-10-30")], &[]), ["1", "2"]);
+        assert_eq!(view(&[("creado", Is, "30/10/2026")], &[]), ["1", "2"]);
+        assert_eq!(view(&[("creado", Before, "2026-10-30")], &[]), ["3"]);
+        assert_eq!(view(&[("editado", After, "2026-10-31")], &[]), ["2"]);
+        // A value that is not a date, or an operator of another type, does not apply.
+        let all = ["1", "2", "3"];
+        assert_eq!(view(&[("creado", Is, "ayer")], &[]), all);
+        assert_eq!(view(&[("creado", Empty, "")], &[]), all);
+        assert_eq!(
+            view(&[], &[("creado", Direction::Ascending)]),
+            ["3", "2", "1"]
+        );
+        assert_eq!(
+            view(&[], &[("editado", Direction::Descending)]),
+            ["2", "1", "3"]
+        );
     }
 }

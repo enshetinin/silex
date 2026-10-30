@@ -182,6 +182,7 @@ impl SilexApp {
                 }
                 self.pages = self.db.list_pages()?;
                 self.rebuild_tree();
+                self.refresh_row_times(&[row])?;
             }
             // Undoing a new row sends it to the trash; redoing brings it back.
             TableOp::AddRow(row) | TableOp::TrashRow(row) => {

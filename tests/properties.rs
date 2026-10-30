@@ -721,3 +721,199 @@ fn multi_selects_export_as_names_separated_by_commas() -> anyhow::Result<()> {
     assert!(csv.contains("Rayuela,\"Novela, Cuento\""), "{csv}");
     Ok(())
 }
+
+// ---- H13.3: URL, «Creado» and «Editado» ----
+
+/// A database file in a temporary folder, read also with plain SQLite.
+struct TempDb(std::path::PathBuf);
+
+impl TempDb {
+    fn new() -> anyhow::Result<Self> {
+        let dir = std::env::temp_dir().join(format!("silex-props-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir)?;
+        Ok(Self(dir))
+    }
+
+    fn path(&self) -> std::path::PathBuf {
+        self.0.join("silex.sqlite3")
+    }
+
+    fn sql(&self) -> anyhow::Result<rusqlite::Connection> {
+        Ok(rusqlite::Connection::open(self.path())?)
+    }
+}
+
+impl Drop for TempDb {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `utc` (`YYYY-MM-DDTHH:MM:SS.sssZ`) as «Creado» and «Editado» show it:
+/// local time to the minute, whatever the time zone of the machine.
+fn local(utc: &str) -> anyhow::Result<String> {
+    Ok(rusqlite::Connection::open_in_memory()?.query_row(
+        "SELECT strftime('%Y-%m-%d %H:%M', ?1, 'localtime')",
+        [utc],
+        |r| r.get(0),
+    )?)
+}
+
+fn shown(value: Option<CellValue>) -> Option<String> {
+    value.and_then(|v| v.moment()).map(|m| m.to_string())
+}
+
+#[test]
+fn a_url_is_kept_as_text_and_survives_reopening() -> anyhow::Result<()> {
+    let tmp = TempDb::new()?;
+    let (base, row, web) = {
+        let mut db = Database::open(tmp.path())?;
+        let base = db.create_database("Enlaces", None)?;
+        let row = db.create_row(&base, "Documentación")?;
+        let web = db.add_property(&base, "Web", PropertyKind::Url)?;
+        db.set_value(
+            &row,
+            &web,
+            Some(&CellValue::Url("https://silex.dev/docs".into())),
+        )?;
+        // Text in a URL property is another type.
+        assert!(
+            db.set_value(&row, &web, Some(&CellValue::Text("x".into())))
+                .is_err()
+        );
+        (base, row, web)
+    };
+    let db = Database::open(tmp.path())?;
+    let property = &db.database_properties(&base)?[0];
+    assert_eq!(
+        (property.kind, property.name.as_str()),
+        (PropertyKind::Url, "Web")
+    );
+    let url = Some(CellValue::Url("https://silex.dev/docs".into()));
+    assert_eq!(cell(&db, &base, &row, &web)?, url);
+    assert_eq!(db.row_values(&row)?.get(&web).cloned(), url);
+    let stored: String = tmp.sql()?.query_row(
+        "SELECT text_value FROM db_values WHERE page_id = ?1 AND property_id = ?2",
+        [&row, &web],
+        |r| r.get(0),
+    )?;
+    assert_eq!(stored, "https://silex.dev/docs");
+    Ok(())
+}
+
+#[test]
+fn created_and_edited_come_from_the_rows_page_and_cannot_be_written() -> anyhow::Result<()> {
+    let tmp = TempDb::new()?;
+    let mut db = Database::open(tmp.path())?;
+    let base = db.create_database("Tareas", None)?;
+    let row = db.create_row(&base, "Comprar pan")?;
+    let creado = db.add_property(&base, "Creado", PropertyKind::Created)?;
+    let editado = db.add_property(&base, "Editado", PropertyKind::Edited)?;
+    tmp.sql()?.execute(
+        "UPDATE pages SET created_at = '2026-01-02T03:04:05.000Z',
+                          updated_at = '2026-02-03T22:59:59.999Z' WHERE id = ?1",
+        [&row],
+    )?;
+    assert_eq!(
+        shown(cell(&db, &base, &row, &creado)?),
+        Some(local("2026-01-02T03:04:05.000Z")?)
+    );
+    assert_eq!(
+        shown(cell(&db, &base, &row, &editado)?),
+        Some(local("2026-02-03T22:59:59.999Z")?)
+    );
+    assert!(matches!(
+        cell(&db, &base, &row, &creado)?,
+        Some(CellValue::Created(_))
+    ));
+    assert!(matches!(
+        cell(&db, &base, &row, &editado)?,
+        Some(CellValue::Edited(_))
+    ));
+    assert_eq!(db.row_values(&row)?, db.database_values(&base)?[&row]);
+    assert_eq!(db.row_times(&row)?.len(), 2);
+
+    // Read only: neither a value nor emptying it, and nothing is stored.
+    let moment = cell(&db, &base, &row, &creado)?;
+    for property in [&creado, &editado] {
+        let err = db
+            .set_value(&row, property, moment.as_ref())
+            .expect_err("read only");
+        assert!(format!("{err:#}").contains("lo pone Silex"), "{err:#}");
+        assert!(db.set_value(&row, property, None).is_err());
+        assert!(
+            db.set_values(&[(row.as_str(), property.as_str(), None)])
+                .is_err()
+        );
+    }
+    let stored: i64 = tmp
+        .sql()?
+        .query_row("SELECT COUNT(*) FROM db_values", [], |r| r.get(0))?;
+    assert_eq!(stored, 0);
+    assert_eq!(
+        shown(cell(&db, &base, &row, &editado)?),
+        Some(local("2026-02-03T22:59:59.999Z")?),
+        "a rejected write is not an edit"
+    );
+
+    // A row in the trash, or a deleted property, has none.
+    db.delete_property(&editado)?;
+    assert_eq!(db.row_values(&row)?.len(), 1);
+    db.trash_page(&row)?;
+    assert!(db.database_values(&base)?.is_empty());
+    assert!(db.row_times(&row)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn edited_moves_when_the_row_changes_and_only_then() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Lecturas", None)?;
+    let row = db.create_row(&base, "Rayuela")?;
+    let autor = db.add_property(&base, "Autor", PropertyKind::Text)?;
+    let creado = db.add_property(&base, "Creado", PropertyKind::Created)?;
+    let editado = db.add_property(&base, "Editado", PropertyKind::Edited)?;
+    let created = shown(cell(&db, &base, &row, &creado)?);
+    assert!(created.is_some());
+    let edited = |db: &Database| -> anyhow::Result<Option<String>> {
+        shown(db.row_values(&row)?.remove(&editado)).map_or(Ok(None), |s| Ok(Some(s)))
+    };
+    let at = |db: &mut Database, utc: &str| -> anyhow::Result<String> {
+        db.set_clock(Some(utc));
+        local(utc)
+    };
+
+    // A cell.
+    let t1 = at(&mut db, "2026-03-01T10:00:00.000Z")?;
+    db.set_value(&row, &autor, Some(&CellValue::Text("Cortázar".into())))?;
+    assert_eq!(edited(&db)?, Some(t1.clone()));
+
+    // The name: only if it changes.
+    let t2 = at(&mut db, "2026-03-02T11:30:00.000Z")?;
+    db.rename_page(&row, "Rayuela")?;
+    assert_eq!(edited(&db)?, Some(t1.clone()), "same name");
+    db.rename_page(&row, "Rayuela (1963)")?;
+    assert_eq!(edited(&db)?, Some(t2.clone()));
+
+    // The icon: only if it changes.
+    let t3 = at(&mut db, "2026-03-03T12:45:00.000Z")?;
+    db.set_page_icon(&row, None)?;
+    assert_eq!(edited(&db)?, Some(t2.clone()), "no icon before either");
+    db.set_page_icon(&row, Some("📚"))?;
+    assert_eq!(edited(&db)?, Some(t3.clone()));
+
+    // Its page: saving it untouched is not an edit.
+    db.add_block(&row, silex_desktop::model::BlockKind::Paragraph)?;
+    let mut blocks = db.list_blocks(&row)?;
+    blocks[0].content = "Una novela".into();
+    let t4 = at(&mut db, "2026-03-04T08:05:00.000Z")?;
+    db.save_document(&row, "Rayuela (1963)", &blocks)?;
+    assert_eq!(edited(&db)?, Some(t4.clone()));
+    at(&mut db, "2026-03-05T09:00:00.000Z")?;
+    db.save_document(&row, "Rayuela (1963)", &blocks)?;
+    assert_eq!(edited(&db)?, Some(t4), "nothing changed");
+
+    // «Creado» never moves.
+    assert_eq!(shown(cell(&db, &base, &row, &creado)?), created);
+    Ok(())
+}

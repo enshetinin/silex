@@ -564,3 +564,17 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Duplica una fila y la base entera: las celdas se copian.
 - Exporta a Markdown y a CSV: «Novela, Cuento» (en el CSV, entre comillas).
 - Tema oscuro y VoiceOver: la celda se anuncia «Géneros, Rayuela: Novela, Cuento» y cada opción del menú dice si está marcada.
+
+## 60. URL, «Creado» y «Editado» (H13.3)
+- En una base, «+» → «URL», «Creado» y «Editado»: tres columnas con los iconos de enlace, reloj y lápiz.
+- En la URL, escribe `ejemplo.com` e Intro: se guarda como `https://ejemplo.com`, en color de enlace. Al pasar el puntero (o con el foco) aparece el botón «Abrir», que la abre en el navegador; Cmd+clic y Cmd+Intro hacen lo mismo. Un clic normal la edita.
+- Escribe `file:///etc/hosts`: se ve como texto normal, y al abrirla sale el aviso «… no es una dirección web (http o https): no se abre.». `mailto:ana@ejemplo.com` abre el correo.
+- «Creado» y «Editado» enseñan la fecha y la hora local (`AAAA-MM-DD HH:MM`). Un clic no las edita y el tooltip explica que las pone Silex.
+- Cambia una celda, el nombre o el icono de una fila: su «Editado» pasa a ahora y «Creado» no se mueve. Abre la fila como página, escribe en ella y vuelve: también. Abre una página sin cambiar nada: «Editado» no se mueve.
+- Una fila nueva (también desde el tablero o una plantilla) y un duplicado tienen las dos fechas de ahora.
+- Filtrar → «Creado» → «es» / «antes de» / «después de» con `AAAA-MM-DD`: las filas correctas, por el día local. Ordenar por «Editado» descendente: la última editada arriba. Filtrar la URL por «contiene».
+- Elige varias filas → «Poner valor…»: la URL se ofrece y «Creado»/«Editado» no.
+- Cmd/Ctrl+Z deshace un cambio en la URL.
+- Exporta a Markdown y a CSV: la URL y las fechas como se ven.
+- Cierra y vuelve a abrir la app: las URL siguen ahí y las fechas no cambian.
+- Tema oscuro y VoiceOver: la celda se anuncia «Web, Rayuela: https://…», y el botón, «Abrir el enlace».

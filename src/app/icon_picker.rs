@@ -40,7 +40,7 @@ impl SilexApp {
             Some(icon) => self.page_icons.insert(id.to_owned(), icon.to_owned()),
             None => self.page_icons.remove(id),
         };
-        Ok(())
+        self.refresh_row_times(&[id])
     }
 
     /// The picker, a window over the page. Intro takes the first emoji

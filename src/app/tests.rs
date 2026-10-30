@@ -1762,6 +1762,9 @@ fn database_scale_smoke() -> anyhow::Result<()> {
                     PropertyKind::MultiSelect => {
                         option.clone().map(|o| CellValue::MultiSelect(vec![o]))
                     }
+                    PropertyKind::Url => Some(CellValue::Url(format!("https://a.es/{i}"))),
+                    // Read from the row's page; never written.
+                    PropertyKind::Created | PropertyKind::Edited => continue,
                 };
                 db.set_value(&row, property, value.as_ref())?;
             }

@@ -4406,6 +4406,243 @@ fn database_multi_select_cells() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- H13.3: URL, «Creado» and «Editado» ----
+
+/// «Lecturas» with «Web» (Rayuela: a web address; Ficciones: a file one),
+/// «Creado» and «Editado»; only «Autor» and those in sight.
+fn url_times_app() -> anyhow::Result<(SilexApp, String, Vec<String>, [String; 3])> {
+    use silex_desktop::property::{CellValue, PropertyKind};
+    let (mut app, base, rows) = database_app()?;
+    let web = app.db.add_property(&base, "Web", PropertyKind::Url)?;
+    let creado = app
+        .db
+        .add_property(&base, "Creado", PropertyKind::Created)?;
+    let editado = app
+        .db
+        .add_property(&base, "Editado", PropertyKind::Edited)?;
+    let url = |text: &str| CellValue::Url(text.into());
+    app.db
+        .set_value(&rows[0], &web, Some(&url("https://ejemplo.com")))?;
+    app.db
+        .set_value(&rows[2], &web, Some(&url("file:///etc/hosts")))?;
+    app.open_page(base.clone())?;
+    if let Some(state) = app.database.as_mut()
+        && let Some(view) = state.views.get_mut(state.view)
+    {
+        for property in &state.properties {
+            let shown = ["Autor", "Web", "Creado", "Editado"].contains(&property.name.as_str());
+            view.config.set_hidden(&property.id, !shown);
+        }
+        state.view_changed();
+    }
+    Ok((app, base, rows, [web, creado, editado]))
+}
+
+/// The value of a cell in the open table.
+fn table_value(
+    harness: &Harness<'_, SilexApp>,
+    row: &str,
+    property: &str,
+) -> Option<silex_desktop::property::CellValue> {
+    harness
+        .state()
+        .database
+        .as_ref()
+        .and_then(|d| d.values.get(row)?.get(property).cloned())
+}
+
+/// The URLs the app asked the system to open while handling the event
+/// already queued (at most one) and then `events`, one per frame: a step
+/// keeps only the output of its last frame.
+fn opened_urls(harness: &mut Harness<'_, SilexApp>, events: Vec<egui::Event>) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut collect = |harness: &mut Harness<'_, SilexApp>| {
+        harness.step();
+        urls.extend(
+            harness
+                .output()
+                .platform_output
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                    _ => None,
+                }),
+        );
+    };
+    collect(harness);
+    for event in events {
+        harness.event(event);
+        collect(harness);
+    }
+    harness.run();
+    urls
+}
+
+/// Cmd+Intro, one event per frame.
+fn command_enter() -> Vec<egui::Event> {
+    use egui::{Key, Modifiers};
+    let key = |pressed| egui::Event::Key {
+        key: Key::Enter,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: Modifiers::COMMAND,
+    };
+    vec![
+        egui::Event::ModifiersChanged(Modifiers::COMMAND),
+        key(true),
+        key(false),
+        egui::Event::ModifiersChanged(Modifiers::NONE),
+    ]
+}
+
+#[test]
+fn a_url_cell_opens_web_addresses_and_says_why_not_others() -> anyhow::Result<()> {
+    use egui::Key;
+    use silex_desktop::property::CellValue;
+    let (app, _, rows, [web, ..]) = url_times_app()?;
+    let mut harness = a11y_harness(app);
+    // Its button, shown with the focus on the cell.
+    harness
+        .get_by_label("Web, Rayuela: https://ejemplo.com")
+        .focus();
+    harness.run();
+    assert_accessible(&harness, "URL cell with the focus");
+    harness.get_by_label("Abrir el enlace").click_accesskit();
+    assert_eq!(
+        opened_urls(&mut harness, Vec::new()),
+        ["https://ejemplo.com"]
+    );
+    // Cmd+Intro, with the focus on the cell; no typing starts.
+    harness
+        .get_by_label("Web, Rayuela: https://ejemplo.com")
+        .focus();
+    harness.run();
+    assert_eq!(
+        opened_urls(&mut harness, command_enter()),
+        ["https://ejemplo.com"]
+    );
+    assert!(
+        harness
+            .state()
+            .database
+            .as_ref()
+            .is_some_and(|d| d.editing.is_none())
+    );
+    // Not a web address: a notice, and nothing opens.
+    harness
+        .get_by_label("Web, Ficciones: file:///etc/hosts")
+        .focus();
+    harness.run();
+    harness.get_by_label("Abrir el enlace").click_accesskit();
+    assert!(opened_urls(&mut harness, Vec::new()).is_empty());
+    let notice = harness.state().notice.clone().unwrap_or_default();
+    assert!(notice.contains("no es una dirección web"), "{notice}");
+    // Typed without a scheme, stored with https://.
+    click_action(&mut harness, "Web, Pedro Páramo: vacío");
+    harness.event(egui::Event::Text("ejemplo.org/x".into()));
+    harness.run();
+    harness.key_press(Key::Enter);
+    harness.run();
+    assert_eq!(
+        table_value(&harness, &rows[1], &web),
+        Some(CellValue::Url("https://ejemplo.org/x".into()))
+    );
+    Ok(())
+}
+
+#[test]
+fn created_and_edited_cells_are_read_only_and_edited_follows_changes() -> anyhow::Result<()> {
+    use egui::Key;
+    let (mut app, _, rows, [_, creado, editado]) = url_times_app()?;
+    // Mid-June 2030 in UTC is mid-June 2030 in any time zone.
+    app.db.set_clock(Some("2030-06-15T12:00:00.000Z"));
+    let mut harness = a11y_harness(app);
+    let created = table_value(&harness, &rows[0], &creado).and_then(|v| v.moment());
+    assert!(created.is_some());
+    let month = |h: &Harness<'_, SilexApp>, property: &str| {
+        table_value(h, &rows[0], property)
+            .and_then(|v| v.moment())
+            .map(|m| (m.date().year(), m.date().month()))
+    };
+    assert_ne!(month(&harness, &editado), Some((2030, 6)));
+    // A click on «Creado» does not start typing.
+    let label = format!(
+        "Creado, Rayuela: {}",
+        created.map(|m| m.to_string()).unwrap_or_default()
+    );
+    click_action(&mut harness, &label);
+    assert!(
+        harness
+            .state()
+            .database
+            .as_ref()
+            .is_some_and(|d| d.editing.is_none())
+    );
+    // Changing a cell moves the row's «Editado», not its «Creado».
+    click_action(&mut harness, "Autor, Rayuela: Julio Cortázar");
+    harness.event(egui::Event::Text(" (1963)".into()));
+    harness.run();
+    harness.key_press(Key::Enter);
+    harness.run();
+    assert_eq!(month(&harness, &editado), Some((2030, 6)));
+    assert_eq!(
+        table_value(&harness, &rows[0], &creado).and_then(|v| v.moment()),
+        created
+    );
+    // The new types are offered.
+    click_button(&mut harness, "Añadir una propiedad");
+    for kind in ["URL", "Creado", "Editado"] {
+        assert!(menu_item(&harness, kind).is_some(), "{kind}");
+    }
+    Ok(())
+}
+
+/// URL cells (a web address in the link color, with «Abrir» under the
+/// pointer) and «Creado» and «Editado».
+#[test]
+fn database_url_and_times() -> anyhow::Result<()> {
+    use silex_desktop::property::{CellValue, Moment};
+    if !enabled() {
+        return Ok(());
+    }
+    let (mut app, _, rows, [_, creado, editado]) = url_times_app()?;
+    // Fixed, so the image does not depend on the time zone or the day.
+    if let Some(state) = app.database.as_mut() {
+        // Room for every column.
+        if let Some(view) = state.views.get_mut(state.view)
+            && let Some(autor) = state.properties.iter().find(|p| p.name == "Autor")
+        {
+            view.config.set_hidden(&autor.id, true);
+        }
+        state.view_changed();
+        for (row, created, edited) in [
+            (&rows[0], "2026-10-28 09:15", "2026-10-30 18:42"),
+            (&rows[1], "2026-10-28 09:16", "2026-10-28 09:16"),
+            (&rows[2], "2026-10-29 21:03", "2026-10-30 08:05"),
+        ] {
+            let cells = state.values.entry(row.clone()).or_default();
+            let at = |s: &str| Moment::parse(s).expect("moment");
+            cells.insert(creado.clone(), CellValue::Created(at(created)));
+            cells.insert(editado.clone(), CellValue::Edited(at(edited)));
+        }
+    }
+    let mut harness = Harness::builder()
+        .with_size([1240.0, 560.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness
+        .get_by_label("Web, Rayuela: https://ejemplo.com")
+        .hover();
+    harness.run();
+    harness.snapshot("database_url_times_light");
+    Ok(())
+}
+
 /// A workspace like the owner's: two page trees, a database linked from a
 /// page and some pages without connections; the graph open.
 fn graph_app() -> anyhow::Result<SilexApp> {

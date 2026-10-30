@@ -175,6 +175,8 @@ fn column_width(kind: PropertyKind) -> f32 {
         PropertyKind::Date => 124.0,
         PropertyKind::Select => 150.0,
         PropertyKind::MultiSelect => 200.0,
+        PropertyKind::Url => 200.0,
+        PropertyKind::Created | PropertyKind::Edited => 140.0,
     }
 }
 
@@ -398,13 +400,21 @@ impl SilexApp {
             }
         }
         state.dirty.clear();
+        let rows: Vec<String> = renamed
+            .iter()
+            .filter_map(|op| match op {
+                TableOp::Name { row, .. } => Some(row.clone()),
+                _ => None,
+            })
+            .collect();
         for op in renamed {
             state.history.record(op);
         }
         // The sidebar, the search and the breadcrumbs use these titles.
         self.pages = self.db.list_pages()?;
         self.rebuild_tree();
-        Ok(())
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        self.refresh_row_times(&rows)
     }
 
     /// Adds a property as the last column of the open database. An empty
@@ -477,6 +487,7 @@ impl SilexApp {
         if self.selected.as_deref() != Some(database) {
             self.open_page(database.to_owned())?;
         }
+        self.refresh_row_times(&[&row])?;
         if let Some(state) = self.database.as_mut() {
             // In sight even if the view's filters would hide an empty row.
             if state.pinned.insert(row.clone())

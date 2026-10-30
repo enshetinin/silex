@@ -683,7 +683,8 @@ impl SilexApp {
             Ok(())
         } else {
             self.db.rename_page(&rename.id, &title)?;
-            self.reload_pages()
+            self.reload_pages()?;
+            self.refresh_row_times(&[&rename.id])
         }
     }
 

@@ -248,6 +248,8 @@ pub const WAYPOINTS: &str = "\u{e542}"; // waypoints
 pub const SCAN: &str = "\u{e257}"; // scan
 pub const ROTATE_CCW: &str = "\u{e148}"; // rotate-ccw
 pub const PANEL_RIGHT: &str = "\u{e431}"; // panel-right
+pub const CLOCK_PLUS: &str = "\u{e667}"; // clock-plus
+pub const PENCIL_LINE: &str = "\u{e4f0}"; // pencil-line
 
 /// Every icon above, for tests.
 #[cfg(test)]
@@ -327,4 +329,6 @@ pub const ALL: &[(&str, &str)] = &[
     ("SCAN", SCAN),
     ("ROTATE_CCW", ROTATE_CCW),
     ("PANEL_RIGHT", PANEL_RIGHT),
+    ("CLOCK_PLUS", CLOCK_PLUS),
+    ("PENCIL_LINE", PENCIL_LINE),
 ];

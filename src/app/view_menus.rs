@@ -524,7 +524,7 @@ fn filter_value(
     } else {
         let hint = match kind {
             Some(PropertyKind::Number) => "Número",
-            Some(PropertyKind::Date) => "AAAA-MM-DD",
+            Some(PropertyKind::Date | PropertyKind::Created | PropertyKind::Edited) => "AAAA-MM-DD",
             _ => "Texto",
         };
         let field = framed(

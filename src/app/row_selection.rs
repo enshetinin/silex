@@ -264,7 +264,8 @@ fn bulk_menu(ui: &mut egui::Ui, state: &mut DatabaseState, actions: &mut Vec<Tab
         .cloned();
     let Some(property) = chosen else {
         menu_caption(ui, "Propiedad");
-        for property in &state.properties {
+        // «Creado» and «Editado» are Silex's to set (H13.3).
+        for property in state.properties.iter().filter(|p| !p.kind.is_computed()) {
             if ui
                 .button((
                     icons::icon(property_icon(property.kind)),
@@ -295,6 +296,11 @@ fn bulk_menu(ui: &mut egui::Ui, state: &mut DatabaseState, actions: &mut Vec<Tab
         actions.push(TableAction::SetSelected(property.id.clone(), value));
     };
     match property.kind {
+        // Not in the list above; nothing to set or to empty.
+        PropertyKind::Created | PropertyKind::Edited => {
+            menu_caption(ui, "Lo pone Silex: no se puede cambiar.");
+            return;
+        }
         PropertyKind::Checkbox => {
             if ui.button((icons::icon(icons::TODO), " Marcar")).clicked() {
                 set(Some(CellValue::Checkbox(true)));
@@ -335,10 +341,11 @@ fn bulk_menu(ui: &mut egui::Ui, state: &mut DatabaseState, actions: &mut Vec<Tab
                 ui.close();
             }
         }
-        PropertyKind::Text | PropertyKind::Number | PropertyKind::Date => {
+        PropertyKind::Text | PropertyKind::Number | PropertyKind::Date | PropertyKind::Url => {
             let hint = match property.kind {
                 PropertyKind::Number => "0",
                 PropertyKind::Date => "AAAA-MM-DD",
+                PropertyKind::Url => "https://…",
                 _ => "Texto",
             };
             let field = menu_field(
@@ -381,6 +388,7 @@ fn bulk_menu(ui: &mut egui::Ui, state: &mut DatabaseState, actions: &mut Vec<Tab
     if property.kind == PropertyKind::Checkbox {
         return;
     }
+
     ui.separator();
     if ui.button((icons::icon(icons::CLOSE), " Vaciar")).clicked() {
         set(None);

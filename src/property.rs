@@ -4,6 +4,7 @@
 use std::{collections::HashMap, fmt};
 
 use crate::editor::fold;
+use crate::marks::normalize_url;
 
 /// The type of a property. Stored as text; see [`PropertyKind::as_str`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -15,17 +16,26 @@ pub enum PropertyKind {
     Select,
     /// Zero or more options of the property (H13.2, ADR 0018).
     MultiSelect,
+    /// A web address, opened with a click (H13.3).
+    Url,
+    /// When the row was created: read only, from its page (H13.3).
+    Created,
+    /// When the row was last edited: read only, from its page (H13.3).
+    Edited,
 }
 
 impl PropertyKind {
     /// Menu order.
-    pub const ALL: [PropertyKind; 6] = [
+    pub const ALL: [PropertyKind; 9] = [
         PropertyKind::Text,
         PropertyKind::Number,
         PropertyKind::Checkbox,
         PropertyKind::Date,
         PropertyKind::Select,
         PropertyKind::MultiSelect,
+        PropertyKind::Url,
+        PropertyKind::Created,
+        PropertyKind::Edited,
     ];
 
     /// Name stored in SQLite (must match the CHECK in migrations 0005 and
@@ -38,12 +48,21 @@ impl PropertyKind {
             PropertyKind::Date => "date",
             PropertyKind::Select => "select",
             PropertyKind::MultiSelect => "multi_select",
+            PropertyKind::Url => "url",
+            PropertyKind::Created => "created",
+            PropertyKind::Edited => "edited",
         }
     }
 
     /// Whether its cells take options of the property (and it has some).
     pub fn has_options(self) -> bool {
         matches!(self, PropertyKind::Select | PropertyKind::MultiSelect)
+    }
+
+    /// Whether Silex fills its cells from the row's page (when it was
+    /// created or last edited): they are read only and never stored.
+    pub fn is_computed(self) -> bool {
+        matches!(self, PropertyKind::Created | PropertyKind::Edited)
     }
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -59,6 +78,9 @@ impl PropertyKind {
             PropertyKind::Date => "Fecha",
             PropertyKind::Select => "Selección",
             PropertyKind::MultiSelect => "Selección múltiple",
+            PropertyKind::Url => "URL",
+            PropertyKind::Created => "Creado",
+            PropertyKind::Edited => "Editado",
         }
     }
 }
@@ -387,6 +409,48 @@ impl fmt::Display for Date {
     }
 }
 
+/// A date and time to the minute in the system's time zone
+/// (`AAAA-MM-DD HH:MM`): when a row was created or last edited (H13.3).
+/// Ordered in time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Moment {
+    date: Date,
+    hour: u8,
+    minute: u8,
+}
+
+impl Moment {
+    /// Reads `AAAA-MM-DD HH:MM`, as SQLite's `strftime` writes it.
+    pub fn parse(input: &str) -> Option<Self> {
+        let (date, time) = input.trim().split_once(' ')?;
+        let (hour, minute) = time.split_once(':')?;
+        let two_digits = |part: &str| -> Option<u8> {
+            (part.len() == 2 && part.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| part.parse().ok())
+                .flatten()
+        };
+        let (hour, minute) = (two_digits(hour)?, two_digits(minute)?);
+        // Only `AAAA-MM-DD`: `Date::parse` also reads `D/M/AAAA`.
+        let iso = date.len() == 10 && date.as_bytes()[4] == b'-';
+        (hour < 24 && minute < 60 && iso).then_some(Self {
+            date: Date::parse(date)?,
+            hour,
+            minute,
+        })
+    }
+
+    pub fn date(self) -> Date {
+        self.date
+    }
+}
+
+/// `AAAA-MM-DD HH:MM`.
+impl fmt::Display for Moment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {:02}:{:02}", self.date, self.hour, self.minute)
+    }
+}
+
 fn days_in_month(year: u16, month: u8) -> u8 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -439,6 +503,11 @@ pub enum CellValue {
     /// Ids of the property's options, in the property's order (ADR 0018).
     /// No ids is an empty cell.
     MultiSelect(Vec<String>),
+    /// What was typed: a web address if [`CellValue::web_url`] says so.
+    Url(String),
+    /// Read from the row's page, never stored (H13.3).
+    Created(Moment),
+    Edited(Moment),
 }
 
 impl CellValue {
@@ -450,6 +519,9 @@ impl CellValue {
             CellValue::Date(_) => PropertyKind::Date,
             CellValue::Select(_) => PropertyKind::Select,
             CellValue::MultiSelect(_) => PropertyKind::MultiSelect,
+            CellValue::Url(_) => PropertyKind::Url,
+            CellValue::Created(_) => PropertyKind::Created,
+            CellValue::Edited(_) => PropertyKind::Edited,
         }
     }
 
@@ -457,10 +529,28 @@ impl CellValue {
     /// multi-select with no options.
     pub fn is_empty(&self) -> bool {
         match self {
-            CellValue::Text(text) => text.is_empty(),
+            CellValue::Text(text) | CellValue::Url(text) => text.is_empty(),
             CellValue::Checkbox(on) => !on,
             CellValue::MultiSelect(ids) => ids.is_empty(),
             _ => false,
+        }
+    }
+
+    /// The address a URL cell opens: only web (`http`, `https`) and mail
+    /// (`mailto:`) links, as in a block's text (ADR 0015). `None` for
+    /// anything else, which is shown but never opened.
+    pub fn web_url(&self) -> Option<&str> {
+        match self {
+            CellValue::Url(url) if normalize_url(url).as_deref() == Some(url.as_str()) => Some(url),
+            _ => None,
+        }
+    }
+
+    /// The date and time of a «Creado» or «Editado» cell.
+    pub fn moment(&self) -> Option<Moment> {
+        match self {
+            CellValue::Created(moment) | CellValue::Edited(moment) => Some(*moment),
+            _ => None,
         }
     }
 
@@ -525,8 +615,11 @@ impl CellValue {
             PropertyKind::Checkbox => CellValue::Checkbox(flag? == 1),
             PropertyKind::Date => CellValue::Date(Date::parse(&date?)?),
             PropertyKind::Select => CellValue::Select(option?),
+            PropertyKind::Url => CellValue::Url(text?),
             // Not in `db_values` (ADR 0018): read from `db_multi_values`.
             PropertyKind::MultiSelect => return None,
+            // Not stored: read from the row's page.
+            PropertyKind::Created | PropertyKind::Edited => return None,
         };
         (!value.is_empty()).then_some(value)
     }
@@ -535,7 +628,7 @@ impl CellValue {
     /// option's name (empty if the option is gone).
     pub fn display(&self, property: &Property) -> String {
         match self {
-            CellValue::Text(text) => text.clone(),
+            CellValue::Text(text) | CellValue::Url(text) => text.clone(),
             CellValue::Number(n) => format_number(*n),
             CellValue::Checkbox(true) => "Sí".to_owned(),
             CellValue::Checkbox(false) => "No".to_owned(),
@@ -552,6 +645,7 @@ impl CellValue {
                 .map(|o| o.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", "),
+            CellValue::Created(moment) | CellValue::Edited(moment) => moment.to_string(),
         }
     }
 }
@@ -560,8 +654,11 @@ impl CellValue {
 /// cells are absent.
 pub type TableValues = HashMap<String, HashMap<String, CellValue>>;
 
-/// Text typed in a cell of a text, number or date property, turned into
-/// its value. `Ok(None)` empties the cell; `Err` explains what is expected.
+/// Text typed in a cell of a text, number, date or URL property, turned
+/// into its value. `Ok(None)` empties the cell; `Err` explains what is
+/// expected. An address without a scheme (`ejemplo.com`) gets `https://`;
+/// anything else that is not a web address is kept as typed (it is shown,
+/// but not opened).
 pub fn parse_input(kind: PropertyKind, input: &str) -> Result<Option<CellValue>, String> {
     if input.trim().is_empty() {
         return Ok(None);
@@ -577,10 +674,18 @@ pub fn parse_input(kind: PropertyKind, input: &str) -> Result<Option<CellValue>,
             .ok_or_else(|| {
                 format!("«{shown}» no es una fecha válida (AAAA-MM-DD, por ejemplo 2026-10-19).")
             }),
+        PropertyKind::Url => {
+            let typed = input.trim();
+            let url = normalize_url(typed).unwrap_or_else(|| typed.to_owned());
+            Ok(Some(CellValue::Url(url)))
+        }
         PropertyKind::Checkbox | PropertyKind::Select | PropertyKind::MultiSelect => Err(format!(
             "Una {} no se escribe.",
             kind.label().to_lowercase()
         )),
+        PropertyKind::Created | PropertyKind::Edited => {
+            Err(format!("«{}» lo pone Silex: no se escribe.", kind.label()))
+        }
     }
 }
 
@@ -933,5 +1038,110 @@ mod tests {
             None
         );
         assert!(parse_input(PropertyKind::MultiSelect, "x").is_err());
+    }
+
+    #[test]
+    fn a_url_gets_https_and_only_web_addresses_open() {
+        let url = |input: &str| match parse_input(PropertyKind::Url, input) {
+            Ok(Some(CellValue::Url(url))) => url,
+            other => panic!("{input:?}: {other:?}"),
+        };
+        assert_eq!(url(" ejemplo.com/a "), "https://ejemplo.com/a");
+        assert_eq!(url("http://a.es"), "http://a.es");
+        assert_eq!(url("mailto:ana@a.es"), "mailto:ana@a.es");
+        // Kept as typed, but never opened.
+        assert_eq!(url(" file:///etc/passwd "), "file:///etc/passwd");
+        assert_eq!(url("no es una web"), "no es una web");
+        assert_eq!(parse_input(PropertyKind::Url, "  "), Ok(None));
+        let opens = |text: &str| CellValue::Url(text.into()).web_url().map(str::to_owned);
+        assert_eq!(
+            opens("https://a.es/x?y=1"),
+            Some("https://a.es/x?y=1".into())
+        );
+        assert_eq!(opens("mailto:ana@a.es"), Some("mailto:ana@a.es".into()));
+        for refused in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ejemplo.com",
+            "no es una web",
+            "",
+        ] {
+            assert_eq!(opens(refused), None, "{refused:?}");
+        }
+        assert_eq!(CellValue::Text("https://a.es".into()).web_url(), None);
+        assert!(CellValue::Url(String::new()).is_empty());
+        assert_eq!(
+            CellValue::from_columns(
+                PropertyKind::Url,
+                Some("https://a.es".into()),
+                None,
+                None,
+                None,
+                None
+            ),
+            Some(CellValue::Url("https://a.es".into()))
+        );
+    }
+
+    #[test]
+    fn moments_read_and_show_to_the_minute_in_order() {
+        let moment = |s: &str| Moment::parse(s).expect(s);
+        assert_eq!(moment("2026-10-30 09:05").to_string(), "2026-10-30 09:05");
+        assert_eq!(
+            moment("2026-10-30 23:59").date(),
+            Date::parse("2026-10-30").expect("date")
+        );
+        assert!(moment("2026-10-30 09:05") < moment("2026-10-30 10:00"));
+        assert!(moment("2026-10-30 23:59") < moment("2026-10-31 00:00"));
+        assert!(moment("2025-12-31 23:59") < moment("2026-01-01 00:00"));
+        for bad in [
+            "",
+            "2026-10-30",
+            "2026-10-30 24:00",
+            "2026-10-30 12:60",
+            "2026-10-30 9:05",
+            "2026-02-30 10:00",
+            "30/10/2026 10:00",
+            "2026-10-30T10:00",
+            "2026-10-30 10:00:00",
+        ] {
+            assert_eq!(Moment::parse(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn created_and_edited_are_read_only_and_never_stored() {
+        let at = Moment::parse("2026-10-30 14:05").expect("moment");
+        for kind in [PropertyKind::Created, PropertyKind::Edited] {
+            assert!(kind.is_computed());
+            assert!(!kind.has_options());
+            let err = parse_input(kind, "2026-10-30 14:05").expect_err("read only");
+            assert!(err.contains(kind.label()), "{err}");
+            assert_eq!(
+                CellValue::from_columns(
+                    kind,
+                    Some("x".into()),
+                    Some(1.0),
+                    Some(1),
+                    Some("2026-10-30".into()),
+                    None
+                ),
+                None
+            );
+        }
+        assert!(!PropertyKind::Url.is_computed());
+        let property = Property {
+            id: "c".into(),
+            name: "Creado".into(),
+            kind: PropertyKind::Created,
+            options: Vec::new(),
+        };
+        let created = CellValue::Created(at);
+        assert_eq!(created.display(&property), "2026-10-30 14:05");
+        assert_eq!(created.kind(), PropertyKind::Created);
+        assert_eq!(CellValue::Edited(at).kind(), PropertyKind::Edited);
+        assert_eq!(created.moment(), Some(at));
+        assert!(!created.is_empty());
+        assert_eq!(CellValue::Url("x".into()).moment(), None);
     }
 }

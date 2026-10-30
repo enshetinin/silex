@@ -126,6 +126,8 @@ impl SilexApp {
                 // The save already succeeded; a failed list refresh is only a notice.
                 let refreshed = self.reload_pages();
                 self.report(refreshed);
+                let times = self.refresh_row_times(&[&id]);
+                self.report(times);
                 Ok(())
             }
             Err(err) => {
