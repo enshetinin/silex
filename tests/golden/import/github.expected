@@ -5,7 +5,7 @@ numbered 0| Quinto paso
 numbered 0| Sexto paso
 paragraph 1| cargo build --release
 heading_3 0| Detalles de nivel 4
-paragraph 0| <details>⏎<summary>Más</summary>⏎</details>
+toggle 0| Más
 paragraph 0| | Columna | Otra |⏎|---------|------|⏎| a       | b    |
 numbered 0| Lista numerada
 bulleted 1| con viñeta dentro

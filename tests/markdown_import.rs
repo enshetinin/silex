@@ -251,3 +251,69 @@ fn github_alerts_and_obsidian_callouts_become_callouts() {
     };
     assert_eq!(words, "cursiva");
 }
+
+/// H12.4c: toggles as `<details>`, both ways (ADR 0016).
+#[test]
+fn toggles_round_trip_as_details() {
+    use BlockKind::*;
+    let blocks = vec![
+        nb(Paragraph, 0, false, "antes"),
+        nb(Toggle, 0, false, "Pasos <1> & más"),
+        nb(Paragraph, 1, false, "dentro"),
+        nb(Bulleted, 1, false, "punto"),
+        nb(Bulleted, 2, false, "subpunto"),
+        nb(Toggle, 1, false, "anidado"),
+        nb(Code, 2, false, "let x = 1;"),
+        nb(Paragraph, 1, false, "otra vez dentro"),
+        nb(Paragraph, 0, false, "fuera"),
+        nb(Bulleted, 0, false, "lista"),
+        nb(Toggle, 1, false, "en una lista"),
+        nb(Paragraph, 2, false, "su contenido"),
+        nb(Toggle, 0, false, "vacío"),
+        nb(Toggle, 0, false, "al final"),
+        nb(Quote, 1, false, "una cita dentro"),
+    ];
+    let markdown = page_to_markdown("t", &to_blocks(&blocks));
+    assert!(
+        markdown.contains(
+            "\n<details>\n<summary>Pasos &lt;1&gt; &amp; más</summary>\n\ndentro\n\n- punto\n  - subpunto\n"
+        ),
+        "{markdown}"
+    );
+    assert!(
+        markdown.ends_with("> una cita dentro\n\n</details>\n"),
+        "{markdown}"
+    );
+    let back = markdown_to_page(&markdown, "x");
+    assert_eq!(back.blocks, blocks, "markdown was:\n{markdown}");
+    // Stable after one round trip.
+    assert_eq!(page_to_markdown("t", &to_blocks(&back.blocks)), markdown);
+}
+
+#[test]
+fn details_from_github_become_toggles_and_other_html_stays_text() {
+    let page = markdown_to_page(
+        "<details open>\n<summary>Ver <b>más</b></summary>\n\nTexto **dentro**.\n\n</details>\n\n\
+         <DETAILS><SUMMARY>Mayúsculas</SUMMARY></DETAILS>\n\n\
+         <div>otra cosa</div>\n\n\
+         <detailsx>no</detailsx>\n",
+        "x",
+    );
+    let got: Vec<(BlockKind, u8, &str)> = page
+        .blocks
+        .iter()
+        .map(|b| (b.kind, b.indent, b.content.as_str()))
+        .collect();
+    use BlockKind::*;
+    assert_eq!(
+        got,
+        [
+            (Toggle, 0, "Ver <b>más</b>"),
+            (Paragraph, 1, "Texto dentro."),
+            (Toggle, 0, "Mayúsculas"),
+            (Paragraph, 0, "<div>otra cosa</div>"),
+            (Paragraph, 0, "<detailsx>no</detailsx>"),
+        ]
+    );
+    assert_eq!(page.blocks[1].marks.len(), 1, "formatting inside is read");
+}

@@ -66,8 +66,10 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
     let mut callouts: Vec<bool> = Vec::new();
     let mut open: Vec<Open> = Vec::new();
 
-    let depth = |lists: &Vec<bool>| {
-        u8::try_from(lists.len())
+    // Open `<details>` (ADR 0016): what is inside goes one level deeper.
+    let mut toggles = 0usize;
+    let depth = |lists: &Vec<bool>, toggles: usize| {
+        u8::try_from(lists.len() + toggles)
             .unwrap_or(MAX_INDENT)
             .min(MAX_INDENT)
     };
@@ -103,7 +105,7 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
                 } else {
                     BlockKind::Bulleted
                 };
-                let indent = depth(&lists).saturating_sub(1);
+                let indent = depth(&lists, toggles).saturating_sub(1);
                 push(&mut blocks, kind, indent, Inline::default());
                 open_item = Some(blocks.len() - 1);
             }
@@ -144,7 +146,7 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
                 TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::HtmlBlock,
             ) => {
                 let mut content = std::mem::take(&mut inline);
-                let indent = depth(&lists);
+                let indent = depth(&lists, toggles);
                 match target.take() {
                     Some(Target::Item(i)) => {
                         let marks = marks::sanitize(&content.marks, &content.text);
@@ -179,13 +181,37 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
                         }
                         push(&mut blocks, BlockKind::Code, indent, content);
                     }
-                    Some(Target::Html) => {
-                        content
-                            .text
-                            .truncate(content.text.trim_end_matches('\n').len());
-                        content.marks.clear();
-                        push(&mut blocks, BlockKind::Paragraph, indent, content);
-                    }
+                    Some(Target::Html) => match details_tags(&content.text) {
+                        // A toggle (ADR 0016): its title, then its content
+                        // one level deeper until `</details>`.
+                        Some(tags) => {
+                            for tag in tags {
+                                match tag {
+                                    Details::Open => {
+                                        let title = Inline::default();
+                                        let indent = depth(&lists, toggles);
+                                        push(&mut blocks, BlockKind::Toggle, indent, title);
+                                        toggles += 1;
+                                    }
+                                    Details::Summary(title) => {
+                                        if let Some(toggle) = blocks.last_mut().filter(|b| {
+                                            b.kind == BlockKind::Toggle && b.content.is_empty()
+                                        }) {
+                                            toggle.content = title;
+                                        }
+                                    }
+                                    Details::Close => toggles = toggles.saturating_sub(1),
+                                }
+                            }
+                        }
+                        None => {
+                            content
+                                .text
+                                .truncate(content.text.trim_end_matches('\n').len());
+                            content.marks.clear();
+                            push(&mut blocks, BlockKind::Paragraph, indent, content);
+                        }
+                    },
                     None => {}
                 }
             }
@@ -202,7 +228,7 @@ pub fn markdown_to_page(source: &str, fallback_title: &str) -> ImportedPage {
                 push(
                     &mut blocks,
                     BlockKind::Divider,
-                    depth(&lists),
+                    depth(&lists, toggles),
                     Inline::default(),
                 );
             }
@@ -355,6 +381,64 @@ fn obsidian_callout(content: &Inline) -> Option<Option<Inline>> {
     }
     let marks = marks::replace(&content.marks, 0, removed, 0);
     Some(Some(Inline { text, marks }))
+}
+
+/// A tag of a toggle written as HTML (ADR 0016).
+#[derive(Debug, PartialEq, Eq)]
+enum Details {
+    /// `<details>` (or `<details open>`).
+    Open,
+    /// `<summary>title</summary>`, the title unescaped.
+    Summary(String),
+    /// `</details>`.
+    Close,
+}
+
+/// The toggle tags an HTML block is made of, in order, or `None` if it
+/// has anything else (then it stays as text, as before).
+fn details_tags(html: &str) -> Option<Vec<Details>> {
+    let mut tags = Vec::new();
+    let mut rest = html.trim_start();
+    let starts = |rest: &str, tag: &str| {
+        rest.get(..tag.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(tag))
+    };
+    while !rest.is_empty() {
+        if starts(rest, "<details") {
+            let end = rest.find('>')?;
+            // `<detailsx>` is another tag.
+            let after = rest[8..end].chars().next();
+            if after.is_some_and(|c| !c.is_whitespace()) {
+                return None;
+            }
+            tags.push(Details::Open);
+            rest = &rest[end + 1..];
+        } else if starts(rest, "</details>") {
+            tags.push(Details::Close);
+            rest = &rest[10..];
+        } else if starts(rest, "<summary>") {
+            let close = rest.to_ascii_lowercase().find("</summary>")?;
+            let title = rest[9..close].trim();
+            tags.push(Details::Summary(unescape_html(title)));
+            rest = &rest[close + 10..];
+        } else {
+            return None;
+        }
+        rest = rest.trim_start();
+    }
+    (!tags.is_empty()).then_some(tags)
+}
+
+/// The text of HTML: the character references export writes, and the
+/// common ones other apps do.
+fn unescape_html(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
 }
 
 fn is_autolink(link_type: LinkType) -> bool {

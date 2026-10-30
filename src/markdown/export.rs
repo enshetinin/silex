@@ -23,6 +23,9 @@ const ESCAPED: &[char] = &[
 ///   `~~tachado~~` and `[texto](url)`; see [`inline_lines`].
 /// - A divider is `---`; a callout, a GitHub alert (`> [!NOTE]`), which
 ///   Obsidian also reads.
+/// - A toggle is `<details>` with its title in `<summary>` (plain text: no
+///   Markdown inside HTML) and its content inside, at the toggle's own
+///   column, until `</details>` (ADR 0016).
 /// - Empty paragraphs cannot be represented and are skipped.
 pub fn page_to_markdown(title: &str, blocks: &[Block]) -> String {
     page_to_markdown_with(title, blocks, &HashMap::new(), &HashMap::new())
@@ -59,13 +62,28 @@ pub fn page_to_markdown_with(
     // the latest block at that level was a list item.
     let mut item_widths: Vec<Option<usize>> = Vec::new();
     let mut previous_was_item = false;
+    // Open toggles (ADR 0016): their indent, their level in the Markdown
+    // and their leading. Their content starts again at their level.
+    let mut toggles: Vec<(u8, usize, String)> = Vec::new();
     for (block, number) in blocks.iter().zip(numbers) {
         if block.kind == BlockKind::Paragraph && block.content.is_empty() {
             continue;
         }
+        while let Some((indent, level, leading)) = toggles.last()
+            && block.indent <= *indent
+        {
+            close_details(&mut out, leading);
+            item_widths.truncate(*level);
+            previous_was_item = false;
+            toggles.pop();
+        }
+        let indent = match toggles.last() {
+            Some((toggle, level, _)) => level + usize::from(block.indent - toggle - 1),
+            None => usize::from(block.indent),
+        };
         let mut level = 0;
         let mut leading = String::new();
-        while level < usize::from(block.indent) {
+        while level < indent {
             match item_widths.get(level).copied().flatten() {
                 Some(width) => {
                     leading.push_str(&" ".repeat(width));
@@ -133,6 +151,15 @@ pub fn page_to_markdown_with(
                 out.push_str(&leading);
                 out.push_str("---\n");
             }
+            BlockKind::Toggle => {
+                out.push_str(&leading);
+                out.push_str("<details>\n");
+                out.push_str(&leading);
+                out.push_str("<summary>");
+                out.push_str(&escape_html(&block.content.replace('\n', " ")));
+                out.push_str("</summary>\n");
+                toggles.push((block.indent, level, leading.clone()));
+            }
             BlockKind::Callout => {
                 let prefix = format!("{leading}> ");
                 out.push_str(&prefix);
@@ -170,7 +197,25 @@ pub fn page_to_markdown_with(
         });
         previous_was_item = is_item;
     }
+    while let Some((_, _, leading)) = toggles.pop() {
+        close_details(&mut out, &leading);
+    }
     out
+}
+
+/// Ends a toggle's `<details>`, after a blank line so the HTML is a
+/// block of its own.
+fn close_details(out: &mut String, leading: &str) {
+    out.push('\n');
+    out.push_str(leading);
+    out.push_str("</details>\n");
+}
+
+/// Text inside HTML (a toggle's `<summary>`): `&`, `<` and `>` escaped.
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// A path written between `<…>`: no `<`, `>` or line breaks.

@@ -440,3 +440,9 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Arrastra un desplegable plegado por su asa: lo oculto va con él y sigue plegado.
 - Tab en el título de un desplegable (con un bloque encima): él y su contenido se sangran un nivel. Mayús+Tab los saca.
 - Retroceso al inicio del título lo vuelve párrafo y su contenido se queda donde está.
+
+## 48. Desplegable en Markdown (H12.4c, ADR 0016)
+- Exporta una página con desplegables (uno anidado, uno dentro de una lista, uno vacío) a Markdown. Ábrela en GitHub o en Obsidian: cada uno se ve plegable con su título y su contenido dentro.
+- Importa ese `.md`: vuelven los mismos desplegables con su contenido y sangría. El formato del título se pierde (va como texto).
+- Un título con `<`, `>` o `&` se exporta escapado y vuelve igual.
+- Importa un README de GitHub con `<details><summary>…</summary>` y texto dentro (separado por líneas en blanco): es un desplegable. Otro HTML (`<div>`, `<br>`) sigue como texto.
