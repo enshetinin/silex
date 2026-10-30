@@ -3487,6 +3487,43 @@ fn the_history_lists_versions_and_restores_one_that_cmd_z_takes_back() -> anyhow
     Ok(())
 }
 
+// ---- H12.10: comparing a version with the page now ----
+
+#[test]
+fn comparing_a_version_says_what_changed_and_follows_the_chosen_one() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, page) = page_history::history_fixture()?;
+    let ctx = egui::Context::default();
+    page_history::open_fixed_history(&mut app)?;
+    app_frame(&mut app, &ctx, vec![]);
+    if let Some(history) = &mut app.page_history {
+        history.compare = true;
+    }
+    // The newest version (10 blocks, «Recetas de otoño»): the paragraph
+    // is the same block, edited; the rest is gone.
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    let summary = "Desde esta versión: 9 bloques quitados y 1 cambiado. El título también cambió.";
+    assert!(painted.iter().any(|t| t == summary), "{painted:?}");
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.contains("Solo queda la idea de la sopa."))
+    );
+    // ↓ chooses an older version and compares that one.
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    let summary = "Desde esta versión: 7 bloques quitados y 1 cambiado. El título también cambió.";
+    assert!(painted.iter().any(|t| t == summary), "{painted:?}");
+    // Comparing changes nothing; Intro still restores the version.
+    assert_eq!(app.title, "Recetas");
+    assert_eq!(app.db.page_versions(&page)?.len(), 3);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.page_history.is_none());
+    assert_eq!(app.title, "Recetas de otoño");
+    assert_eq!(app.blocks.len(), 8);
+    Ok(())
+}
+
 #[test]
 fn escape_closes_the_history_without_changes() -> anyhow::Result<()> {
     use egui::{Key, Modifiers as M};

@@ -14,6 +14,7 @@ use silex_desktop::{
 mod blocks;
 mod board;
 mod cells;
+mod compare;
 mod database;
 mod date_picker;
 mod dialogs;

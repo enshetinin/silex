@@ -511,3 +511,13 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Renombra «Diario» o muévelo dentro de otra página: «Hoy» sigue usándolo. Mándalo a la papelera: «Hoy» crea otro.
 - Guarda una página como plantilla con `{{fecha}}` dentro y elígela en Ajustes → «Plantilla del diario»: el próximo día nuevo sale de ella, con la fecha escrita y su icono. «Ninguna»: los días nuevos salen vacíos. Si borras la plantilla, también.
 - «Atajos de teclado» lista Cmd/Ctrl+Mayús+D. Con VoiceOver, la fila se anuncia «Abrir la nota de hoy».
+
+## 56. Comparar versiones (H12.10)
+- Edita una página con historial (o espera 10 minutos entre cambios), abre «…» → «Historial de versiones…» y pulsa «Comparar con la actual»: arriba, el resumen y la leyenda; debajo, la página con lo añadido en verde, lo quitado en rojo y tachado y lo cambiado con una barra ámbar.
+- Cambia una palabra de un párrafo: solo esa palabra sale tachada y la nueva en verde. Reescríbelo entero: el texto viejo tachado y el nuevo entero, no palabras sueltas mezcladas.
+- Convierte un bloque en título, marca una tarea, sángrala o pon una palabra en negrita: el bloque sale cambiado con su nota («Antes: Texto», «Marcada», «Cambió la sangría», «Cambió el formato»).
+- Mueve un bloque arriba: sale quitado donde estaba y añadido donde está. Cambia el título de la página: sale marcado y el resumen dice «El título también cambió.»
+- Con la comparación activa, ↑ ↓ eligen otra versión y la comparan. Otro clic en «Comparar con la actual» vuelve a la versión sola. Intro (o «Restaurar esta versión») restaura como siempre; Cmd/Ctrl+Z lo deshace.
+- Una página sin cambios desde la versión: «La página está igual que en esta versión.»
+- Tema oscuro: los colores se distinguen y el texto se lee.
+- Con VoiceOver, cada bloque marcado se anuncia con lo que le pasó («Quitado: …», «Añadido: …», «Cambiado: …»).

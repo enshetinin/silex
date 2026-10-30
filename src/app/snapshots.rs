@@ -2858,6 +2858,80 @@ fn page_history() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- H12.10: comparing a version with the page now ----
+
+#[test]
+fn comparing_a_version_has_names_for_what_changed() -> anyhow::Result<()> {
+    let (mut app, _) = super::page_history::history_fixture()?;
+    super::page_history::open_fixed_history(&mut app)?;
+    let mut harness = a11y_harness(app);
+    harness.run();
+    click_button(&mut harness, "Comparar con la actual");
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .page_history
+            .as_ref()
+            .is_some_and(|h| h.compare)
+    );
+    harness.run();
+    assert_accessible(&harness, "page history compared");
+    for label in [
+        "Quitado: Sopas",
+        "Quitado: Comprar calabaza",
+        "Cambiado: Solo queda la idea de la sopa.",
+    ] {
+        assert!(has_label(&harness, label), "no «{label}»");
+    }
+    // A second click goes back to the version alone.
+    click_button(&mut harness, "Comparar con la actual");
+    harness.run();
+    assert!(!has_label(&harness, "Quitado: Sopas"));
+    Ok(())
+}
+
+/// Whether some node is named `label` (labels included, which
+/// `query_by_label` leaves out).
+fn has_label(harness: &Harness<'_, SilexApp>, label: &str) -> bool {
+    harness
+        .root()
+        .children_recursive()
+        .any(|n| n.accesskit_node().label().as_deref() == Some(label))
+}
+
+/// The second version (19 oct) compared with the page now.
+fn page_history_compared(theme: eframe::egui::Theme, name: &str) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (mut app, _) = super::page_history::history_fixture()?;
+    super::page_history::open_fixed_history(&mut app)?;
+    if let Some(history) = &mut app.page_history {
+        history.selected = 1;
+        history.compare = true;
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+#[test]
+fn page_history_compared_light() -> anyhow::Result<()> {
+    page_history_compared(eframe::egui::Theme::Light, "page_history_compared_light")
+}
+
+#[test]
+fn page_history_compared_dark() -> anyhow::Result<()> {
+    page_history_compared(eframe::egui::Theme::Dark, "page_history_compared_dark")
+}
+
 // ---- H7.5: links between pages ----
 
 /// «Diario» with a paragraph, a link to «Diseño de la interfaz» (inside
