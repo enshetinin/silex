@@ -77,6 +77,7 @@ CREATE TABLE db_views (
 - **Borrar una propiedad es lógico** (`deleted_at`): sus valores se conservan y se puede restaurar desde el menú de la base de datos. Las páginas nunca se borran físicamente, así que los `ON DELETE CASCADE` son solo una red de seguridad.
 - **Configuración de las vistas**: un JSON con orden, filtros, propiedades ocultas, anchos de columna y, en Kanban, la propiedad de agrupación. Se valida al leer como los ajustes (`settings`): claves desconocidas o valores inválidos se ignoran y se usa el valor por defecto; una vista dañada nunca impide abrir la base.
 - **Cambiar el tipo de una propiedad** queda fuera de la primera versión: se crea una propiedad nueva. Si se añade, será con conversión explícita en una transacción y conservando el valor original.
+  - *Actualización (ADR 0019, H13.4):* se añade así. Los valores que no encajan se guardan ocultos en su columna y vuelven al volver al tipo anterior, y Cmd+Z deshace exacto.
 
 ### Encaje con lo que ya existe
 - **Árbol:** la base de datos aparece en la barra lateral con su icono; sus filas no (como en Notion), y se abren desde la tabla, la búsqueda o los favoritos. Las subpáginas de una fila son subpáginas normales de esa fila.

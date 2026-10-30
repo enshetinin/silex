@@ -16,7 +16,8 @@ use crate::model::{
     Block, BlockKind, DatabaseView, MAX_INDENT, NewBlock, Page, PageKind, TrashItem, ViewKind,
 };
 use crate::property::{
-    CellValue, Moment, OptionColor, Property, PropertyKind, SelectOption, TableValues,
+    self as property_conv, CellValue, Converted, Moment, OptionColor, OptionRef, Property,
+    PropertyKind, SelectOption, TableValues,
 };
 use crate::search::{self, BlockMatch, Candidate, SearchHit};
 use crate::settings::Settings;
@@ -1437,6 +1438,157 @@ impl Database {
         Ok(values)
     }
 
+    /// What changing the type of the live property `id` to `to` would do
+    /// (H13.4, ADR 0019), without changing anything.
+    pub fn preview_kind_change(&self, id: &str, to: PropertyKind) -> Result<KindChange> {
+        Ok(plan_kind_change(&self.conn, id, to)?.change)
+    }
+
+    /// Changes the type of the live property `id` to `to` in one
+    /// transaction (ADR 0019): each cell gets back the value it had with
+    /// that type before, else its value converted (`property::convert`),
+    /// else it is left empty. Only the column of the new type is written:
+    /// nothing is deleted. New options are created, and the filters on the
+    /// property leave every view. Returns what undoes it exactly.
+    pub fn change_property_kind(&mut self, id: &str, to: PropertyKind) -> Result<KindSnapshot> {
+        let now = now(&self.conn, self.clock.as_deref())?;
+        let tx = self.conn.transaction()?;
+        let plan = plan_kind_change(&tx, id, to)?;
+        let mut snapshot = KindSnapshot {
+            property: id.to_owned(),
+            kind: plan.property.kind,
+            updated_at: tx.query_row(
+                "SELECT updated_at FROM db_properties WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )?,
+            values: read_stored_values(&tx, id)?,
+            multi: tx
+                .prepare(
+                    "SELECT page_id, option_id FROM db_multi_values WHERE property_id = ?1
+                     ORDER BY page_id, option_id",
+                )?
+                .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?,
+            created: Vec::new(),
+            views: plan
+                .views
+                .iter()
+                .map(|(view, old, _)| (view.clone(), old.clone()))
+                .collect(),
+        };
+        // New options, after the property's, with the colors in turn.
+        let mut options: Vec<SelectOption> = plan.property.options.clone();
+        for name in &plan.change.new_options {
+            let option = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO db_select_options (id, property_id, name, color, position)
+                 VALUES (?1, ?2, ?3, ?4,
+                         (SELECT COALESCE(MAX(position), -1) + 1 FROM db_select_options
+                          WHERE property_id = ?2))",
+                params![
+                    option,
+                    id,
+                    name,
+                    OptionColor::for_new_option(options.len()).as_str()
+                ],
+            )?;
+            options.push(SelectOption {
+                id: option.clone(),
+                name: name.clone(),
+                color: OptionColor::Gray,
+            });
+            snapshot.created.push(option);
+        }
+        let options = OptionIndex::new(&options);
+        for (row, value) in &plan.writes {
+            write_converted(&tx, id, row, value, plan.to, &options)?;
+        }
+        tx.execute(
+            "UPDATE db_properties SET kind = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, plan.to.as_str(), now],
+        )?;
+        for (view, _, config) in &plan.views {
+            tx.execute(
+                "UPDATE db_views SET config = ?2 WHERE id = ?1",
+                params![view, config],
+            )?;
+        }
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
+    /// Puts a property back as it was before [`Self::change_property_kind`]
+    /// (Cmd+Z): its type, its cells as stored and the views' filters; the
+    /// options that change created are deleted. Cells of pages deleted for
+    /// good, and options deleted since, are left out.
+    pub fn restore_property_kind(&mut self, snapshot: &KindSnapshot) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let affected = tx.execute(
+            "UPDATE db_properties SET kind = ?2, updated_at = ?3 WHERE id = ?1",
+            params![
+                snapshot.property,
+                snapshot.kind.as_str(),
+                snapshot.updated_at
+            ],
+        )?;
+        ensure!(affected == 1, "La propiedad ya no existe");
+        tx.execute(
+            "DELETE FROM db_values WHERE property_id = ?1",
+            [&snapshot.property],
+        )?;
+        tx.execute(
+            "DELETE FROM db_multi_values WHERE property_id = ?1",
+            [&snapshot.property],
+        )?;
+        for option in &snapshot.created {
+            tx.execute(
+                "DELETE FROM db_select_options WHERE id = ?1 AND property_id = ?2",
+                params![option, snapshot.property],
+            )?;
+        }
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO db_values (page_id, property_id, text_value, number_value, bool_value,
+                                        date_value, option_id, updated_at)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6,
+                        (SELECT id FROM db_select_options WHERE id = ?7 AND property_id = ?2), ?8
+                 WHERE EXISTS (SELECT 1 FROM pages WHERE id = ?1)",
+            )?;
+            for v in &snapshot.values {
+                insert.execute(params![
+                    v.page,
+                    snapshot.property,
+                    v.text,
+                    v.number,
+                    v.flag,
+                    v.date,
+                    v.option,
+                    v.updated_at
+                ])?;
+            }
+        }
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO db_multi_values (page_id, property_id, option_id)
+                 SELECT ?1, ?2, ?3
+                 WHERE EXISTS (SELECT 1 FROM pages WHERE id = ?1)
+                   AND EXISTS (SELECT 1 FROM db_select_options WHERE id = ?3 AND property_id = ?2)",
+            )?;
+            for (page, option) in &snapshot.multi {
+                insert.execute(params![page, snapshot.property, option])?;
+            }
+        }
+        for (view, config) in &snapshot.views {
+            tx.execute(
+                "UPDATE db_views SET config = ?2 WHERE id = ?1",
+                params![view, config],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// The «Creado» and «Editado» values of one live row (property id →
     /// value): read again after the row changes (H13.3).
     pub fn row_times(&self, row_id: &str) -> Result<HashMap<String, CellValue>> {
@@ -2598,6 +2750,74 @@ impl Database {
     }
 }
 
+/// What changing a property's type does (H13.4, ADR 0019): shown before
+/// it is done, and computed by the same plan that does it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KindChange {
+    /// Cells whose value is converted to the new type.
+    pub converted: usize,
+    /// Cells that show again the value they had with the new type before
+    /// (stored and never edited since).
+    pub restored: usize,
+    /// Cells whose value does not fit: left empty, the value kept hidden.
+    pub emptied: usize,
+    /// Options that will be created, in order.
+    pub new_options: Vec<String>,
+    /// Filters on the property that are taken out of the views.
+    pub filters: usize,
+}
+
+/// A property as it was before its type changed: what
+/// [`Database::restore_property_kind`] puts back exactly (ADR 0019).
+#[derive(Debug, Clone, PartialEq)]
+pub struct KindSnapshot {
+    property: String,
+    kind: PropertyKind,
+    updated_at: String,
+    values: Vec<ValueRow>,
+    /// `db_multi_values` rows: (page, option).
+    multi: Vec<(String, String)>,
+    /// Options the change created.
+    created: Vec<String>,
+    /// Views whose filters changed: (view, config as it was).
+    views: Vec<(String, String)>,
+}
+
+impl KindSnapshot {
+    /// The property it is of.
+    pub fn property(&self) -> &str {
+        &self.property
+    }
+
+    /// Its type before the change.
+    pub fn kind(&self) -> PropertyKind {
+        self.kind
+    }
+}
+
+/// A `db_values` row of one property, as stored.
+#[derive(Debug, Clone, PartialEq)]
+struct ValueRow {
+    page: String,
+    text: Option<String>,
+    number: Option<f64>,
+    flag: Option<i64>,
+    date: Option<String>,
+    option: Option<String>,
+    updated_at: String,
+}
+
+/// What a type change will do: its preview, the cells to write and the
+/// views to change.
+struct KindPlan {
+    property: Property,
+    to: PropertyKind,
+    change: KindChange,
+    writes: Vec<(String, Converted)>,
+    /// (view, config as it is, config without the property's filters).
+    views: Vec<(String, String, String)>,
+}
+
 /// Which properties [`read_properties`] lists.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Deleted {
@@ -2763,6 +2983,319 @@ fn read_times(
 const ROW_TIME: &str = "strftime('%Y-%m-%d %H:%M',
                                  CASE p.kind WHEN 'created' THEN r.created_at ELSE r.updated_at END,
                                  'localtime')";
+
+/// Plans changing the type of the live property `id` to `to` (ADR 0019):
+/// what each cell becomes, the options to create and the views to change.
+fn plan_kind_change(conn: &Connection, id: &str, to: PropertyKind) -> Result<KindPlan> {
+    let database: String = conn
+        .query_row(
+            "SELECT database_id FROM db_properties WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .context("La propiedad no existe o está borrada")?;
+    let property = read_properties(conn, &database, Deleted::No)?
+        .into_iter()
+        .find(|p| p.id == id)
+        .context("La propiedad es de un tipo que esta versión no conoce")?;
+    let from = property.kind;
+    ensure!(from != to, "La propiedad ya es de tipo «{}»", to.label());
+    // The cells as they read now, and what the column of the new type
+    // already holds.
+    let current = cells_as(conn, &database, &property, from)?;
+    let before = if to.is_computed() {
+        HashMap::new()
+    } else {
+        cells_as(conn, &database, &property, to)?
+    };
+    // Rows in their manual order (new options are named in that order),
+    // then pages that left the database, which keep their values.
+    let mut order: Vec<String> = conn
+        .prepare("SELECT id FROM pages WHERE parent_id = ?1 ORDER BY sort_order, created_at, id")?
+        .query_map([&database], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let known: std::collections::HashSet<String> = order.iter().cloned().collect();
+    let mut others: Vec<String> = current
+        .keys()
+        .chain(before.keys())
+        .filter(|row| !known.contains(*row))
+        .cloned()
+        .collect();
+    others.sort();
+    others.dedup();
+    order.extend(others);
+
+    let same_column = matches!(
+        (from, to),
+        (
+            PropertyKind::Text | PropertyKind::Url,
+            PropertyKind::Text | PropertyKind::Url
+        )
+    );
+    let mut change = KindChange::default();
+    let mut writes = Vec::new();
+    let mut new_names: Vec<String> = Vec::new();
+    // Options by name, ignoring case and accents: those of the property
+    // and the new ones.
+    let mut named: std::collections::HashSet<String> = property
+        .options
+        .iter()
+        .map(|o| crate::editor::fold(o.name.trim()))
+        .collect();
+    for row in &order {
+        let value = current.get(row);
+        if to.is_computed() {
+            change.emptied += usize::from(value.is_some());
+            continue;
+        }
+        if same_column {
+            change.converted += usize::from(value.is_some());
+            continue;
+        }
+        if before.contains_key(row) {
+            change.restored += 1;
+            continue;
+        }
+        let Some(value) = value else {
+            continue;
+        };
+        let Some(converted) = property_conv::convert(value, &property, to) else {
+            change.emptied += 1;
+            continue;
+        };
+        if let Converted::Options(refs) = &converted {
+            for name in refs.iter().filter_map(|r| match r {
+                OptionRef::Name(name) => Some(name),
+                OptionRef::Id(_) => None,
+            }) {
+                if named.insert(crate::editor::fold(name.trim())) {
+                    new_names.push(name.clone());
+                }
+            }
+        }
+        change.converted += 1;
+        writes.push((row.clone(), converted));
+    }
+    change.new_options = new_names;
+
+    let mut views = Vec::new();
+    let mut stmt =
+        conn.prepare("SELECT id, config FROM db_views WHERE database_id = ?1 ORDER BY id")?;
+    let mut rows = stmt.query([&database])?;
+    while let Some(r) = rows.next()? {
+        let (view, json): (String, String) = (r.get(0)?, r.get(1)?);
+        let mut config = ViewConfig::from_json(&json);
+        let before = config.filters.len();
+        config.filters.retain(|f| f.property != id);
+        let taken = before - config.filters.len();
+        if taken > 0 {
+            change.filters += taken;
+            views.push((view, json, config.to_json()));
+        }
+    }
+    Ok(KindPlan {
+        property,
+        to,
+        change,
+        writes,
+        views,
+    })
+}
+
+/// The cells of `property` read as if it were of type `kind`: page id →
+/// value, for every page that has one (also rows in the trash, and pages
+/// that left the database). «Creado» and «Editado» come from the rows of
+/// `database`.
+fn cells_as(
+    conn: &Connection,
+    database: &str,
+    property: &Property,
+    kind: PropertyKind,
+) -> Result<HashMap<String, CellValue>> {
+    let mut cells = HashMap::new();
+    match kind {
+        PropertyKind::Created | PropertyKind::Edited => {
+            let column = if kind == PropertyKind::Created {
+                "SELECT id, strftime('%Y-%m-%d %H:%M', created_at, 'localtime') FROM pages WHERE parent_id = ?1"
+            } else {
+                "SELECT id, strftime('%Y-%m-%d %H:%M', updated_at, 'localtime') FROM pages WHERE parent_id = ?1"
+            };
+            let mut stmt = conn.prepare(column)?;
+            let mut rows = stmt.query([database])?;
+            while let Some(r) = rows.next()? {
+                let local: Option<String> = r.get(1)?;
+                if let Some(moment) = local.as_deref().and_then(Moment::parse) {
+                    let value = if kind == PropertyKind::Created {
+                        CellValue::Created(moment)
+                    } else {
+                        CellValue::Edited(moment)
+                    };
+                    cells.insert(r.get(0)?, value);
+                }
+            }
+        }
+        PropertyKind::MultiSelect => {
+            let multi = read_multi_values(
+                conn,
+                "SELECT m.page_id, m.property_id, m.option_id
+                 FROM db_multi_values m
+                 JOIN db_select_options o ON o.id = m.option_id
+                 WHERE m.property_id = ?1
+                 ORDER BY m.page_id, o.position, o.id",
+                &property.id,
+            )?;
+            for ((page, _), ids) in multi {
+                cells.insert(page, CellValue::MultiSelect(ids));
+            }
+        }
+        _ => {
+            let mut stmt = conn.prepare(
+                "SELECT v.page_id, v.text_value, v.number_value, v.bool_value, v.date_value, o.id
+                 FROM db_values v
+                 LEFT JOIN db_select_options o ON o.id = v.option_id AND o.property_id = v.property_id
+                 WHERE v.property_id = ?1",
+            )?;
+            let mut rows = stmt.query([&property.id])?;
+            while let Some(r) = rows.next()? {
+                let value = CellValue::from_columns(
+                    kind,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                );
+                if let Some(value) = value {
+                    cells.insert(r.get(0)?, value);
+                }
+            }
+        }
+    }
+    Ok(cells)
+}
+
+/// Every `db_values` row of a property, as stored (for undo).
+fn read_stored_values(conn: &Connection, property: &str) -> Result<Vec<ValueRow>> {
+    Ok(conn
+        .prepare(
+            "SELECT page_id, text_value, number_value, bool_value, date_value, option_id, updated_at
+             FROM db_values WHERE property_id = ?1 ORDER BY page_id",
+        )?
+        .query_map([property], |r| {
+            Ok(ValueRow {
+                page: r.get(0)?,
+                text: r.get(1)?,
+                number: r.get(2)?,
+                flag: r.get(3)?,
+                date: r.get(4)?,
+                option: r.get(5)?,
+                updated_at: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// A property's options by id and by name (ignoring case and accents; the
+/// first of the same name), to find those of converted cells at once.
+struct OptionIndex {
+    ids: std::collections::HashSet<String>,
+    names: HashMap<String, String>,
+}
+
+impl OptionIndex {
+    fn new(options: &[SelectOption]) -> Self {
+        let mut names = HashMap::new();
+        for option in options {
+            names
+                .entry(crate::editor::fold(option.name.trim()))
+                .or_insert_with(|| option.id.clone());
+        }
+        Self {
+            ids: options.iter().map(|o| o.id.clone()).collect(),
+            names,
+        }
+    }
+
+    fn find(&self, option: &OptionRef) -> Option<String> {
+        match option {
+            OptionRef::Id(id) => self.ids.contains(id).then(|| id.clone()),
+            OptionRef::Name(name) => self.names.get(&crate::editor::fold(name.trim())).cloned(),
+        }
+    }
+}
+
+/// Writes a converted cell: only the column of type `to` (for a
+/// multi-select, the cell's `db_multi_values` rows).
+fn write_converted(
+    tx: &Connection,
+    property_id: &str,
+    row: &str,
+    value: &Converted,
+    to: PropertyKind,
+    options: &OptionIndex,
+) -> Result<()> {
+    let upsert = |sql: &str, value: &dyn rusqlite::ToSql| -> Result<()> {
+        tx.execute(sql, params![row, property_id, value])?;
+        Ok(())
+    };
+    match value {
+        Converted::Text(text) => upsert(
+            "INSERT INTO db_values (page_id, property_id, text_value) VALUES (?1, ?2, ?3)
+             ON CONFLICT (page_id, property_id) DO UPDATE SET text_value = excluded.text_value",
+            text,
+        ),
+        Converted::Number(n) => {
+            ensure!(n.is_finite(), "El número no es válido");
+            upsert(
+                "INSERT INTO db_values (page_id, property_id, number_value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (page_id, property_id) DO UPDATE SET number_value = excluded.number_value",
+                n,
+            )
+        }
+        Converted::Checkbox(on) => upsert(
+            "INSERT INTO db_values (page_id, property_id, bool_value) VALUES (?1, ?2, ?3)
+             ON CONFLICT (page_id, property_id) DO UPDATE SET bool_value = excluded.bool_value",
+            &i64::from(*on),
+        ),
+        Converted::Date(date) => upsert(
+            "INSERT INTO db_values (page_id, property_id, date_value) VALUES (?1, ?2, ?3)
+             ON CONFLICT (page_id, property_id) DO UPDATE SET date_value = excluded.date_value",
+            &date.to_string(),
+        ),
+        Converted::Options(refs) => {
+            let mut ids: Vec<String> = Vec::new();
+            for r in refs {
+                let id = options
+                    .find(r)
+                    .context("Falta una opción de la conversión")?;
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            if to == PropertyKind::Select {
+                let first = ids.first().context("Una selección sin opción")?;
+                upsert(
+                    "INSERT INTO db_values (page_id, property_id, option_id) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (page_id, property_id) DO UPDATE SET option_id = excluded.option_id",
+                    first,
+                )
+            } else {
+                tx.execute(
+                    "DELETE FROM db_multi_values WHERE page_id = ?1 AND property_id = ?2",
+                    params![row, property_id],
+                )?;
+                for id in &ids {
+                    tx.execute(
+                        "INSERT INTO db_multi_values (page_id, property_id, option_id) VALUES (?1, ?2, ?3)",
+                        params![row, property_id, id],
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
 
 /// Writes one cell inside `tx` (see [`Database::set_value`] for the rules).
 fn write_value(
