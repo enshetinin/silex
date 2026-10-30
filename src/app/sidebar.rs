@@ -695,6 +695,18 @@ impl SilexApp {
         // «Silex» is in the window's top bar; a new page is «Páginas +»
         // (or Cmd+N).
         self.search_button(ui, p);
+        ui.add_space(theme::space::XS);
+        // Today's note (H12.9).
+        let shortcut = format!("{}+Mayús+D", cmd_label(ui.ctx()));
+        let today = sidebar_row(ui, &RowParts::nav(icons::CALENDAR, "Hoy", Some(shortcut)));
+        // «Hoy» alone would be any «Hoy» (a date picker has one too).
+        ui.ctx().accesskit_node_builder(today.row.id, |node| {
+            node.set_label("Abrir la nota de hoy");
+        });
+        if today.row.clicked() {
+            let result = self.open_today();
+            self.report(result);
+        }
         ui.add_space(theme::space::MD);
 
         // The tree is drawn before the footer, so Tab goes through them in
@@ -908,6 +920,8 @@ impl SilexApp {
         );
         let ctx = ui.ctx().clone();
         self.set_settings(&ctx, settings);
+        ui.add_space(theme::space::SM);
+        self.journal_template_menu(ui);
         self.privacy_section(ui);
         ui.separator();
         // ADR 0014: the version, and a page to compare it with; no request.
@@ -975,6 +989,7 @@ impl SilexApp {
                         "Plegar o desplegar",
                     ),
                     (format!("{cmd}+Mayús+V"), "Pegar como texto plano"),
+                    (format!("{cmd}+Mayús+D"), "Abrir la nota de hoy"),
                     (
                         "Arrastrar el asa".to_owned(),
                         "Mover el bloque (Esc cancela)",

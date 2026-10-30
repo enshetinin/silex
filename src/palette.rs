@@ -34,6 +34,8 @@ pub enum Command {
     CopyMarkdown,
     /// The icon picker of the open page (H12.8).
     PageIcon,
+    /// Today's note in the journal (H12.9).
+    OpenToday,
     AddFavorite,
     RemoveFavorite,
     ExportPage,
@@ -100,8 +102,9 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 42] = [
+    pub const ALL: [Command; 43] = [
         Command::NewPage,
+        Command::OpenToday,
         Command::NewDatabase,
         Command::NewSubpage,
         Command::NewRow,
@@ -162,6 +165,7 @@ impl Command {
             Command::ToSubpage => "Convertir en subpágina",
             Command::CopyMarkdown => "Copiar la página como Markdown",
             Command::PageIcon => "Cambiar el icono de la página…",
+            Command::OpenToday => "Abrir la nota de hoy",
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
@@ -209,6 +213,7 @@ impl Command {
             Command::ToSubpage => &["subpagina", "pagina", "nueva", "extraer", "page"],
             Command::CopyMarkdown => &["md", "portapapeles", "texto", "copy", "markdown"],
             Command::PageIcon => &["emoji", "icono", "imagen", "simbolo", "icon"],
+            Command::OpenToday => &["hoy", "diario", "dia", "fecha", "journal", "today"],
             Command::ToggleOutline => &[
                 "indice",
                 "titulos",
@@ -282,6 +287,7 @@ impl Command {
             Command::MoveBlocks => cx.page_open && !cx.database_open && cx.blocks_target,
             Command::CopyMarkdown => cx.page_open && !cx.database_open,
             Command::PageIcon => cx.page_open,
+            Command::OpenToday => true,
             // A template has no subpages (ADR 0010).
             Command::ToSubpage => {
                 cx.page_open && !cx.database_open && cx.blocks_target && !cx.template_open
@@ -412,6 +418,16 @@ mod tests {
             database_open: true,
             ..editing
         }));
+    }
+
+    #[test]
+    fn todays_note_is_always_offered() {
+        let nothing = PaletteContext {
+            page_open: false,
+            ..cx()
+        };
+        assert_eq!(matching_commands("hoy", &nothing)[0], Command::OpenToday);
+        assert!(matching_commands("diario", &nothing).contains(&Command::OpenToday));
     }
 
     #[test]

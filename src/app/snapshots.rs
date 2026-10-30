@@ -3892,3 +3892,33 @@ fn the_icon_picker_works_with_real_clicks() -> anyhow::Result<()> {
     assert!(!harness.state().page_icons.contains_key(&open));
     Ok(())
 }
+
+/// H12.9: «Hoy» in the sidebar opens today's note; Ajustes chooses the
+/// template new days come from.
+#[test]
+fn hoy_and_the_journal_template_work_with_real_clicks() -> anyhow::Result<()> {
+    let mut app = demo_app()?;
+    let open = app.selected.clone().expect("page");
+    app.db.save_as_template(&open)?;
+    app.reload_pages()?;
+    let mut harness = emoji_harness(app, [1100.0, 760.0]);
+    harness.get_by_label("Ajustes").click();
+    harness.run();
+    harness
+        .get_by_label_contains("Plantilla del diario")
+        .hover();
+    harness.run();
+    menu_item(&harness, "Guía de estilo")
+        .expect("the template in the list")
+        .click();
+    harness.run();
+    let (_, template) = harness.state().db.journal_settings()?;
+    assert!(template.is_some());
+    harness.get_by_label("Abrir la nota de hoy").click();
+    harness.run();
+    let today = harness.state().db.local_today()?;
+    assert_eq!(harness.state().title, today);
+    assert!(!harness.state().blocks.is_empty(), "from the template");
+    assert_accessible(&harness, "journal");
+    Ok(())
+}

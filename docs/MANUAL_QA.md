@@ -502,3 +502,12 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - «Exportar todo el espacio»: las páginas y bases de datos con icono lo llevan delante de su título; las que no, igual que antes.
 - «Copiar como Markdown» de una página con icono: empieza por `# 🌾 Título`.
 - Importa (arrastrándolo) un `.md` que empiece por `# 🍞 Pan casero`: la página se llama «Pan casero» y tiene 🍞 de icono. Con `# 🍞Pan` (sin espacio) o `# Pan 🍞`, el emoji se queda en el título y no hay icono.
+
+## 55. Notas diarias (H12.9)
+- Clic en «Hoy» (bajo «Buscar»): se crea «Diario» 📓 con el mes (`2026-10`) y el día (`2026-10-30`) dentro, se despliegan en la barra lateral y se abre el día. Otra vez «Hoy» (o Cmd/Ctrl+Mayús+D, o Cmd/Ctrl+K «Abrir la nota de hoy»): la misma página, nada nuevo.
+- Cmd/Ctrl+Mayús+D con el cursor en un bloque: abre la nota de hoy, sin duplicar el bloque.
+- La fecha es la de tu reloj (prueba cerca de medianoche, o con otra zona horaria del sistema: el día cambia a medianoche local, no en UTC).
+- Al día siguiente (o cambiando la fecha del sistema): el nuevo día aparece el primero dentro del mes; un mes nuevo, el primero dentro de «Diario».
+- Renombra «Diario» o muévelo dentro de otra página: «Hoy» sigue usándolo. Mándalo a la papelera: «Hoy» crea otro.
+- Guarda una página como plantilla con `{{fecha}}` dentro y elígela en Ajustes → «Plantilla del diario»: el próximo día nuevo sale de ella, con la fecha escrita y su icono. «Ninguna»: los días nuevos salen vacíos. Si borras la plantilla, también.
+- «Atajos de teclado» lista Cmd/Ctrl+Mayús+D. Con VoiceOver, la fila se anuncia «Abrir la nota de hoy».

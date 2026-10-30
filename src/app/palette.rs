@@ -45,6 +45,7 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::ToSubpage => icons::PAGE,
         Command::CopyMarkdown => icons::COPY,
         Command::PageIcon => icons::SMILE_PLUS,
+        Command::OpenToday => icons::CALENDAR,
     }
 }
 
@@ -62,6 +63,7 @@ pub(super) fn command_shortcut(command: Command, cmd: &str) -> Option<String> {
         Command::ZoomIn => format!("{cmd}++"),
         Command::ZoomOut => format!("{cmd}+−"),
         Command::ZoomReset => format!("{cmd}+0"),
+        Command::OpenToday => format!("{cmd}+Mayús+D"),
         Command::Format(format) => super::inline::shortcut_label(format, cmd),
         Command::Link => format!("{cmd}+K"),
         _ => return None,
@@ -106,6 +108,7 @@ impl SilexApp {
         match (command, page) {
             (Command::NewPage, _) => self.create_root_page("Sin título")?,
             (Command::NewDatabase, _) => self.create_database(None)?,
+            (Command::OpenToday, _) => self.open_today()?,
             (Command::NewRow, Some(id)) => self.add_row(&id)?,
             (Command::NewSubpage, Some(id)) => self.create_subpage(&id)?,
             // The open page is renamed in its title, as from its "…" menu.

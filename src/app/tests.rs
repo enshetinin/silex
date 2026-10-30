@@ -6177,3 +6177,45 @@ fn an_imported_page_gets_the_icon_of_its_title_and_copies_it_back() -> anyhow::R
     assert_eq!(copied, ["# 🍞 Pan casero\n\nharina\n"]);
     Ok(())
 }
+
+// ---- Daily notes (H12.9) ----
+
+#[test]
+fn cmd_shift_d_opens_todays_note_making_it_once() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno")], 0, 0)?;
+    let today = app.db.local_today()?;
+    let pages_before = app.pages.len();
+    app_frame(&mut app, &ctx, vec![key(Key::D, M::COMMAND | M::SHIFT)]);
+    assert_eq!(app.title, today, "today's note is open");
+    let day = app.selected.clone().expect("day");
+    assert_eq!(
+        app.pages.len(),
+        pages_before + 3,
+        "Diario, the month and the day"
+    );
+    let (root, _) = app.db.journal_settings()?;
+    let root = root.expect("journal remembered");
+    assert!(app.expanded.contains(&root), "in sight in the sidebar");
+    // Again: the same note, nothing new; Cmd+D did not duplicate a block.
+    app.open_page(app.pages[0].id.clone())?;
+    app_frame(&mut app, &ctx, vec![key(Key::D, M::COMMAND | M::SHIFT)]);
+    assert_eq!(app.selected.as_deref(), Some(day.as_str()));
+    assert_eq!(app.pages.len(), pages_before + 3);
+    Ok(())
+}
+
+#[test]
+fn todays_note_comes_from_the_journal_template() -> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let (mut app, ctx) = editor_app(&[(H2, 0, "Hoy es {{fecha}}")], 0, 0)?;
+    let model = app.selected.clone().expect("page");
+    app.save_now()?;
+    let template = app.db.save_as_template(&model)?;
+    app.db.set_journal_template(Some(&template))?;
+    app.run_command(&ctx, Command::OpenToday)?;
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks.len(), 1);
+    assert_eq!(app.blocks[0].kind, H2);
+    assert!(!app.blocks[0].content.contains("{{fecha}}"));
+    Ok(())
+}

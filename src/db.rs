@@ -305,6 +305,150 @@ impl Database {
         Ok(())
     }
 
+    /// The journal's settings (H12.9): the «Diario» page, and the template
+    /// a new day is made from, if any. Kept in `settings`.
+    pub fn journal_settings(&self) -> Result<(Option<String>, Option<String>)> {
+        let get = |key: &str| -> Result<Option<String>> {
+            Ok(self
+                .conn
+                .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                    r.get(0)
+                })
+                .optional()?)
+        };
+        Ok((get(JOURNAL_PAGE)?, get(JOURNAL_TEMPLATE)?))
+    }
+
+    /// Remembers the journal's page (H12.9).
+    pub fn set_journal_page(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![JOURNAL_PAGE, id],
+        )?;
+        Ok(())
+    }
+
+    /// The template new days are made from, or none (H12.9).
+    pub fn set_journal_template(&self, template: Option<&str>) -> Result<()> {
+        match template {
+            Some(id) => {
+                ensure!(
+                    is_template(&self.conn, id)?,
+                    "Esa página no es una plantilla"
+                );
+                self.conn.execute(
+                    "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    params![JOURNAL_TEMPLATE, id],
+                )?;
+            }
+            None => {
+                self.conn
+                    .execute("DELETE FROM settings WHERE key = ?1", [JOURNAL_TEMPLATE])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The note of day `date` (`YYYY-MM-DD`, local) in the journal (H12.9),
+    /// in one transaction: «Diario» (`root`, if it is still a live page;
+    /// else a new one at the root, with 📓), the month inside it
+    /// (`YYYY-MM`) and the day inside that, each made if missing, first
+    /// among its siblings (the latest on top). A new day is made from
+    /// `template` if it is a live template (its blocks, with `{{fecha}}`
+    /// filled in, and its icon), else empty.
+    pub fn journal_day(
+        &mut self,
+        root: Option<&str>,
+        date: &str,
+        template: Option<&str>,
+    ) -> Result<JournalDay> {
+        let valid = date.len() == 10
+            && date.char_indices().all(|(i, c)| {
+                if i == 4 || i == 7 {
+                    c == '-'
+                } else {
+                    c.is_ascii_digit()
+                }
+            });
+        ensure!(valid, "Fecha no válida: {date}");
+        let tx = self.conn.transaction()?;
+        let live_page = |id: &str| -> rusqlite::Result<bool> {
+            tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND kind = 'page'
+                     AND deleted_at IS NULL AND template_at IS NULL)",
+                [id],
+                |r| r.get(0),
+            )
+        };
+        let root = match root {
+            Some(id) if live_page(id)? => id.to_owned(),
+            _ => {
+                let id = Uuid::new_v4().to_string();
+                tx.execute(
+                    "INSERT INTO pages (id, title, parent_id, sort_order, icon)
+                     VALUES (?1, 'Diario', NULL, (SELECT COALESCE(MAX(sort_order), -1) + 1
+                         FROM pages WHERE parent_id IS NULL AND template_at IS NULL), ?2)",
+                    params![id, JOURNAL_ICON],
+                )?;
+                id
+            }
+        };
+        let child = |parent: &str, title: &str| -> rusqlite::Result<Option<String>> {
+            tx.query_row(
+                "SELECT id FROM pages WHERE parent_id = ?1 AND title = ?2 AND kind = 'page'
+                     AND deleted_at IS NULL ORDER BY sort_order LIMIT 1",
+                params![parent, title],
+                |r| r.get(0),
+            )
+            .optional()
+        };
+        // First among its siblings: the latest on top.
+        let insert_first = |parent: &str, title: &str| -> rusqlite::Result<String> {
+            let id = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO pages (id, title, parent_id, sort_order)
+                 VALUES (?1, ?2, ?3, (SELECT COALESCE(MIN(sort_order), 1) - 1
+                     FROM pages WHERE parent_id = ?3))",
+                params![id, title, parent],
+            )?;
+            Ok(id)
+        };
+        let month_title = &date[..7];
+        let month = match child(&root, month_title)? {
+            Some(id) => id,
+            None => insert_first(&root, month_title)?,
+        };
+        let (page, created) = match child(&month, date)? {
+            Some(id) => (id, false),
+            None => {
+                let id = insert_first(&month, date)?;
+                let live_template = |id: &str| -> rusqlite::Result<bool> {
+                    tx.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1
+                             AND template_at IS NOT NULL AND deleted_at IS NULL)",
+                        [id],
+                        |r| r.get(0),
+                    )
+                };
+                if let Some(template) = template
+                    && live_template(template)?
+                {
+                    copy_icon(&tx, template, &id)?;
+                    copy_blocks(&tx, template, &id, Some(date))?;
+                }
+                (id, true)
+            }
+        };
+        tx.commit()?;
+        Ok(JournalDay {
+            root,
+            page,
+            created,
+        })
+    }
+
     /// The folded toggles as last stored ([`crate::folds::Folds::to_json`]),
     /// if any (ADR 0016). Kept in `settings`, which ignores the key.
     pub fn folded_blocks(&self) -> Result<Option<String>> {
@@ -2486,6 +2630,23 @@ const COMPACTING: &str = "compacting";
 const SYNCED_WARNING: &str = "synced_warning_dismissed";
 /// `settings` key of the open tabs (ADR 0011).
 const OPEN_TABS: &str = "open_tabs";
+/// `settings` keys of the journal (H12.9): its page and its template.
+const JOURNAL_PAGE: &str = "journal_page";
+const JOURNAL_TEMPLATE: &str = "journal_template";
+/// The icon a new «Diario» gets.
+const JOURNAL_ICON: &str = "📓";
+
+/// What [`Database::journal_day`] found or made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalDay {
+    /// The «Diario» page (a new one if there was none).
+    pub root: String,
+    /// The day's page.
+    pub page: String,
+    /// The day was made now.
+    pub created: bool,
+}
+
 /// `settings` key of the folded toggles (ADR 0016).
 const FOLDED_BLOCKS: &str = "folded_blocks";
 /// `settings` key of the pages opened recently (H11.8).

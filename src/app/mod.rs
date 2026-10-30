@@ -26,6 +26,7 @@ mod icon_picker;
 pub mod icons;
 mod inline;
 mod jobs;
+mod journal;
 mod links;
 mod move_blocks;
 mod outline;
@@ -822,6 +823,9 @@ impl SilexApp {
                 .iter()
                 .position(|key| pressed(Sc::new(M::COMMAND, *key)))
         };
+        // Today's note (H12.9). Before the block keys: Cmd+D would take
+        // it as «Duplicar».
+        let today = !dialog && pressed(Sc::new(M::COMMAND | M::SHIFT, Key::D));
         let new_subpage = pressed(Sc::new(M::COMMAND | M::SHIFT, Key::N));
         let new_page = !new_subpage && pressed(Sc::new(M::COMMAND, Key::N));
         // Exact Alt only: Alt+Shift+↑/↓ moves blocks instead.
@@ -852,6 +856,9 @@ impl SilexApp {
                     number
                 };
                 self.select_tab(index)?;
+            }
+            if today {
+                self.open_today()?;
             }
             if new_subpage && let Some(id) = self.selected.clone() {
                 self.create_subpage(&id)?;
