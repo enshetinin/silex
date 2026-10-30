@@ -44,12 +44,15 @@ pub const ZOOM_RANGE: RangeInclusive<u16> = 50..=200;
 
 const THEME_KEY: &str = "theme";
 const ZOOM_KEY: &str = "zoom_percent";
+const OUTLINE_KEY: &str = "outline";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
     pub theme: ThemeMode,
     /// Interface size in percent (text and controls scale together).
     pub zoom_percent: u16,
+    /// The page's outline is shown on the right (H12.5).
+    pub outline: bool,
 }
 
 impl Default for Settings {
@@ -57,6 +60,7 @@ impl Default for Settings {
         Self {
             theme: ThemeMode::System,
             zoom_percent: 100,
+            outline: false,
         }
     }
 }
@@ -80,6 +84,11 @@ impl Settings {
                         settings.zoom_percent = zoom;
                     }
                 }
+                OUTLINE_KEY => match value {
+                    "1" => settings.outline = true,
+                    "0" => settings.outline = false,
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -87,10 +96,11 @@ impl Settings {
     }
 
     /// Rows to store.
-    pub fn to_pairs(&self) -> [(&'static str, String); 2] {
+    pub fn to_pairs(&self) -> [(&'static str, String); 3] {
         [
             (THEME_KEY, self.theme.key().to_owned()),
             (ZOOM_KEY, self.zoom_percent.to_string()),
+            (OUTLINE_KEY, if self.outline { "1" } else { "0" }.to_owned()),
         ]
     }
 
@@ -139,6 +149,7 @@ mod tests {
         let settings = Settings {
             theme: ThemeMode::Dark,
             zoom_percent: 125,
+            outline: true,
         };
         let pairs = settings.to_pairs();
         let back = Settings::from_pairs(pairs.iter().map(|(k, v)| (*k, v.as_str())));

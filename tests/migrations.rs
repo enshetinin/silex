@@ -377,6 +377,7 @@ mod v4 {
         db.save_settings(&Settings {
             theme: ThemeMode::Light,
             zoom_percent: 110,
+            ..Settings::default()
         })?;
         drop(db);
         backup::verify_backup(&tmp.db())?;
@@ -389,6 +390,7 @@ mod v4 {
         let wanted = Settings {
             theme: ThemeMode::Dark,
             zoom_percent: 125,
+            outline: true,
         };
         let mut db = Database::open(tmp.db())?;
         db.save_settings(&Settings::default())?;
@@ -400,7 +402,7 @@ mod v4 {
         let rows: i64 =
             Connection::open(tmp.db())?
                 .query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))?;
-        assert_eq!(rows, 2);
+        assert_eq!(rows, 3, "theme, size and outline");
         Ok(())
     }
 

@@ -446,3 +446,13 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Importa ese `.md`: vuelven los mismos desplegables con su contenido y sangría. El formato del título se pierde (va como texto).
 - Un título con `<`, `>` o `&` se exporta escapado y vuelve igual.
 - Importa un README de GitHub con `<details><summary>…</summary>` y texto dentro (separado por líneas en blanco): es un desplegable. Otro HTML (`<div>`, `<br>`) sigue como texto.
+
+## 49. Índice de la página (H12.5)
+- En una página con Título 1, 2 y 3, pulsa el botón del índice en la barra de la página (junto a la estrella): aparece «En esta página» a la derecha con los títulos sangrados por nivel. El botón queda resaltado.
+- Escribe o cambia un título: el índice se actualiza al momento. Un título vacío no sale.
+- Desplázate por una página larga: se marca el título de la sección que estás leyendo.
+- Clic en una entrada: la página sube hasta ese título, el cursor queda al final y esa entrada se marca (también los últimos títulos, que no pueden llegar arriba). Al desplazar a mano, se marca otra vez la sección que estás leyendo. Si el título está dentro de un desplegable plegado, se despliega.
+- Con el teclado: Tab hasta una entrada e Intro hace lo mismo.
+- «×» del panel, el botón otra vez o «Mostrar u ocultar el índice» en Cmd/Ctrl+K: se oculta. Cierra y abre la app: sigue como lo dejaste. El estado de guardado no cambia.
+- No aparece en una base de datos, ni con una página abierta al lado, ni si la ventana es muy estrecha (vuelve al ensancharla).
+- Con VoiceOver, cada entrada se anuncia con el texto de su título.

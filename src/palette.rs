@@ -23,6 +23,8 @@ pub enum Command {
     Format(Format),
     /// «Enlace…»: a web link on the same text as `Format` (ADR 0015).
     Link,
+    /// Shows or hides the page's outline (H12.5).
+    ToggleOutline,
     AddFavorite,
     RemoveFavorite,
     ExportPage,
@@ -87,7 +89,7 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 37] = [
+    pub const ALL: [Command; 38] = [
         Command::NewPage,
         Command::NewDatabase,
         Command::NewSubpage,
@@ -102,6 +104,7 @@ impl Command {
         Command::Format(Format::Code),
         Command::Format(Format::Strike),
         Command::Link,
+        Command::ToggleOutline,
         Command::AddFavorite,
         Command::RemoveFavorite,
         Command::ExportPage,
@@ -139,6 +142,7 @@ impl Command {
             Command::ReplaceInPage => "Buscar y reemplazar en la página",
             Command::Format(format) => format.label(),
             Command::Link => "Enlace…",
+            Command::ToggleOutline => "Mostrar u ocultar el índice",
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
@@ -182,6 +186,14 @@ impl Command {
             Command::Format(Format::Code) => &["formato", "monoespaciada", "codigo", "code"],
             Command::Format(Format::Strike) => &["formato", "tachar", "rayado", "strikethrough"],
             Command::Link => &["formato", "url", "web", "vinculo", "hipervinculo", "link"],
+            Command::ToggleOutline => &[
+                "indice",
+                "titulos",
+                "esquema",
+                "contenido",
+                "outline",
+                "toc",
+            ],
             Command::AddFavorite => &["estrella", "marcar", "favorite", "star"],
             Command::RemoveFavorite => &["estrella", "desmarcar", "favorite", "star"],
             Command::ExportPage => &["md", "descargar", "guardar", "export"],
@@ -243,6 +255,7 @@ impl Command {
             | Command::FindInPage
             | Command::ReplaceInPage => cx.page_open && !cx.database_open,
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
+            Command::ToggleOutline => cx.page_open && !cx.database_open,
             Command::Format(_) | Command::Link => {
                 cx.page_open && !cx.database_open && cx.format_block
             }
@@ -346,6 +359,24 @@ mod tests {
             format_block: false,
             settings: Settings::default(),
         }
+    }
+
+    #[test]
+    fn the_outline_is_offered_on_pages() {
+        let page = PaletteContext {
+            page_open: true,
+            ..cx()
+        };
+        assert_eq!(matching_commands("indice", &page), [Command::ToggleOutline]);
+        assert!(matching_commands("titulos", &page).contains(&Command::ToggleOutline));
+        assert!(!Command::ToggleOutline.available(&PaletteContext {
+            page_open: false,
+            ..cx()
+        }));
+        assert!(!Command::ToggleOutline.available(&PaletteContext {
+            database_open: true,
+            ..page
+        }));
     }
 
     #[test]
@@ -506,6 +537,7 @@ mod tests {
             settings: Settings {
                 theme: ThemeMode::Dark,
                 zoom_percent: 150,
+                ..Settings::default()
             },
             ..cx()
         };

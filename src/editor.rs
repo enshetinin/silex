@@ -543,6 +543,49 @@ pub fn insert_divider(
 }
 
 // ---------------------------------------------------------------------------
+// Outline (H12.5)
+// ---------------------------------------------------------------------------
+
+/// A heading of the page, as its outline lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineEntry {
+    /// Where it is in the page.
+    pub index: usize,
+    /// How far in it goes: 0 for the largest heading the page uses.
+    pub level: u8,
+    /// Its text on one line.
+    pub text: String,
+}
+
+/// The page's H1–H3 with text, in order, for its outline. Levels start at
+/// the largest one used, so a page of H2 and H3 starts at the left.
+pub fn outline(blocks: &[Block]) -> Vec<OutlineEntry> {
+    let number = |kind: BlockKind| match kind {
+        BlockKind::Heading1 => Some(0u8),
+        BlockKind::Heading2 => Some(1),
+        BlockKind::Heading3 => Some(2),
+        _ => None,
+    };
+    let headings: Vec<(usize, u8, String)> = blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            let text = block.content.replace('\n', " ").trim().to_owned();
+            Some((index, number(block.kind)?, text)).filter(|(_, _, t)| !t.is_empty())
+        })
+        .collect();
+    let top = headings.iter().map(|(_, n, _)| *n).min().unwrap_or(0);
+    headings
+        .into_iter()
+        .map(|(index, n, text)| OutlineEntry {
+            index,
+            level: n - top,
+            text,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Toggle blocks (ADR 0016)
 // ---------------------------------------------------------------------------
 

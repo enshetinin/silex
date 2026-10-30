@@ -1192,3 +1192,38 @@ mod toggle_content {
         assert_eq!(blocks[1].content, "  dos");
     }
 }
+
+/// H12.5: the page's outline.
+mod outline {
+    use super::*;
+    use BlockKind::{Heading2, Heading3};
+    use silex_desktop::editor::{OutlineEntry, outline};
+
+    #[test]
+    fn headings_with_text_in_order_from_the_largest_used() {
+        let blocks = vec![
+            b("a", Paragraph, 0, "texto"),
+            b("b", Heading2, 0, "Uno"),
+            b("c", Heading3, 0, "Uno.uno\nsegunda línea"),
+            b("d", Heading2, 1, "   "),
+            b("e", Heading2, 0, " Dos 🌾 "),
+        ];
+        let entry = |index, level, text: &str| OutlineEntry {
+            index,
+            level,
+            text: text.into(),
+        };
+        assert_eq!(
+            outline(&blocks),
+            [
+                entry(1, 0, "Uno"),
+                entry(2, 1, "Uno.uno segunda línea"),
+                entry(4, 0, "Dos 🌾"),
+            ]
+        );
+        let mut with_h1 = blocks.clone();
+        with_h1.insert(0, b("t", Heading1, 0, "Título"));
+        assert_eq!(outline(&with_h1)[1], entry(2, 1, "Uno"));
+        assert!(outline(&[b("p", Paragraph, 0, "nada")]).is_empty());
+    }
+}

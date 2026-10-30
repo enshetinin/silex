@@ -196,6 +196,7 @@ pub const INFO: &str = "\u{e0f9}"; // info
 pub const MINUS: &str = "\u{e11c}"; // minus
 pub const LIGHTBULB: &str = "\u{e1c2}"; // lightbulb
 pub const LIST_COLLAPSE: &str = "\u{e59b}"; // list-collapse
+pub const TABLE_OF_CONTENTS: &str = "\u{e61e}"; // table-of-contents
 pub const OPEN_EXTERNAL: &str = "\u{e0b9}"; // external-link
 pub const KEYBOARD: &str = "\u{e284}"; // keyboard
 pub const TABLE: &str = "\u{e17d}"; // table
@@ -271,6 +272,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("MINUS", MINUS),
     ("LIGHTBULB", LIGHTBULB),
     ("LIST_COLLAPSE", LIST_COLLAPSE),
+    ("TABLE_OF_CONTENTS", TABLE_OF_CONTENTS),
     ("OPEN_EXTERNAL", OPEN_EXTERNAL),
     ("KEYBOARD", KEYBOARD),
     ("TABLE", TABLE),

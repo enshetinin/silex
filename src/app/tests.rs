@@ -5629,3 +5629,67 @@ fn a_selected_toggle_is_copied_and_pasted_with_its_content() -> anyhow::Result<(
     );
     Ok(())
 }
+
+// ---- Outline (H12.5) ----
+
+const H1: BlockKind = BlockKind::Heading1;
+const H2: BlockKind = BlockKind::Heading2;
+
+#[test]
+fn the_outline_shows_and_hides_and_is_remembered() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (H1, 0, "Introducción"),
+            (Par, 0, "texto"),
+            (H2, 0, "Detalles"),
+        ],
+        1,
+        0,
+    )?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(!painted.iter().any(|t| t == "En esta página"));
+    app.run_command(&ctx, silex_desktop::palette::Command::ToggleOutline)?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "En esta página"), "{painted:?}");
+    assert!(
+        painted.iter().filter(|t| *t == "Detalles").count() >= 2,
+        "page and outline"
+    );
+    assert!(app.db.load_settings()?.outline, "saved");
+    // Not a document change.
+    assert!(app.save.can_close());
+    app.toggle_outline(&ctx);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(!painted.iter().any(|t| t == "En esta página"));
+    assert!(!app.db.load_settings()?.outline);
+    Ok(())
+}
+
+#[test]
+fn going_to_a_heading_opens_what_hides_it_and_focuses_it() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (H1, 0, "Arriba"),
+            (TOG, 0, "Plegado"),
+            (H2, 1, "Escondido"),
+            (Par, 0, "abajo"),
+        ],
+        3,
+        0,
+    )?;
+    let toggle = app.blocks[1].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    app.settings.outline = true;
+    app_frame(&mut app, &ctx, vec![]);
+    let heading = app.blocks[2].id.clone();
+    app.go_to_heading(&heading);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(!app.folds.is_folded(&toggle), "the toggle opened");
+    assert_eq!(focused_block(&app, &ctx), Some(2));
+    assert_eq!(caret_char(&app), Some(9), "at the end of the heading");
+    // The page is short and the heading cannot reach the top: as chosen,
+    // it is the one marked anyway.
+    assert_eq!(app.outline_current.as_deref(), Some(heading.as_str()));
+    Ok(())
+}

@@ -2006,6 +2006,8 @@ impl SilexApp {
             scroll_area = scroll_area.vertical_scroll_offset(offset);
         }
         let scrolled = scroll_area.show(ui, |ui| {
+            // Where the page's content starts (moves with the scroll).
+            let content_top = ui.min_rect().top();
             const COLUMN: f32 = 720.0;
             let width = ui.available_width().min(COLUMN + GUTTER);
             let side = ((ui.available_width() - width) / 2.0).max(0.0);
@@ -2080,6 +2082,14 @@ impl SilexApp {
                         })
                         .collect();
                     let mut fill_toggle = None;
+                    // The heading being read (H12.5): the last one whose
+                    // top has reached the top of the view; before any has,
+                    // the first one in view.
+                    let visible = ui.clip_rect();
+                    let reading_line = visible.top() + outline::READING_MARGIN;
+                    let mut reading = None;
+                    let mut first_in_view = None;
+                    let outline_target = self.outline_target.clone();
                     for (index, (block, number)) in self.blocks.iter_mut().zip(numbers).enumerate()
                     {
                         if hidden[index] {
@@ -2094,7 +2104,10 @@ impl SilexApp {
                         let field = field_id(self.doc_generation, "block", &block.id);
                         let view = BlockView {
                             number,
-                            scroll_into_view: scroll_to.as_deref() == Some(block.id.as_str()),
+                            // A heading chosen in the outline goes to the
+                            // top instead (below).
+                            scroll_into_view: scroll_to.as_deref() == Some(block.id.as_str())
+                                && outline_target.as_deref() != Some(block.id.as_str()),
                             selected: selected.is_some_and(|(a, b)| (a..=b).contains(&index)),
                             show_handle: self.hovered_block.as_deref() == Some(block.id.as_str())
                                 || dragging.as_deref() == Some(block.id.as_str())
@@ -2124,6 +2137,21 @@ impl SilexApp {
                         }
                         let out = block_field(ui, self.doc_generation, block, &view);
                         rects.push(out.rect);
+                        if block.kind.is_heading() {
+                            if out.rect.top() <= reading_line {
+                                reading = Some(block.id.clone());
+                            } else if first_in_view.is_none() && out.rect.top() < visible.bottom() {
+                                first_in_view = Some(block.id.clone());
+                            }
+                        }
+                        // The heading chosen in the outline: at the top of
+                        // the view next frame, at once (no animation that
+                        // another scroll could interrupt).
+                        if outline_target.as_deref() == Some(block.id.as_str()) {
+                            let offset = out.rect.top() - content_top - theme::space::SM;
+                            self.pending_scroll = Some(offset.max(0.0));
+                            self.outline_target = None;
+                        }
                         if empty_toggles[index] && empty_toggle_hint(ui, block.indent) {
                             fill_toggle = Some(index);
                         }
@@ -2210,6 +2238,18 @@ impl SilexApp {
                     if let Some(index) = fill_toggle {
                         self.add_inside_toggle(index);
                     }
+                    // The heading chosen in the outline wins while shown.
+                    let chosen = self
+                        .outline_chosen
+                        .as_ref()
+                        .map(|(id, _)| id.clone())
+                        .filter(|id| {
+                            self.blocks
+                                .iter()
+                                .position(|b| &b.id == id)
+                                .is_some_and(|i| !hidden[i])
+                        });
+                    self.outline_current = chosen.or(reading).or(first_in_view);
                     if let Some(dragged) = &dragging {
                         drop_move = self.drag_blocks(ui, dragged, &rects);
                     }
@@ -2269,6 +2309,17 @@ impl SilexApp {
             });
         });
         self.editor_scroll = scrolled.state.clamped_offset().y;
+        // The heading chosen in the outline stays marked until the page is
+        // scrolled by hand: once it is in place, any other scroll forgets it.
+        if let Some((_, settled)) = &mut self.outline_chosen {
+            match settled {
+                None if self.outline_target.is_none() && self.pending_scroll.is_none() => {
+                    *settled = Some(self.editor_scroll);
+                }
+                Some(at) if (self.editor_scroll - *at).abs() > 1.0 => self.outline_chosen = None,
+                _ => {}
+            }
+        }
         // Where the palette and the «…» menu apply formatting (ADR 0015).
         if let Some(caret) = &self.caret
             && self
@@ -2409,6 +2460,19 @@ impl SilexApp {
                         self.redo();
                     }
                 }
+                // The page's outline (H12.5); a database has no headings.
+                if self.database.is_none() {
+                    let (color, tip) = if self.settings.outline {
+                        (p.accent, "Ocultar el índice")
+                    } else {
+                        (p.text_muted, "Mostrar el índice")
+                    };
+                    if icons::button(ui, true, icons::TABLE_OF_CONTENTS, color, tip, None)
+                        .clicked()
+                    {
+                        extra = Some("outline");
+                    }
+                }
                 let star_color = if is_favorite { p.accent } else { p.text_muted };
                 let star_tip = if is_favorite {
                     "Quitar de favoritos"
@@ -2517,6 +2581,7 @@ impl SilexApp {
                 let result = self.open_page_history();
                 self.report(result);
             }
+            Some("outline") => self.toggle_outline(&ui.ctx().clone()),
             _ => {}
         }
         if let Some(action) = action {

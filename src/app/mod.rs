@@ -26,6 +26,7 @@ pub mod icons;
 mod inline;
 mod jobs;
 mod links;
+mod outline;
 mod page_history;
 mod palette;
 mod privacy;
@@ -153,6 +154,13 @@ pub struct SilexApp {
     folds: silex_desktop::folds::Folds,
     /// `folds` as last stored, to save only when it changes.
     saved_folds: String,
+    /// The heading being read, marked in the outline (H12.5).
+    outline_current: Option<String>,
+    /// A heading chosen in the outline, until the page is scrolled to it.
+    outline_target: Option<String>,
+    /// The heading chosen in the outline, marked until the page is scrolled
+    /// by hand: with the scroll offset it was left at, once known.
+    outline_chosen: Option<(String, Option<f32>)>,
     /// The last text copied from a block or a block selection, with its
     /// formatting: pasting that same text brings it back (ADR 0015).
     clip: Option<silex_desktop::editor::Clip>,
@@ -314,6 +322,9 @@ impl SilexApp {
             link_edit: None,
             folds: silex_desktop::folds::Folds::default(),
             saved_folds: String::new(),
+            outline_current: None,
+            outline_target: None,
+            outline_chosen: None,
             clip: None,
             paste_marks: None,
             pending_focus: None,
@@ -893,6 +904,7 @@ impl SilexApp {
             )
             .show(ui, |ui| self.sidebar(ui));
         self.main_width = ui.available_width();
+        self.outline_panel(ui);
         self.side_panel(ui);
         egui::CentralPanel::default()
             .frame(

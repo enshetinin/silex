@@ -533,6 +533,7 @@ fn stored_settings_apply_at_startup_and_keyboard_zoom_is_remembered() -> anyhow:
     db.save_settings(&silex_desktop::settings::Settings {
         theme: silex_desktop::settings::ThemeMode::Dark,
         zoom_percent: 125,
+        ..Default::default()
     })?;
     let mut harness = a11y_harness(SilexApp::new(db)?);
     assert_eq!(harness.ctx.theme(), egui::Theme::Dark);
@@ -3549,5 +3550,195 @@ fn a_dragged_toggle_takes_its_content() -> anyhow::Result<()> {
         "the toggle and the paragraph it hides, at the end"
     );
     assert!(harness.state().folds.is_folded("b5"), "still folded");
+    Ok(())
+}
+
+/// H12.5: the outline beside a page with H1–H3, the heading being read
+/// marked.
+fn outline_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    db.save_settings(&silex_desktop::settings::Settings {
+        outline: true,
+        ..Default::default()
+    })?;
+    let page = db.create_page("Guía de uso", None)?;
+    let specs: Vec<(BlockKind, &str)> = vec![
+        (BlockKind::Heading1, "Primeros pasos"),
+        (BlockKind::Paragraph, "Crea una página con Cmd+N."),
+        (BlockKind::Heading2, "Escribir"),
+        (
+            BlockKind::Paragraph,
+            "Escribe / para cambiar el tipo de bloque.",
+        ),
+        (BlockKind::Heading3, "Formato en línea"),
+        (BlockKind::Paragraph, "Cmd+B, Cmd+I, Cmd+E."),
+        (
+            BlockKind::Heading2,
+            "Organizar las páginas con un título bastante largo",
+        ),
+        (
+            BlockKind::Paragraph,
+            "Arrastra las páginas en la barra lateral.",
+        ),
+        (BlockKind::Heading1, "Copias de seguridad"),
+        (BlockKind::Paragraph, "Se hacen solas cada día."),
+    ];
+    let blocks: Vec<Block> = specs
+        .into_iter()
+        .enumerate()
+        .map(|(position, (kind, content))| Block {
+            id: format!("b{position}"),
+            page_id: page.clone(),
+            kind,
+            content: content.to_owned(),
+            checked: false,
+            position: position as i64,
+            indent: 0,
+            attachment: None,
+            link: None,
+            marks: Vec::new(),
+        })
+        .collect();
+    db.save_document(&page, "Guía de uso", &blocks)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+#[test]
+fn outline_light() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1280.0, 620.0])
+        .with_theme(egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), outline_app()?);
+    harness.run();
+    harness.snapshot("outline_light");
+    Ok(())
+}
+
+/// The outline's entries are named buttons; clicking one goes to it.
+#[test]
+fn outline_entries_are_named_and_go_to_their_heading() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(outline_app()?);
+    assert_accessible(&harness, "outline");
+    harness.get_by_label("Ocultar el índice");
+    harness.get_by_label("Cerrar el índice");
+    let entries: Vec<_> = harness
+        .get_all_by_label("Copias de seguridad")
+        .filter(|n| n.accesskit_node().role() == egui::accesskit::Role::Button)
+        .collect();
+    assert_eq!(entries.len(), 1);
+    entries[0].click();
+    harness.run();
+    let focused = harness.state().caret.as_ref().map(|c| c.block_id.clone());
+    assert_eq!(focused.as_deref(), Some("b8"));
+    Ok(())
+}
+
+/// A long page: five sections of twenty paragraphs, with the outline.
+fn long_outline_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    db.save_settings(&silex_desktop::settings::Settings {
+        outline: true,
+        ..Default::default()
+    })?;
+    let page = db.create_page("Larga", None)?;
+    let mut blocks = Vec::new();
+    for section in 1..=5 {
+        let (kind, title) = if section % 2 == 1 {
+            (BlockKind::Heading1, format!("Sección {section}"))
+        } else {
+            (BlockKind::Heading2, format!("Apartado {section}"))
+        };
+        blocks.push((kind, title));
+        for n in 1..=20 {
+            blocks.push((
+                BlockKind::Paragraph,
+                format!("Párrafo {n} de la sección {section}."),
+            ));
+        }
+    }
+    let blocks: Vec<Block> = blocks
+        .into_iter()
+        .enumerate()
+        .map(|(position, (kind, content))| Block {
+            id: format!("b{position}"),
+            page_id: page.clone(),
+            kind,
+            content,
+            checked: false,
+            position: position as i64,
+            indent: 0,
+            attachment: None,
+            link: None,
+            marks: Vec::new(),
+        })
+        .collect();
+    db.save_document(&page, "Larga", &blocks)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+/// H12.5: a heading chosen in the outline goes to the top and stays
+/// marked (also when it cannot reach the top); scrolling by hand marks
+/// the section being read again.
+#[test]
+fn the_outline_marks_the_heading_chosen_and_then_follows_the_scroll() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(long_outline_app()?);
+    assert_eq!(harness.state().outline_current.as_deref(), Some("b0"));
+    for (target, id) in [
+        ("Sección 3", "b42"),
+        ("Apartado 4", "b63"),
+        ("Apartado 2", "b21"),
+        ("Sección 5", "b84"),
+    ] {
+        harness
+            .get_all_by_label(target)
+            .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Button)
+            .expect("entry")
+            .click();
+        harness.run();
+        assert_eq!(
+            harness.state().outline_current.as_deref(),
+            Some(id),
+            "{target}"
+        );
+        let caret = harness.state().caret.as_ref().map(|c| c.block_id.clone());
+        assert_eq!(caret.as_deref(), Some(id), "{target}: the cursor is there");
+        // At the top of the page's view.
+        let top = block_rect(&harness, target).top();
+        let first = harness
+            .get_by_label("Más acciones de la página")
+            .rect()
+            .bottom();
+        assert!(
+            top - first < 80.0,
+            "{target}: at the top ({top} vs {first})"
+        );
+    }
+    // Scrolling up by hand: the section being read is marked again.
+    let page = block_rect(&harness, "Sección 5").center();
+    harness.hover_at(page);
+    harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 700.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    harness.run();
+    let current = harness.state().outline_current.clone();
+    assert!(
+        current.as_deref() != Some("b84") && current.is_some(),
+        "{current:?}"
+    );
     Ok(())
 }

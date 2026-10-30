@@ -40,6 +40,7 @@ pub(super) fn command_icon(command: Command) -> &'static str {
         Command::CheckUpdates => icons::DOWNLOAD,
         Command::Format(format) => super::inline::icon(format),
         Command::Link => icons::LINK,
+        Command::ToggleOutline => icons::TABLE_OF_CONTENTS,
     }
 }
 
@@ -112,6 +113,7 @@ impl SilexApp {
                     self.format_block(ctx, &id, format, true);
                 }
             }
+            (Command::ToggleOutline, Some(_)) => self.toggle_outline(ctx),
             (Command::Link, Some(_)) => {
                 if let Some((id, _, _)) = self.format_target.clone() {
                     self.open_link_edit(ctx, &id, true);
