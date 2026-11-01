@@ -14,7 +14,7 @@ anyhow = "1"
 directories = "6"
 # Default features: wgpu, clipboard, accesskit, x11/wayland (with client-side decorations and dlopen).
 eframe = "0.37"
-rusqlite = { version = "0.40", features = ["bundled", "backup"] }
+rusqlite = { version = "0.41", features = ["bundled", "backup"] }
 uuid = { version = "1", features = ["v4"] }
 # Markdown import (H4.2): CommonMark parser, MIT, pure Rust.
 pulldown-cmark = { version = "0.13", default-features = false }
