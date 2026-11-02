@@ -65,7 +65,7 @@ pub fn create_backup(source: &Path, dir: &Path) -> Result<PathBuf> {
 
     let partial = dir.join(format!("{PREFIX}{}{PARTIAL_EXTENSION}", Uuid::new_v4()));
     let result = (|| -> Result<()> {
-        src.backup(MAIN_DB, &partial, None)
+        src.backup(MAIN_DB, &partial, None::<fn(rusqlite::backup::Progress)>)
             .context("La copia de SQLite falló")?;
         crate::privacy::restrict(&partial, false)?;
         make_standalone(&partial)?;
