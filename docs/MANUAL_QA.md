@@ -619,3 +619,8 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Con muchas filas (la semilla o 1000 filas), desplazar va fluido y la galería pide las portadas solo de lo que se ve.
 - Cierra y vuelve a abrir la app: la base abre en la última vista (lista o galería).
 - Tema oscuro y VoiceOver: una línea se anuncia «"Rayuela"; Autor: Julio Cortázar; …», y una tarjeta, «Tarjeta "Rayuela"; …».
+
+## 64. Publicar la 1.1 (H13.9, ADR 0014)
+- Con la 1.0.0 instalada y una base con contenido (mejor una copia), instala la 1.1.0 y ábrela: la base se actualiza sola y en «Copias y exportación» aparece la copia previa a la actualización. Todo sigue ahí.
+- En Ajustes sale «Silex 1.1.0»; «Buscar actualizaciones…» abre la página de versiones.
+- Para publicar, como en la sección 40 pero con `v1.1.0`: PR de `develop` a `main` con la CI y «Paquetes» en verde; revisa la fecha de `## [1.1.0]` en `CHANGELOG.md` (pon la del día en que etiquetes); `git tag -a v1.1.0 -m "Silex 1.1.0"` en `main` y `git push origin v1.1.0`; revisa el borrador «Silex 1.1.0» (los cuatro paquetes y las notas), instala uno y publícalo.

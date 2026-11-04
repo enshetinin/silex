@@ -2,6 +2,37 @@
 
 Todos los cambios de Silex que se notan al usarlo. El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y las versiones, [versionado semántico](https://semver.org/lang/es/): desde la 1.0.0, una versión nueva siempre abre la base de datos de una anterior (ADR 0014).
 
+## [1.1.0] - 2026-11-04
+
+Un editor más completo y bases de datos más potentes. Una base de la 1.0 se abre en la 1.1 y se actualiza sola, después de guardar una copia verificada; una base ya actualizada no se abre con la 1.0.
+
+### Añadido
+- **Formato en el texto:** negrita, cursiva, código, tachado y enlaces web, con atajos (Cmd/Ctrl+B, I, E, Mayús+X y Cmd/Ctrl+K sobre una selección), el submenú «Formato» del bloque y la paleta. Se conserva al copiar y pegar, y al exportar e importar Markdown.
+- **Bloques nuevos:** separador (`---` o «/separador»), aviso con su icono («/aviso») y desplegable, que pliega lo que lleva dentro («/desplegable»). En Markdown, el aviso es `> [!NOTE]` y el desplegable, `<details>`.
+- **Índice de la página:** «En esta página», un panel a la derecha con los títulos, que marca por dónde vas.
+- **Mover bloques** a otra página y **convertirlos en una subpágina**, que deja un enlace en su sitio.
+- **Pegar Markdown** crea bloques con su formato; Cmd/Ctrl+Mayús+V pega como texto plano. «Copiar como Markdown» en el menú de la página.
+- **Icono de página:** un emoji delante del título, en la barra lateral, las pestañas, los enlaces y la búsqueda; también en Markdown.
+- **Notas diarias:** «Hoy» en la barra lateral (Cmd/Ctrl+Mayús+D) abre o crea la nota del día dentro de «Diario», desde la plantilla que elijas en Ajustes.
+- **Comparar versiones:** en el historial de una página, lo añadido, quitado y cambiado respecto a la actual, con las palabras cambiadas marcadas.
+- **Bases de datos dentro de una página** («/base de datos»), con una tarjeta que muestra sus primeras filas.
+- **Grafo de relaciones:** «Grafo» en la barra superior abre en una pestaña las páginas y sus enlaces, con búsqueda, zoom y el grafo de cada página.
+- **Bases de datos:**
+  - Reordenar filas y tarjetas arrastrándolas.
+  - Propiedades nuevas: selección múltiple, URL (se abre con un clic), «Creado» y «Editado».
+  - Cambiar el tipo de una propiedad, con una vista previa de qué pasa con los valores. Los que no encajan se guardan ocultos y vuelven si cambias otra vez al tipo anterior; Cmd/Ctrl+Z lo deshace.
+  - Vista **calendario**: las filas en los días del mes según una propiedad de fecha; arrastrarlas cambia la fecha y «+» en un día crea una fila con esa fecha.
+  - Vistas **lista** y **galería**, con la primera imagen de cada fila como portada.
+
+### Límites conocidos
+- Los paquetes **no están firmados**. En macOS, ábrelo la primera vez con clic derecho → Abrir (o en Ajustes del sistema → Privacidad y seguridad → «Abrir igualmente»). En Windows, SmartScreen avisa: «Más información» → «Ejecutar de todas formas».
+- El `.dmg` es solo para Mac con Apple Silicon.
+- La verificación manual se hace en macOS y Windows; en Linux solo pasan las pruebas automáticas y la instalación del `.deb` en la CI.
+- «Hoy» en el calendario de una celda de fecha sale del reloj en UTC: entre medianoche y la diferencia con UTC puede marcar el día anterior. Las notas diarias y la vista calendario usan la hora local.
+- El calendario solo pone las filas según propiedades de tipo Fecha, no según «Creado» o «Editado». La portada de la galería solo sale de imágenes PNG o JPEG.
+- Un CSV abierto con doble clic en Excel con configuración regional española puede quedar en una sola columna (Excel espera `;`); «Datos → Desde texto/CSV» lo lee bien.
+- En Windows, una exportación con páginas muy anidadas puede superar el límite clásico de 260 caracteres de ruta.
+
 ## [1.0.0] - 2026-10-22
 
 Primera versión estable. Silex es un espacio de trabajo local para escribir y organizar notas: guarda todo en una base SQLite en tu equipo, sin cuentas, sin nube y sin telemetría.
