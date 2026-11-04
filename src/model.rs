@@ -157,6 +157,10 @@ pub enum ViewKind {
     Board,
     /// The rows on the days of a month, by a date property (H13.5).
     Calendar,
+    /// One line per row: its name and properties (H13.6).
+    List,
+    /// A card per row, with the row's first image on top (H13.6).
+    Gallery,
 }
 
 impl ViewKind {
@@ -166,13 +170,21 @@ impl ViewKind {
             ViewKind::Table => "table",
             ViewKind::Board => "board",
             ViewKind::Calendar => "calendar",
+            ViewKind::List => "list",
+            ViewKind::Gallery => "gallery",
         }
     }
 
     pub fn parse(name: &str) -> Option<Self> {
-        [ViewKind::Table, ViewKind::Board, ViewKind::Calendar]
-            .into_iter()
-            .find(|k| k.as_str() == name)
+        [
+            ViewKind::Table,
+            ViewKind::Board,
+            ViewKind::Calendar,
+            ViewKind::List,
+            ViewKind::Gallery,
+        ]
+        .into_iter()
+        .find(|k| k.as_str() == name)
     }
 }
 

@@ -17,6 +17,7 @@ mod blocks;
 mod board;
 mod calendar;
 mod cells;
+mod collection;
 mod compare;
 mod database;
 mod database_card;

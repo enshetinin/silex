@@ -101,23 +101,25 @@ pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState, compact: 
         .iter()
         .filter(|p| config.is_hidden(&p.id))
         .count();
-    let label = match (board, hidden) {
-        (false, 0) => "Columnas".to_owned(),
-        (false, 1) => "Columnas (1 oculta)".to_owned(),
-        (false, n) => format!("Columnas ({n} ocultas)"),
-        (true, 0) => "Propiedades".to_owned(),
-        (true, 1) => "Propiedades (1 oculta)".to_owned(),
-        (true, n) => format!("Propiedades ({n} ocultas)"),
+    // Only a table has columns: the others show properties.
+    let table = kind == ViewKind::Table;
+    let label = match (table, hidden) {
+        (true, 0) => "Columnas".to_owned(),
+        (true, 1) => "Columnas (1 oculta)".to_owned(),
+        (true, n) => format!("Columnas ({n} ocultas)"),
+        (false, 0) => "Propiedades".to_owned(),
+        (false, 1) => "Propiedades (1 oculta)".to_owned(),
+        (false, n) => format!("Propiedades ({n} ocultas)"),
     };
     let button = toolbar_button(ui, icons::EYE, &label, hidden > 0, compact);
     if button.clicked() {
         *view_picker = None;
     }
     menu_from(&button, "silex-columns-menu", 240.0).show(|ui| {
-        let caption = if board {
-            "Propiedades en las tarjetas"
-        } else {
-            "Columnas de esta vista"
+        let caption = match kind {
+            ViewKind::Table => "Columnas de esta vista",
+            ViewKind::List => "Propiedades en la lista",
+            _ => "Propiedades en las tarjetas",
         };
         changed |= columns_menu(ui, config, properties, caption);
     });

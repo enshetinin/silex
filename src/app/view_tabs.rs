@@ -1,6 +1,6 @@
 //! A database's views as tabs (H6.3b, ADR 0006): a click switches view
 //! (each keeps its own sort, filters and columns), «+» adds a table, a
-//! board (H6.5) or a calendar (H13.5), and the
+//! board (H6.5), a calendar (H13.5), a list or a gallery (H13.6), and the
 //! open tab (or a right click on any) has a menu to rename, duplicate,
 //! move or delete it. Deleting a view loses its settings, never rows.
 use anyhow::Result;
@@ -34,6 +34,8 @@ fn kind_label(kind: ViewKind) -> &'static str {
         ViewKind::Table => "Tabla",
         ViewKind::Board => "Tablero",
         ViewKind::Calendar => "Calendario",
+        ViewKind::List => "Lista",
+        ViewKind::Gallery => "Galería",
     }
 }
 
@@ -42,6 +44,8 @@ pub(super) fn view_icon(kind: ViewKind) -> &'static str {
         ViewKind::Table => icons::TABLE,
         ViewKind::Board => icons::KANBAN,
         ViewKind::Calendar => icons::CALENDAR,
+        ViewKind::List => icons::LAYOUT_LIST,
+        ViewKind::Gallery => icons::LAYOUT_GRID,
     }
 }
 
@@ -132,7 +136,13 @@ pub(super) fn view_tabs(
         .show(|ui| {
             menu_spacing(ui);
             menu_caption(ui, "Nueva vista");
-            for kind in [ViewKind::Table, ViewKind::Board, ViewKind::Calendar] {
+            for kind in [
+                ViewKind::Table,
+                ViewKind::Board,
+                ViewKind::Calendar,
+                ViewKind::List,
+                ViewKind::Gallery,
+            ] {
                 if ui
                     .button((
                         icons::icon(view_icon(kind)),
@@ -177,6 +187,8 @@ fn view_menu(
             ViewKind::Table => "Vista de tabla",
             ViewKind::Board => "Vista de tablero",
             ViewKind::Calendar => "Vista de calendario",
+            ViewKind::List => "Vista de lista",
+            ViewKind::Gallery => "Vista de galería",
         },
     );
     ui.separator();
@@ -386,7 +398,7 @@ impl SilexApp {
 #[cfg(test)]
 mod tests {
     use super::new_view_name;
-    use silex_desktop::model::ViewKind::{Board, Calendar, Table};
+    use silex_desktop::model::ViewKind::{Board, Calendar, Gallery, List, Table};
 
     #[test]
     fn new_views_take_the_first_free_name() {
@@ -401,5 +413,7 @@ mod tests {
         assert_eq!(new_view_name(Board, &names(&["Tabla"])), "Tablero");
         assert_eq!(new_view_name(Board, &names(&["Tablero"])), "Tablero 2");
         assert_eq!(new_view_name(Calendar, &names(&["Tabla"])), "Calendario");
+        assert_eq!(new_view_name(List, &names(&["Lista"])), "Lista 2");
+        assert_eq!(new_view_name(Gallery, &names(&[])), "Galería");
     }
 }

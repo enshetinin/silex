@@ -1116,6 +1116,32 @@ impl Database {
         Ok(views)
     }
 
+    /// The cover of each live row of a database that has one, for a
+    /// gallery (H13.6): the first image block of the row's page (an
+    /// attachment shown as an image), by row id.
+    pub fn database_covers(&self, database_id: &str) -> Result<HashMap<String, String>> {
+        let [png, jpeg] = crate::attachment::PREVIEW_TYPES;
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id,
+                    (SELECT b.attachment_id FROM blocks b
+                     JOIN attachments a ON a.id = b.attachment_id
+                     WHERE b.page_id = p.id AND b.kind = 'file' AND a.mime IN (?2, ?3)
+                     ORDER BY b.position, b.rowid LIMIT 1)
+             FROM pages p
+             WHERE p.parent_id = ?1 AND p.deleted_at IS NULL",
+        )?;
+        let rows = stmt.query_map(params![database_id, png, jpeg], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        let mut covers = HashMap::new();
+        for row in rows {
+            if let (row, Some(cover)) = row? {
+                covers.insert(row, cover);
+            }
+        }
+        Ok(covers)
+    }
+
     /// Adds a view of `kind` (a table or a board, H6.5) at the end of a
     /// live database's tabs, with `config` (empty for a new view, another
     /// view's for a copy).

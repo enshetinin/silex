@@ -97,6 +97,12 @@ pub(super) struct DatabaseState {
     /// Today, as the calendar marks it: read when it is first shown and
     /// with «Hoy».
     pub(super) today: Option<silex_desktop::property::Date>,
+    /// The cover of each row that has one, for a gallery (H13.6): read
+    /// when a gallery is first drawn, and again after the rows change.
+    pub(super) covers: Option<HashMap<String, String>>,
+    /// Covers drawn in sight this frame, whose previews are asked for
+    /// after it (`files.rs`).
+    pub(super) covers_seen: Vec<String>,
 }
 
 impl DatabaseState {
@@ -240,6 +246,9 @@ pub(super) enum TableAction {
     ChangeKind(String),
     /// «+» on a calendar's day: a new row with that date (H13.5).
     AddOnDate(silex_desktop::property::Date),
+    /// «Nueva» in a list or a gallery: a new row, opened to be named
+    /// (H13.6).
+    AddAndOpen,
     RenameOption(String, String),
     SetOptionColor(String, OptionColor),
     DeleteOption(String),
@@ -316,6 +325,8 @@ impl SilexApp {
             kind_change: None,
             month: None,
             today: None,
+            covers: None,
+            covers_seen: Vec::new(),
         });
         // The view last open (also in an earlier session, H11.6), else the
         // first. If it cannot be read, the first: not worth an error.
@@ -350,6 +361,7 @@ impl SilexApp {
                 .collect();
             let known: HashSet<String> = state.rows.iter().map(|r| r.id.clone()).collect();
             state.rows = self.db.database_rows(&state.id)?;
+            state.covers = None;
             state.keep_view(&before, &known);
         }
         Ok(())
@@ -564,6 +576,19 @@ impl SilexApp {
             self.report(result);
         }
         self.kind_dialog(ui.ctx());
+        // The gallery's covers in sight: their previews, as the editor's
+        // images (decoded by the attach worker, H7.2).
+        let seen = self
+            .database
+            .as_mut()
+            .map(|d| std::mem::take(&mut d.covers_seen))
+            .unwrap_or_default();
+        for cover in seen {
+            if !self.files.previews.contains_key(&cover) && !self.files.wanted.contains(&cover) {
+                self.files.wanted.push(cover.clone());
+            }
+            self.files.seen.insert(cover);
+        }
     }
 
     pub(super) fn apply_table_action(&mut self, database: &str, action: TableAction) -> Result<()> {
@@ -616,6 +641,10 @@ impl SilexApp {
             TableAction::DeleteProperty(id) => self.delete_property(&id)?,
             TableAction::ChangeKind(id) => self.open_kind_dialog(&id)?,
             TableAction::AddOnDate(date) => self.add_on_date(database, date)?,
+            TableAction::AddAndOpen => {
+                let row = self.insert_row(database)?;
+                self.open_page(row)?;
+            }
             TableAction::RenameOption(id, name) => {
                 let unchanged = self
                     .database
@@ -753,6 +782,14 @@ impl SilexApp {
             }
             ViewKind::Calendar => {
                 self.draw_calendar(ui, state, selected_tab, &mut actions, &mut cells);
+                return (actions, cells);
+            }
+            ViewKind::List => {
+                self.draw_list(ui, state, selected_tab, &mut actions, &mut cells);
+                return (actions, cells);
+            }
+            ViewKind::Gallery => {
+                self.draw_gallery(ui, state, selected_tab, &mut actions, &mut cells);
                 return (actions, cells);
             }
             ViewKind::Table => {}

@@ -509,3 +509,46 @@ fn a_page_with_files_exports_on_its_own_thread() -> anyhow::Result<()> {
     assert!(wait(missing)?.is_err());
     Ok(())
 }
+
+#[test]
+fn a_gallery_cover_is_the_first_image_of_each_row() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Recetas", None)?;
+    let png = |name: &str| NewAttachment::from_bytes(name, b"\x89PNG\r\n\x1a\nresto".to_vec());
+    let jpeg = NewAttachment::from_bytes("plato.jpg", b"\xff\xd8\xff\xe0resto".to_vec())?;
+    let (primera, segunda, foto) = (
+        db.add_attachment(&png("primera.png")?)?,
+        db.add_attachment(&png("segunda.png")?)?,
+        db.add_attachment(&jpeg)?,
+    );
+    let factura = db.add_attachment(&pdf("factura.pdf")?)?;
+    let file = |page: &str, a: &silex_desktop::attachment::Attachment| {
+        block(page, BlockKind::File, &a.name, Some(a.id.clone()))
+    };
+    // A PDF first, then two images: the first image.
+    let sopa = db.create_row(&base, "Sopa")?;
+    let blocks = vec![
+        block(&sopa, BlockKind::Paragraph, "Caliente", None),
+        file(&sopa, &factura),
+        file(&sopa, &primera),
+        file(&sopa, &segunda),
+    ];
+    db.save_document(&sopa, "Sopa", &blocks)?;
+    // A JPEG counts too.
+    let tarta = db.create_row(&base, "Tarta")?;
+    db.save_document(&tarta, "Tarta", &[file(&tarta, &foto)])?;
+    // Only a PDF, or nothing: no cover.
+    let pan = db.create_row(&base, "Pan")?;
+    db.save_document(&pan, "Pan", &[file(&pan, &factura)])?;
+    db.create_row(&base, "Agua")?;
+    // A row in the trash is left out.
+    let vieja = db.create_row(&base, "Vieja")?;
+    db.save_document(&vieja, "Vieja", &[file(&vieja, &segunda)])?;
+    db.trash_page(&vieja)?;
+
+    let covers = db.database_covers(&base)?;
+    assert_eq!(covers.len(), 2, "{covers:?}");
+    assert_eq!(covers.get(&sopa), Some(&primera.id));
+    assert_eq!(covers.get(&tarta), Some(&foto.id));
+    Ok(())
+}

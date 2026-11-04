@@ -6924,3 +6924,59 @@ fn a_calendar_without_a_date_property_offers_to_add_one() -> anyhow::Result<()> 
     assert!(state.month.is_some(), "the month is on show");
     Ok(())
 }
+
+// ---- H13.6: list and gallery views ----
+
+#[test]
+fn a_gallery_shows_the_first_image_of_a_row_as_its_cover() -> anyhow::Result<()> {
+    use silex_desktop::attachment::{NewAttachment, encode_png};
+    let (mut app, ctx, base) = database_app()?;
+    let sopa = app.db.create_row(&base, "Sopa")?;
+    let pan = app.db.create_row(&base, "Pan")?;
+    let rgba = vec![200u8; 40 * 20 * 4];
+    let png = NewAttachment::from_bytes("sopa.png", encode_png(40, 20, rgba)?)?;
+    let image = app.db.add_attachment(&png)?;
+    let file = Block {
+        page_id: sopa.clone(),
+        kind: BlockKind::File,
+        content: image.name.clone(),
+        attachment: Some(image.id.clone()),
+        ..block("foto")
+    };
+    app.db.save_document(&sopa, "Sopa", &[file])?;
+    app.reload_pages()?;
+    app.open_page(base)?;
+    app.add_view(silex_desktop::model::ViewKind::Gallery)?;
+    for _ in 0..4 {
+        sized_frame(&mut app, &ctx, vec![]);
+    }
+    let state = app.database.as_ref().expect("database open");
+    assert_eq!(
+        state.covers.as_ref().and_then(|c| c.get(&sopa)),
+        Some(&image.id)
+    );
+    assert!(
+        matches!(
+            app.files.previews.get(&image.id),
+            Some(PreviewState::Ready(_))
+        ),
+        "its preview is decoded once in sight"
+    );
+    // Every card leaves room for a cover, so they line up.
+    let card = |row: &str| {
+        ctx.read_response(collection::gallery_card_id(row))
+            .map(|r| r.rect)
+            .unwrap_or_else(|| panic!("card {row} drawn"))
+    };
+    assert_eq!(card(&sopa).height(), card(&pan).height());
+    assert!(card(&sopa).height() > 130.0);
+    assert_eq!(card(&sopa).top(), card(&pan).top(), "side by side");
+
+    // Without any image, cards have no cover.
+    app.db.save_document(&sopa, "Sopa", &[])?;
+    app.refresh_database()?;
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    assert!(card(&sopa).height() < 100.0);
+    Ok(())
+}

@@ -115,6 +115,7 @@
 ## Versión 15 — vistas de calendario, lista y galería (`0015_view_kinds.sql`, H13.5)
 - `db_views` se reconstruye (tabla nueva, copia con `rowid`, borrar la vieja, renombrar) para que el `CHECK` de `kind` admita `calendar`, `list` y `gallery` además de `table` y `board`. La lista y la galería son de H13.6, que así no necesita migración. Ninguna tabla apunta a `db_views`: la última vista de cada base se guarda por id en `settings`, y los ids no cambian.
 - El calendario guarda en `db_views.config` la propiedad de fecha por la que pone las filas: `"date_by": id` (como `group_by` del tablero). Si falta, o ya no es una fecha viva, se usa la primera (`view::calendar_property`). «Creado» y «Editado» no cuentan: una fila no se podría mover de día.
+- La lista y la galería (H13.6) no guardan nada nuevo. La portada de una tarjeta de la galería es la primera imagen (PNG o JPEG, `attachment::PREVIEW_TYPES`) de la página de la fila, por `blocks.position`: `Database::database_covers` la busca con `blocks` y `attachments`, solo para filas vivas.
 - Una versión anterior no abre una base v15 (ADR 0014). Si leyera una vista de un tipo que no conoce, la saltaría (`ViewKind::parse`).
 - Probado: v14→v15 y v1→v15 conservando ids, `rowid`, tipos, configuración y la última vista; el `CHECK` (admite `list` y `gallery`, rechaza otros); la clave ajena a `pages`; un fallo (una tabla `db_views_v15` puesta por otra herramienta) que deja la v14 intacta; una copia v14 restaurada y actualizada.
 

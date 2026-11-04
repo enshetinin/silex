@@ -247,6 +247,8 @@ pub const EYE_SLASH: &str = "\u{e0bb}"; // eye-off
 pub const WAYPOINTS: &str = "\u{e542}"; // waypoints
 pub const SCAN: &str = "\u{e257}"; // scan
 pub const ROTATE_CCW: &str = "\u{e148}"; // rotate-ccw
+pub const LAYOUT_LIST: &str = "\u{e1d9}"; // layout-list
+pub const LAYOUT_GRID: &str = "\u{e0ff}"; // layout-grid
 pub const PANEL_RIGHT: &str = "\u{e431}"; // panel-right
 pub const CLOCK_PLUS: &str = "\u{e667}"; // clock-plus
 pub const PENCIL_LINE: &str = "\u{e4f0}"; // pencil-line
@@ -328,6 +330,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("WAYPOINTS", WAYPOINTS),
     ("SCAN", SCAN),
     ("ROTATE_CCW", ROTATE_CCW),
+    ("LAYOUT_LIST", LAYOUT_LIST),
+    ("LAYOUT_GRID", LAYOUT_GRID),
     ("PANEL_RIGHT", PANEL_RIGHT),
     ("CLOCK_PLUS", CLOCK_PLUS),
     ("PENCIL_LINE", PENCIL_LINE),

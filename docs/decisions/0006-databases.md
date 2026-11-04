@@ -115,6 +115,8 @@ CREATE TABLE db_views (
 
 - *Actualización (2026-11-04, H13.5):* vista **calendario** (`db_views.kind = 'calendar'`, migración 0015, que también admite `list` y `gallery` para H13.6). Pone las filas en los días de un mes según una propiedad de **fecha** (`date_by` en el JSON de la vista; si falta o ya no es una fecha viva, la primera). «Creado» y «Editado» no se ofrecen. Los filtros y el orden de la vista se aplican; dentro de un día, el orden de la vista. Arrastrar una fila a otro día cambia su fecha, y a «Sin fecha» la quita (un paso de Cmd+Z); «+» en un día crea una fila con esa fecha y la abre. El calendario solo muestra el nombre de cada fila: no tiene menú de columnas.
 
+- *Actualización (2026-11-04, H13.6):* vistas **lista** y **galería** (`list` y `gallery`, ya admitidas por la migración 0015; sin migración nueva). La lista es una línea por fila con su nombre y las propiedades visibles; la galería, una tarjeta por fila con la primera imagen de la página de la fila como portada (se lee de los bloques y adjuntos, no se guarda aparte). Las dos usan los filtros, el orden y las propiedades ocultas de la vista; no se reordenan arrastrando.
+
 ## Consecuencias
 - **Una columna y cuatro tablas más.** `Page` gana un `kind`, que hay que propagar a sus 14 construcciones.
 - **El esquema queda fijado al publicarse.** La migración 0005 lleva el esquema completo de este ADR desde H6.1, y si una historia posterior necesita otra columna, será una migración 0006 aditiva.

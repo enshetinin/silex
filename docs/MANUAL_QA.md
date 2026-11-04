@@ -608,3 +608,14 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Cambia la ventana de tamaño y abre la base al lado de otra página: los días se encogen sin solaparse. En una ventana baja, «Sin fecha» queda debajo y se llega desplazando.
 - Cierra y vuelve a abrir la app: la base abre en el calendario.
 - Tema oscuro y VoiceOver: las etiquetas se anuncian «"Rayuela", 14 de septiembre de 2026», y «+», «Nueva fila el 14 de septiembre de 2026».
+
+## 63. Vistas lista y galería (H13.6)
+- En una base, «+» junto a las vistas → «Lista»: una línea por fila con su icono (o emoji) y su nombre, y a la derecha sus propiedades (opciones como etiquetas, casilla marcada como «✓ Nombre»). Estrecha la ventana o abre la base al lado de otra página: se ven menos propiedades y el nombre no se pisa con ellas.
+- «+» → «Galería»: una tarjeta por fila, en tantas columnas como quepan, todas del mismo alto. Sin imágenes en las filas, sin portada.
+- Abre una fila, pega o suelta una imagen PNG o JPEG en su página y vuelve a la base: en la galería, esa fila tiene la imagen como portada, recortada sin deformarse, y las demás tarjetas reservan el mismo hueco en gris. Con dos imágenes, sale la primera de la página. Un PDF no cuenta.
+- En las dos: un clic (o Tab e Intro) abre la fila; el clic derecho y «⋯» dan el menú de la página; Supr con la línea o tarjeta enfocada la manda a la papelera, y Cmd/Ctrl+Z la devuelve.
+- «Nueva» crea una fila y la abre para escribir su nombre.
+- «Propiedades» oculta o muestra propiedades en la lista y en las tarjetas; «Filtrar» y «Ordenar» funcionan como en la tabla.
+- Con muchas filas (la semilla o 1000 filas), desplazar va fluido y la galería pide las portadas solo de lo que se ve.
+- Cierra y vuelve a abrir la app: la base abre en la última vista (lista o galería).
+- Tema oscuro y VoiceOver: una línea se anuncia «"Rayuela"; Autor: Julio Cortázar; …», y una tarjeta, «Tarjeta "Rayuela"; …».

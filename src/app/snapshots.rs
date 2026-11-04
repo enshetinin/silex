@@ -5115,3 +5115,141 @@ fn database_calendar() -> anyhow::Result<()> {
     harness.snapshot("database_calendar_light");
     Ok(())
 }
+
+// ---- H13.6: list and gallery views ----
+
+/// «Lecturas» in a new view of `kind`.
+fn collection_app(
+    kind: silex_desktop::model::ViewKind,
+) -> anyhow::Result<(SilexApp, String, Vec<String>)> {
+    let (mut app, base, rows) = database_app()?;
+    app.add_view(kind)?;
+    Ok((app, base, rows))
+}
+
+/// The control whose name starts with `start`.
+fn click_starting(harness: &mut Harness<'_, SilexApp>, start: &str) {
+    harness
+        .get_all_by_label_contains(start)
+        .find(|node| {
+            node.accesskit_node().role() == egui::accesskit::Role::Button
+                && node
+                    .accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with(start))
+        })
+        .unwrap_or_else(|| panic!("control {start:?}"))
+        .click_accesskit();
+    harness.run();
+}
+
+#[test]
+fn a_list_shows_a_line_per_row_and_opens_it() -> anyhow::Result<()> {
+    use silex_desktop::model::ViewKind;
+    let (app, base, rows) = collection_app(ViewKind::List)?;
+    let mut harness = a11y_harness(app);
+    assert_accessible(&harness, "list view");
+    assert!(harness.query_by_label("Vista «Lista»").is_some(), "its tab");
+    // Each line says its values; an unticked box says nothing.
+    assert!(
+        harness
+            .query_by_label(
+                "«Rayuela»; Autor: Julio Cortázar; Páginas: 736; Leído: Sí; Estado: Terminado; Terminado: 2026-09-14"
+            )
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("«Pedro Páramo»; Autor: Juan Rulfo; Páginas: 124")
+            .is_some()
+    );
+    assert!(
+        harness.query_by_label("Propiedades").is_some(),
+        "not «Columnas»"
+    );
+    click_starting(&mut harness, "«Pedro Páramo»");
+    assert_eq!(harness.state().selected.as_deref(), Some(rows[1].as_str()));
+
+    // «Nueva fila»: a new row, opened.
+    harness.state_mut().open_page(base.clone())?;
+    harness.run();
+    click_button(&mut harness, "Nueva fila");
+    let opened = harness.state().selected.clone().unwrap_or_default();
+    assert!(!rows.contains(&opened));
+    assert!(
+        harness
+            .state()
+            .db
+            .database_rows(&base)?
+            .iter()
+            .any(|r| r.id == opened)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_gallery_has_a_card_per_row_and_its_menu() -> anyhow::Result<()> {
+    use silex_desktop::model::ViewKind;
+    let (app, _, rows) = collection_app(ViewKind::Gallery)?;
+    let mut harness = a11y_harness(app);
+    assert_accessible(&harness, "gallery view");
+    assert!(
+        harness.query_by_label("Vista «Galería»").is_some(),
+        "its tab"
+    );
+    assert!(
+        harness
+            .query_by_label("Tarjeta «Ficciones»; Autor: Jorge Luis Borges; Estado: Leyendo")
+            .is_some()
+    );
+    // «⋯» has the page's menu: «Enviar a la papelera» sends it there.
+    click_button(&mut harness, "Acciones de «Ficciones»");
+    menu_item(&harness, "Enviar a la papelera")
+        .expect("«Enviar a la papelera»")
+        .click();
+    harness.run();
+    let trashed = harness
+        .state()
+        .db
+        .list_trash()?
+        .iter()
+        .any(|t| t.page.id == rows[2]);
+    assert!(trashed);
+    Ok(())
+}
+
+/// A list: names on the left, values on the right.
+#[test]
+fn database_list() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (app, _, _) = collection_app(silex_desktop::model::ViewKind::List)?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot("database_list_light");
+    Ok(())
+}
+
+/// A gallery: a card per row, without covers (no row has an image).
+#[test]
+fn database_gallery() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (app, _, _) = collection_app(silex_desktop::model::ViewKind::Gallery)?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot("database_gallery_light");
+    Ok(())
+}

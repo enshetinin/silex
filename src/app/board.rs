@@ -27,9 +27,9 @@ const COLUMN_WIDTH: f32 = 260.0;
 /// Room between the edge of a column and its cards.
 const COLUMN_PAD: f32 = 6.0;
 const COLUMN_HEADER: f32 = 36.0;
-const CARD_PAD: f32 = 10.0;
-const TITLE_HEIGHT: f32 = 22.0;
-const LINE_HEIGHT: f32 = 24.0;
+pub(super) const CARD_PAD: f32 = 10.0;
+pub(super) const TITLE_HEIGHT: f32 = 22.0;
+pub(super) const LINE_HEIGHT: f32 = 24.0;
 const CARD_GAP: f32 = 6.0;
 const NEW_CARD_HEIGHT: f32 = 32.0;
 
@@ -51,11 +51,15 @@ fn group_menu_id(option: &str) -> egui::Id {
 }
 
 /// A line under a card's name: a property shown on the cards and its value.
-type Line<'a> = (&'a Property, &'a CellValue);
+pub(super) type Line<'a> = (&'a Property, &'a CellValue);
 
 /// What a card shows under its name: the properties on the cards that
 /// have a value. An unticked box shows nothing, like an empty cell.
-fn card_lines<'a>(row: &str, shown: &[&'a Property], values: &'a TableValues) -> Vec<Line<'a>> {
+pub(super) fn card_lines<'a>(
+    row: &str,
+    shown: &[&'a Property],
+    values: &'a TableValues,
+) -> Vec<Line<'a>> {
     let Some(cells) = values.get(row) else {
         return Vec::new();
     };
@@ -578,6 +582,7 @@ impl Board<'_> {
             title: (!naming).then_some((title.as_str(), untitled)),
             lines: &lines,
             hovered: pointed || response.hovered() || response.has_focus(),
+            cover: 0.0,
         };
         if held {
             // Its place stays marked; the card follows the pointer on top.
@@ -741,15 +746,17 @@ impl Board<'_> {
 
 /// How a card looks: its name (`None` while it is being typed in a
 /// field), its lines, and whether it is hovered.
-struct CardLook<'a> {
+pub(super) struct CardLook<'a> {
     /// The name shown and whether it is the «Sin título» placeholder.
-    title: Option<(&'a str, bool)>,
-    lines: &'a [Line<'a>],
-    hovered: bool,
+    pub(super) title: Option<(&'a str, bool)>,
+    pub(super) lines: &'a [Line<'a>],
+    pub(super) hovered: bool,
+    /// Room at the top for a gallery's cover (H13.6); 0 on a board.
+    pub(super) cover: f32,
 }
 
 impl CardLook<'_> {
-    fn paint(&self, ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect) {
+    pub(super) fn paint(&self, ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect) {
         let p = theme::current(ui.ctx());
         let radius = egui::CornerRadius::same(theme::radius::MD);
         let stroke = if self.hovered { p.text_faint } else { p.border };
@@ -762,52 +769,67 @@ impl CardLook<'_> {
         );
         let left = rect.left() + CARD_PAD;
         let width = rect.width() - 2.0 * CARD_PAD;
+        let top = rect.top() + self.cover;
         if let Some((title, untitled)) = self.title {
             let color = if untitled { p.text_faint } else { p.text };
-            let y = rect.top() + CARD_PAD + TITLE_HEIGHT / 2.0;
+            let y = top + CARD_PAD + TITLE_HEIGHT / 2.0;
             paint_text(ui, painter, egui::pos2(left, y), title, width, color);
         }
-        let mut y = rect.top() + CARD_PAD + TITLE_HEIGHT + LINE_HEIGHT / 2.0;
+        let mut y = top + CARD_PAD + TITLE_HEIGHT + LINE_HEIGHT / 2.0;
         for (property, value) in self.lines {
-            let at = egui::pos2(left, y);
-            match value {
-                CellValue::Select(id) => {
-                    if let Some(option) = property.option(id) {
-                        paint_tag_on(ui, painter, at, option, width);
-                    }
-                }
-                CellValue::MultiSelect(ids) => {
-                    let options: Vec<&SelectOption> = property
-                        .options
-                        .iter()
-                        .filter(|o| ids.contains(&o.id))
-                        .collect();
-                    paint_tags(ui, painter, at, &options, width);
-                }
-                CellValue::Checkbox(_) => {
-                    let icon = painter.text(
-                        at,
-                        egui::Align2::LEFT_CENTER,
-                        icons::TODO,
-                        icons::font(theme::icon::MD),
-                        p.accent,
-                    );
-                    let at = egui::pos2(icon.right() + theme::space::XS, y);
-                    let room = width - (icon.width() + theme::space::XS);
-                    paint_text(ui, painter, at, &property.name, room, p.text_muted);
-                }
-                other => {
-                    paint_text(
-                        ui,
-                        painter,
-                        at,
-                        &other.display(property),
-                        width,
-                        p.text_muted,
-                    );
-                }
-            }
+            paint_value(ui, painter, egui::pos2(left, y), property, value, width);
             y += LINE_HEIGHT;
+        }
+    }
+}
+
+/// A value as cards and lists show it, from `left_center`, cut at
+/// `max_width`: options as tags, a ticked box as its icon and the
+/// property's name, the rest as text.
+pub(super) fn paint_value(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    at: egui::Pos2,
+    property: &Property,
+    value: &CellValue,
+    width: f32,
+) {
+    let p = theme::current(ui.ctx());
+    match value {
+        CellValue::Select(id) => {
+            if let Some(option) = property.option(id) {
+                paint_tag_on(ui, painter, at, option, width);
+            }
+        }
+        CellValue::MultiSelect(ids) => {
+            let options: Vec<&SelectOption> = property
+                .options
+                .iter()
+                .filter(|o| ids.contains(&o.id))
+                .collect();
+            paint_tags(ui, painter, at, &options, width)
+        }
+        CellValue::Checkbox(_) => {
+            let icon = painter.text(
+                at,
+                egui::Align2::LEFT_CENTER,
+                icons::TODO,
+                icons::font(theme::icon::MD),
+                p.accent,
+            );
+            let at = egui::pos2(icon.right() + theme::space::XS, at.y);
+            let room = width - (icon.width() + theme::space::XS);
+            paint_text(ui, painter, at, &property.name, room, p.text_muted);
+        }
+        other => {
+            paint_text(
+                ui,
+                painter,
+                at,
+                &other.display(property),
+                width,
+                p.text_muted,
+            );
         }
     }
 }
