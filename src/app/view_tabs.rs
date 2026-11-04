@@ -250,7 +250,7 @@ impl SilexApp {
     /// Reads the views again (after adding, moving or deleting one) and
     /// shows `select` (a view id), or the one that was open, or the first.
     /// The open view's pending settings are saved first.
-    fn reload_views(&mut self, select: Option<&str>) -> Result<()> {
+    pub(super) fn reload_views(&mut self, select: Option<&str>) -> Result<()> {
         self.save_view()?;
         let Some(state) = self.database.as_mut() else {
             return Ok(());

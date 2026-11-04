@@ -4753,3 +4753,204 @@ fn graph_local_dark() -> anyhow::Result<()> {
         }
     })
 }
+
+// ---- H13.4b, ADR 0019: change a property's type ----
+
+/// The type of the property `name` of `base`, and how its cell of `row`
+/// reads.
+fn kind_and_cell(
+    harness: &Harness<'_, SilexApp>,
+    base: &str,
+    name: &str,
+    row: &str,
+) -> (Option<silex_desktop::property::PropertyKind>, String) {
+    let state = harness.state();
+    let Some(property) = state
+        .db
+        .database_properties(base)
+        .ok()
+        .and_then(|ps| ps.into_iter().find(|p| p.name == name))
+    else {
+        return (None, String::new());
+    };
+    let cell = state
+        .db
+        .database_values(base)
+        .ok()
+        .and_then(|values| values.get(row)?.get(&property.id).cloned())
+        .map(|v| v.display(&property))
+        .unwrap_or_default();
+    (Some(property.kind), cell)
+}
+
+/// Opens «Cambiar tipo» from the header of `header` and picks `kind`.
+fn pick_kind(harness: &mut Harness<'_, SilexApp>, header: &str, kind: &str) {
+    click_action(harness, header);
+    menu_item(harness, "Cambiar tipo…")
+        .expect("«Cambiar tipo…»")
+        .click();
+    harness.run();
+    menu_item(harness, kind)
+        .unwrap_or_else(|| panic!("type {kind:?}"))
+        .click();
+    harness.run();
+}
+
+#[test]
+fn a_property_changes_type_from_its_menu_after_a_preview() -> anyhow::Result<()> {
+    use silex_desktop::property::PropertyKind;
+    let (app, base, rows) = database_app()?;
+    let mut harness = a11y_harness(app);
+    click_action(&mut harness, "Páginas, Número");
+    menu_item(&harness, "Cambiar tipo…")
+        .expect("«Cambiar tipo…»")
+        .click();
+    harness.run();
+    assert!(
+        harness
+            .query_by_label("Cambiar el tipo de «Páginas»")
+            .is_some()
+    );
+    // Nothing chosen yet: nothing to confirm, and the current type is not offered.
+    assert!(
+        harness
+            .query_by_label("Elige el tipo nuevo para ver qué pasa con los valores.")
+            .is_some()
+    );
+    assert!(menu_item(&harness, "Número").is_none());
+    assert_accessible(&harness, "change type dialog");
+
+    menu_item(&harness, "Texto").expect("«Texto»").click();
+    harness.run();
+    assert!(
+        harness
+            .query_by_label("2 valores se convierten a «Texto».")
+            .is_some()
+    );
+    let page = |h: &Harness<'_, SilexApp>| kind_and_cell(h, &base, "Páginas", &rows[0]);
+    assert_eq!(
+        page(&harness).0,
+        Some(PropertyKind::Number),
+        "only a preview"
+    );
+
+    click_button(&mut harness, "Cambiar tipo");
+    assert_eq!(page(&harness), (Some(PropertyKind::Text), "736".into()));
+    assert!(
+        harness
+            .state()
+            .database
+            .as_ref()
+            .is_some_and(|d| d.kind_change.is_none())
+    );
+    let notice = harness.state().notice.clone().unwrap_or_default();
+    assert!(notice.contains("ahora es de tipo «Texto»"), "{notice}");
+    // The header says the new type.
+    assert!(harness.query_by_label("Páginas, Texto").is_some());
+
+    // One step of the table's undo, both ways.
+    harness.state_mut().undo_table();
+    harness.run();
+    assert_eq!(page(&harness), (Some(PropertyKind::Number), "736".into()));
+    harness.state_mut().redo_table();
+    harness.run();
+    assert_eq!(page(&harness), (Some(PropertyKind::Text), "736".into()));
+    harness.state_mut().undo_table();
+    harness.run();
+    assert_eq!(page(&harness).0, Some(PropertyKind::Number));
+    Ok(())
+}
+
+#[test]
+fn escape_closes_the_change_type_dialog_without_changing_anything() -> anyhow::Result<()> {
+    use silex_desktop::property::PropertyKind;
+    let (app, base, rows) = database_app()?;
+    let mut harness = a11y_harness(app);
+    pick_kind(&mut harness, "Autor, Texto", "Número");
+    assert!(
+        harness
+            .query_by_label(
+                "3 valores no encajan y quedan vacíos. No se pierden: vuelven si cambias otra vez a «Texto»."
+            )
+            .is_some()
+    );
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .database
+            .as_ref()
+            .is_some_and(|d| d.kind_change.is_none())
+    );
+    assert_eq!(
+        kind_and_cell(&harness, &base, "Autor", &rows[0]),
+        (Some(PropertyKind::Text), "Julio Cortázar".into())
+    );
+    Ok(())
+}
+
+#[test]
+fn many_new_options_ask_a_second_time() -> anyhow::Result<()> {
+    use silex_desktop::property::{CellValue, PropertyKind};
+    let (mut app, base, rows) = database_app()?;
+    let autor = app
+        .db
+        .database_properties(&base)?
+        .into_iter()
+        .find(|p| p.name == "Autor")
+        .map(|p| p.id)
+        .unwrap_or_default();
+    for n in 0..101 {
+        let row = app.db.create_row(&base, &format!("Libro {n}"))?;
+        app.db
+            .set_value(&row, &autor, Some(&CellValue::Text(format!("Autor {n}"))))?;
+    }
+    app.reload_pages()?;
+    app.open_page(base.clone())?;
+    let mut harness = a11y_harness(app);
+    pick_kind(&mut harness, "Autor, Texto", "Selección");
+    assert!(
+        harness
+            .query_by_label_contains("Se crearán 104 opciones: «Julio Cortázar»")
+            .is_some()
+    );
+    click_button(&mut harness, "Cambiar tipo");
+    assert!(harness.query_by_label("¿Crear 104 opciones?").is_some());
+    assert_eq!(
+        kind_and_cell(&harness, &base, "Autor", &rows[0]).0,
+        Some(PropertyKind::Text),
+        "not yet"
+    );
+    // «Volver» goes back to the preview; asking again and saying yes changes it.
+    click_button(&mut harness, "Volver");
+    assert!(
+        harness
+            .query_by_label("Cambiar el tipo de «Autor»")
+            .is_some()
+    );
+    click_button(&mut harness, "Cambiar tipo");
+    click_button(&mut harness, "Crear 104 opciones y cambiar");
+    assert_eq!(
+        kind_and_cell(&harness, &base, "Autor", &rows[0]),
+        (Some(PropertyKind::Select), "Julio Cortázar".into())
+    );
+    let options = harness
+        .state()
+        .database
+        .as_ref()
+        .and_then(|d| d.properties.iter().find(|p| p.name == "Autor"))
+        .map_or(0, |p| p.options.len());
+    assert_eq!(options, 104);
+    Ok(())
+}
+
+/// The «Cambiar tipo» dialog: «Autor» to a select, with its new options.
+#[test]
+fn database_change_kind() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_change_kind_light",
+        eframe::egui::Theme::Light,
+        |harness| pick_kind(harness, "Autor, Texto", "Selección"),
+    )
+}

@@ -32,6 +32,7 @@ pub mod icons;
 mod inline;
 mod jobs;
 mod journal;
+mod kind_change;
 mod links;
 mod move_blocks;
 mod outline;
@@ -62,7 +63,7 @@ mod web_links;
 pub use self::startup::StartupError;
 use self::{
     blocks::*, cells::*, database::*, date_picker::*, dialogs::*, duplicate::*, files::*, find::*,
-    links::*, page_history::*, privacy::*, read_only::*, row_order::*, row_page::*,
+    kind_change::*, links::*, page_history::*, privacy::*, read_only::*, row_order::*, row_page::*,
     row_selection::*, search::*, side_panel::*, sidebar::*, space::*, tab_bar::*, table_undo::*,
     templates::*, view_menus::*, view_tabs::*,
 };

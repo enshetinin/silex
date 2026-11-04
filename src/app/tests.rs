@@ -6684,3 +6684,82 @@ fn graph_tab_preserves_page_and_opens_links_in_another_tab() -> Result<()> {
     assert_eq!(app.title, "Editada antes del grafo");
     Ok(())
 }
+
+// ---- H13.4b, ADR 0019: change a property's type ----
+
+#[test]
+fn changing_type_takes_its_filters_out_and_undo_puts_them_back() -> anyhow::Result<()> {
+    use silex_desktop::view::{Filter, FilterOp};
+    let (mut app, ctx, rayuela, ids) = table_app(&[(PropertyKind::Number, "Páginas")])?;
+    let paginas = &ids[0];
+    let base = app.selected.clone().unwrap_or_default();
+    let ficciones = app.db.create_row(&base, "Ficciones")?;
+    app.reload_pages()?;
+    app.set_cell(&rayuela, paginas, Some(CellValue::Number(736.0)))?;
+    app.set_cell(&ficciones, paginas, Some(CellValue::Number(10.0)))?;
+    change_view(&mut app, |c| {
+        c.filters.push(Filter {
+            property: paginas.clone(),
+            op: FilterOp::Greater,
+            value: "150".into(),
+        });
+    });
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(shown_titles(&app), ["Rayuela"]);
+
+    app.change_kind(paginas, PropertyKind::Text)?;
+    let filters = |app: &SilexApp| {
+        app.database
+            .as_ref()
+            .and_then(|d| d.config())
+            .map_or(0, |c| c.filters.len())
+    };
+    assert_eq!(filters(&app), 0, "the filter left the view on show");
+    assert_eq!(shown_titles(&app).len(), 2);
+    assert_eq!(
+        stored(&app, &rayuela, paginas)?,
+        Some(CellValue::Text("736".into()))
+    );
+
+    app.undo_table();
+    assert_eq!(filters(&app), 1, "and came back with Cmd+Z");
+    assert_eq!(shown_titles(&app), ["Rayuela"]);
+    assert_eq!(
+        stored(&app, &rayuela, paginas)?,
+        Some(CellValue::Number(736.0))
+    );
+    Ok(())
+}
+
+#[test]
+fn changing_type_saves_what_is_being_typed_first() -> anyhow::Result<()> {
+    let (mut app, ctx, row, ids) = table_app(&[(PropertyKind::Text, "Autor")])?;
+    let autor = &ids[0];
+    if let Some(state) = app.database.as_mut() {
+        state.editing = Some(CellEdit {
+            row: row.clone(),
+            property: autor.clone(),
+            text: "Cortázar".into(),
+            focus: false,
+        });
+    }
+    app.change_kind(autor, PropertyKind::Select)?;
+    app_frame(&mut app, &ctx, vec![]);
+    let options = app
+        .database
+        .as_ref()
+        .and_then(|d| d.properties.iter().find(|p| p.id == *autor))
+        .map(|p| p.options.clone())
+        .unwrap_or_default();
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].name, "Cortázar");
+    assert_eq!(
+        stored(&app, &row, autor)?,
+        Some(CellValue::Select(options[0].id.clone()))
+    );
+    assert!(
+        app.database.as_ref().is_some_and(|d| d.editing.is_none()),
+        "the text field of the old type closed"
+    );
+    Ok(())
+}

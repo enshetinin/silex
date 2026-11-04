@@ -578,3 +578,18 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Exporta a Markdown y a CSV: la URL y las fechas como se ven.
 - Cierra y vuelve a abrir la app: las URL siguen ahí y las fechas no cambian.
 - Tema oscuro y VoiceOver: la celda se anuncia «Web, Rayuela: https://…», y el botón, «Abrir el enlace».
+
+## 61. Cambiar el tipo de una propiedad (H13.4)
+- En una base, clic en la cabecera de una propiedad de texto con valores (por ejemplo «Autor»): el menú tiene «Tipo: Texto» y debajo «Cambiar tipo…». Al pulsarlo se cierra el menú y se abre el diálogo «Cambiar el tipo de «Autor»», con los otros ocho tipos (no el actual) y el foco en el primero.
+- Sin elegir nada, «Cambiar tipo» está desactivado. Elige «Número»: la vista previa dice cuántos valores se convierten, cuántos no encajan y quedan vacíos («No se pierden…»), y «Cmd+Z lo deshace.». Elige otro tipo: la vista previa cambia. Nada se guarda todavía.
+- Esc (o un clic fuera, o «Cancelar») cierra el diálogo sin cambiar nada.
+- Elige «Selección» y confirma: la columna pasa a etiquetas con colores, una opción por cada valor distinto (sin repetir por mayúsculas o acentos), y sale el aviso «… ahora es de tipo «Selección». Cmd+Z lo deshace.».
+- Cmd/Ctrl+Z (con el foco fuera de un campo de texto): vuelve a Texto con los valores exactos y sin las opciones creadas. Cmd/Ctrl+Mayús+Z lo rehace.
+- Texto con `12.50` → Número → Texto: vuelve `12.50`, no `12,5`. Texto con nombres → Número → Texto: los nombres vuelven.
+- Con un filtro sobre la propiedad, la vista previa dice «Se quitará 1 filtro de las vistas.»; al confirmar, el filtro desaparece y las filas ocultas se ven. Cmd+Z devuelve el filtro.
+- Cambia a «Creado» o «Editado»: la vista previa lo explica, la columna muestra las fechas de las filas y no se edita. Vuelve al tipo anterior: los valores reaparecen.
+- Escribe en una celda de la propiedad y, sin salir, cambia el tipo desde la cabecera: lo escrito se guarda antes y se convierte.
+- Con más de 100 valores distintos, cambia a «Selección»: tras «Cambiar tipo» sale «¿Crear N opciones?». «Volver» regresa a la vista previa; «Crear N opciones y cambiar» lo hace.
+- En un tablero agrupado por esa selección, cámbiala a texto: el tablero agrupa por otra selección o explica que no hay ninguna.
+- Cierra y vuelve a abrir la app: el tipo nuevo y los valores siguen ahí.
+- Tema oscuro y VoiceOver: los tipos del diálogo se anuncian por su nombre y la vista previa se lee.

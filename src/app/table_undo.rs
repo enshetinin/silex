@@ -6,8 +6,8 @@
 //!
 //! Undoable: cell values, row names, adding a row (undone by sending it to
 //! the trash), sending a row to the trash, adding and deleting properties,
-//! moving rows by hand (H13.1), and the actions on several rows at once
-//! (H11.2), each as one step.
+//! moving rows by hand (H13.1), changing a property's type (H13.4, ADR
+//! 0019), and the actions on several rows at once (H11.2), each as one step.
 //! Not undoable here: renaming or moving properties, options and views.
 //!
 //! Rows sent to the trash from the table or the board (menu, «⋯», Supr,
@@ -15,7 +15,8 @@
 //! so the notice leaves as soon as another change is recorded or anything
 //! is undone: its button never undoes something else.
 use anyhow::Result;
-use silex_desktop::property::CellValue;
+use silex_desktop::db::KindSnapshot;
+use silex_desktop::property::{CellValue, PropertyKind};
 
 use super::*;
 
@@ -50,6 +51,12 @@ pub(super) enum TableOp {
     Order {
         before: Vec<String>,
         after: Vec<String>,
+    },
+    /// A property's type changed to `to` (H13.4): the snapshot puts it back
+    /// exactly; redoing changes it again and takes a new one.
+    Kind {
+        snapshot: KindSnapshot,
+        to: PropertyKind,
     },
 }
 
@@ -142,10 +149,10 @@ impl SilexApp {
             Way::Undo => state.history.undo.pop(),
             Way::Redo => state.history.redo.pop(),
         };
-        let Some(op) = op else {
+        let Some(mut op) = op else {
             return;
         };
-        match self.apply_table_op(&op, way) {
+        match self.apply_table_op(&mut op, way) {
             Ok(()) => {
                 if let Some(state) = self.database.as_mut() {
                     match way {
@@ -160,9 +167,9 @@ impl SilexApp {
         }
     }
 
-    fn apply_table_op(&mut self, op: &TableOp, way: Way) -> Result<()> {
+    fn apply_table_op(&mut self, op: &mut TableOp, way: Way) -> Result<()> {
         let undo = way == Way::Undo;
-        match op {
+        match &*op {
             TableOp::Cell {
                 row,
                 property,
@@ -247,8 +254,24 @@ impl SilexApp {
                 }
                 self.reload_properties()?;
             }
+            TableOp::Kind { .. } => self.step_kind(op, undo)?,
         }
         Ok(())
+    }
+
+    /// Undoes a change of type with its snapshot, or redoes it, keeping
+    /// the new snapshot in the step for the next undo.
+    fn step_kind(&mut self, op: &mut TableOp, undo: bool) -> Result<()> {
+        let TableOp::Kind { snapshot, to } = op else {
+            return Ok(());
+        };
+        let property = snapshot.property().to_owned();
+        if undo {
+            self.db.restore_property_kind(snapshot)?;
+        } else {
+            *snapshot = self.db.change_property_kind(&property, *to)?;
+        }
+        self.after_kind_change(&property)
     }
 
     /// The notice of a row just sent to the trash, while «Deshacer» would

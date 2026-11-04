@@ -89,6 +89,8 @@ pub(super) struct DatabaseState {
     pub(super) select_anchor: Option<String>,
     /// What «Poner valor…» shows.
     pub(super) bulk: BulkValue,
+    /// The open «Cambiar tipo» dialog (H13.4b).
+    pub(super) kind_change: Option<KindDialog>,
 }
 
 impl DatabaseState {
@@ -217,6 +219,8 @@ pub(super) enum TableAction {
     RenameProperty(String, String),
     MoveProperty(String, Shift),
     DeleteProperty(String),
+    /// Open «Cambiar tipo» for a property (H13.4b).
+    ChangeKind(String),
     RenameOption(String, String),
     SetOptionColor(String, OptionColor),
     DeleteOption(String),
@@ -290,6 +294,7 @@ impl SilexApp {
             selection: HashSet::new(),
             select_anchor: None,
             bulk: BulkValue::default(),
+            kind_change: None,
         });
         // The view last open (also in an earlier session, H11.6), else the
         // first. If it cannot be read, the first: not worth an error.
@@ -537,6 +542,7 @@ impl SilexApp {
             let result = self.apply_table_action(&database, action);
             self.report(result);
         }
+        self.kind_dialog(ui.ctx());
     }
 
     pub(super) fn apply_table_action(&mut self, database: &str, action: TableAction) -> Result<()> {
@@ -587,6 +593,7 @@ impl SilexApp {
                 self.reload_properties()?;
             }
             TableAction::DeleteProperty(id) => self.delete_property(&id)?,
+            TableAction::ChangeKind(id) => self.open_kind_dialog(&id)?,
             TableAction::RenameOption(id, name) => {
                 let unchanged = self
                     .database
@@ -1425,6 +1432,13 @@ impl PropertyMenu<'_> {
         }
         ui.add_space(theme::space::XS);
         menu_caption(ui, &format!("Tipo: {}", property.kind.label()));
+        if ui
+            .button((icons::icon(icons::ARROWS_DOWN_UP), " Cambiar tipo…"))
+            .clicked()
+        {
+            actions.push(TableAction::ChangeKind(property.id.clone()));
+            ui.close();
+        }
         if property.kind.has_options() {
             ui.separator();
             self.options(ui, property, actions);
