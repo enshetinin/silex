@@ -9,6 +9,7 @@ use silex_desktop::db::LinkTarget;
 use silex_desktop::editor::fold;
 use silex_desktop::model::{Block, BlockKind, Page, PageKind, ancestors};
 
+use super::database_card::PREVIEW_ROWS;
 use super::*;
 use super::{icons, theme};
 
@@ -25,6 +26,8 @@ pub(super) enum LinkState {
         title: String,
         kind: PageKind,
         path: String,
+        /// Its emoji (H12.8).
+        icon: Option<String>,
     },
     /// In the trash: opening it offers to restore it.
     Trashed { title: String },
@@ -42,8 +45,10 @@ pub(super) struct LinkPicker {
     pub(super) after: Option<String>,
     /// «[[» or «/enlace» left this block empty: the link takes its place.
     pub(super) replace: Option<String>,
+    /// Not a link: these blocks are moved to the page chosen (ADR 0017).
+    pub(super) moving: Option<Vec<String>>,
     /// Focus its field on the next frame.
-    opening: bool,
+    pub(super) opening: bool,
 }
 
 /// Links of the open page.
@@ -57,6 +62,8 @@ pub(super) struct Links {
     pub(super) restore: Option<(String, String)>,
     /// The live pages that link to the open one («Enlazada desde», H7.6).
     pub(super) backlinks: Vec<String>,
+    /// What the cards of the databases it links to show (H12.11), by id.
+    pub(super) tables: HashMap<String, silex_desktop::view::TablePreview>,
 }
 
 /// «Proyecto › Diseño»: the titles above a page, root first.
@@ -75,6 +82,7 @@ fn page_path(pages: &[Page], id: &str) -> String {
 pub(super) fn link_state(
     pages: &[Page],
     targets: &HashMap<String, LinkTarget>,
+    icons: &HashMap<String, String>,
     block: &Block,
 ) -> LinkState {
     let Some(id) = block.link.as_deref() else {
@@ -85,6 +93,7 @@ pub(super) fn link_state(
             title: page.title.clone(),
             kind: page.kind,
             path: page_path(pages, id),
+            icon: icons.get(id).cloned(),
         };
     }
     match targets.get(id) {
@@ -158,12 +167,18 @@ pub(super) fn link_card(
         LinkState::Gone => icons::LINK,
         _ => icons::PAGE,
     };
+    let emoji = match state {
+        LinkState::Live { icon, .. } => icon.as_deref(),
+        _ => None,
+    };
     let muted = !matches!(state, LinkState::Live { .. });
-    let at = ui.painter().text(
+    let at = icons::paint_page_icon(
+        ui.painter(),
         egui::pos2(rect.left() + 8.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
+        emoji,
         icon,
-        icons::font(theme::icon::MD),
+        theme::icon::MD,
         p.text_muted,
     );
     let mut job = egui::text::LayoutJob::default();
@@ -221,6 +236,7 @@ pub(super) fn backlink_rows<'a>(pages: &'a [Page], ids: &[String]) -> Vec<(&'a P
 fn page_row(
     ui: &mut egui::Ui,
     page: &Page,
+    emoji: Option<&str>,
     path: &str,
     selected: bool,
     role: egui::Role,
@@ -242,11 +258,13 @@ fn page_row(
     } else {
         icons::PAGE
     };
-    let at = ui.painter().text(
+    let at = icons::paint_page_icon(
+        ui.painter(),
         egui::pos2(rect.left() + 8.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
+        emoji,
         icon,
-        icons::font(theme::icon::MD),
+        theme::icon::MD,
         p.text_muted,
     );
     let mut job = egui::text::LayoutJob::default();
@@ -280,6 +298,7 @@ impl SilexApp {
         let Some(page) = &self.selected else {
             self.links.targets.clear();
             self.links.backlinks.clear();
+            self.links.tables.clear();
             return Ok(());
         };
         self.links.targets = self
@@ -289,6 +308,18 @@ impl SilexApp {
             .map(|t| (t.id.clone(), t))
             .collect();
         self.links.backlinks = self.db.backlinks(page)?;
+        // Read again with the page (and when pages change): a database
+        // edited elsewhere shows its rows as they are now.
+        let mut tables = HashMap::new();
+        for target in self.links.targets.values() {
+            if target.kind == PageKind::Database
+                && !target.trashed
+                && let Some(table) = self.db.database_preview(&target.id, PREVIEW_ROWS)?
+            {
+                tables.insert(target.id.clone(), table);
+            }
+        }
+        self.links.tables = tables;
         Ok(())
     }
 
@@ -322,7 +353,8 @@ impl SilexApp {
                 });
                 ui.add_space(theme::space::XS);
                 for (page, path) in &rows {
-                    if page_row(ui, page, path, false, egui::Role::Link)
+                    let emoji = self.page_icons.get(&page.id).map(String::as_str);
+                    if page_row(ui, page, emoji, path, false, egui::Role::Link)
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {
@@ -340,7 +372,7 @@ impl SilexApp {
         let Some(link) = self.blocks.iter().find(|b| b.id == block) else {
             return Ok(());
         };
-        match link_state(&self.pages, &self.links.targets, link) {
+        match link_state(&self.pages, &self.links.targets, &self.page_icons, link) {
             LinkState::Live { .. } => {
                 if let Some(target) = link.link.clone() {
                     self.open_clicked(target)?;
@@ -371,7 +403,7 @@ impl SilexApp {
             ui.add_space(theme::space::SM);
             ui.label(format!(
                 "«{}» está en la papelera. ¿Quieres restaurarla y abrirla?",
-                display_title(&title)
+                short_title(&title)
             ));
             ui.add_space(theme::space::MD);
             ui.horizontal(|ui| {
@@ -459,8 +491,11 @@ impl SilexApp {
         };
         let p = theme::current(ctx);
         let exclude = self.selected.clone();
+        let moving = picker.moving.is_some();
+        // Blocks only go to pages (a database shows its table).
         let matches: Vec<Page> = picker_matches(&self.pages, &picker.query, exclude.as_deref())
             .into_iter()
+            .filter(|p| !moving || p.kind == PageKind::Page)
             .cloned()
             .collect();
         use egui::{Key, Modifiers as M};
@@ -477,9 +512,14 @@ impl SilexApp {
             .flatten();
         let mut close = take_exact_key(ctx, Key::Escape, M::NONE);
         let pages = &self.pages;
+        let page_icons = &self.page_icons;
         let response = egui::Modal::new(egui::Id::unique("silex_link_picker")).show(ctx, |ui| {
             ui.set_width(460.0);
-            ui.heading("Enlazar a una página");
+            ui.heading(if moving {
+                "Mover a una página"
+            } else {
+                "Enlazar a una página"
+            });
             ui.add_space(theme::space::SM);
             let field = framed(
                 ui,
@@ -489,7 +529,11 @@ impl SilexApp {
                     )
                     .desired_width(f32::INFINITY),
             )
-            .accessible_name("Página a enlazar");
+            .accessible_name(if moving {
+                "Página a la que mover"
+            } else {
+                "Página a enlazar"
+            });
             if std::mem::take(&mut picker.opening) {
                 field.request_focus();
             }
@@ -507,8 +551,14 @@ impl SilexApp {
                 .show(ui, |ui| {
                     for (i, page) in matches.iter().enumerate() {
                         let path = page_path(pages, &page.id);
-                        let row =
-                            page_row(ui, page, &path, i == picker.selected, egui::Role::Button);
+                        let row = page_row(
+                            ui,
+                            page,
+                            page_icons.get(&page.id).map(String::as_str),
+                            &path,
+                            i == picker.selected,
+                            egui::Role::Button,
+                        );
                         if i == picker.selected {
                             row.scroll_to_me(None);
                         }
@@ -519,14 +569,24 @@ impl SilexApp {
                 });
             ui.add_space(theme::space::SM);
             ui.label(
-                egui::RichText::new("↑ ↓ para moverte · Intro para enlazar · Esc para cerrar")
-                    .small()
-                    .color(p.text_muted),
+                egui::RichText::new(if moving {
+                    "↑ ↓ para moverte · Intro para mover los bloques al final · Esc para cerrar"
+                } else {
+                    "↑ ↓ para moverte · Intro para enlazar · Esc para cerrar"
+                })
+                .small()
+                .color(p.text_muted),
             );
         });
         close |= response.should_close();
         if let Some(page) = chosen {
-            self.insert_link(&picker, &page);
+            match &picker.moving {
+                Some(ids) => {
+                    let result = self.move_blocks_to(ids, &page);
+                    self.report(result);
+                }
+                None => self.insert_link(&picker, &page),
+            }
         } else if !close {
             self.links.picker = Some(picker);
         }
@@ -658,6 +718,7 @@ mod tests {
             link: link.map(str::to_owned),
             marks: Vec::new(),
         };
+        let icons = HashMap::from([("2".to_owned(), "🍞".to_owned())]);
         let mut targets = HashMap::new();
         targets.insert(
             "9".to_owned(),
@@ -669,23 +730,27 @@ mod tests {
             },
         );
         assert_eq!(
-            link_state(&pages, &targets, &block(Some("2"))),
+            link_state(&pages, &targets, &icons, &block(Some("2"))),
             LinkState::Live {
                 title: "Pan".into(),
                 kind: PageKind::Page,
-                path: "Recetas".into()
+                path: "Recetas".into(),
+                icon: Some("🍞".into())
             }
         );
         assert_eq!(
-            link_state(&pages, &targets, &block(Some("9"))),
+            link_state(&pages, &targets, &icons, &block(Some("9"))),
             LinkState::Trashed {
                 title: "Borrada".into()
             }
         );
         assert_eq!(
-            link_state(&pages, &targets, &block(Some("7"))),
+            link_state(&pages, &targets, &icons, &block(Some("7"))),
             LinkState::Gone
         );
-        assert_eq!(link_state(&pages, &targets, &block(None)), LinkState::Gone);
+        assert_eq!(
+            link_state(&pages, &targets, &icons, &block(None)),
+            LinkState::Gone
+        );
     }
 }

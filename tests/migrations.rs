@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 10;
+const LATEST: i64 = 15;
 
 struct TempDir(PathBuf);
 
@@ -291,17 +291,14 @@ mod v3 {
     fn failed_rebuild_leaves_the_v2_database_untouched() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         write_v2_database(&tmp.db())?;
-        // An orphan block (only possible with foreign keys off) makes the copy
-        // into the new table fail after it was created: all must roll back.
-        let conn = Connection::open(tmp.db())?;
-        conn.execute_batch(
-            "PRAGMA foreign_keys = OFF;
-             INSERT INTO blocks (id, page_id, kind) VALUES ('huerfano', 'no-existe', 'paragraph');",
-        )?;
-        drop(conn);
+        // A table already named `settings` makes the next migration (0004)
+        // fail after `blocks` was rebuilt, in the same transaction: all must
+        // roll back. (Until v14 an orphan block made the copy itself fail,
+        // but foreign keys are off while migrating since then, ADR 0018.)
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE settings (x);")?;
 
         let err = Database::open(tmp.db()).err().expect("migration must fail");
-        assert!(format!("{err:#}").contains("esquema 3"), "{err:#}");
+        assert!(format!("{err:#}").contains("esquema 4"), "{err:#}");
 
         let conn = Connection::open(tmp.db())?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -317,7 +314,7 @@ mod v3 {
         let blocks: i64 =
             Connection::open(tmp.db())?
                 .query_row("SELECT COUNT(*) FROM blocks", [], |r| r.get(0))?;
-        assert_eq!(blocks, 4, "nothing lost");
+        assert_eq!(blocks, 3, "nothing lost");
         Ok(())
     }
 
@@ -377,6 +374,7 @@ mod v4 {
         db.save_settings(&Settings {
             theme: ThemeMode::Light,
             zoom_percent: 110,
+            ..Settings::default()
         })?;
         drop(db);
         backup::verify_backup(&tmp.db())?;
@@ -389,6 +387,7 @@ mod v4 {
         let wanted = Settings {
             theme: ThemeMode::Dark,
             zoom_percent: 125,
+            outline: true,
         };
         let mut db = Database::open(tmp.db())?;
         db.save_settings(&Settings::default())?;
@@ -400,7 +399,7 @@ mod v4 {
         let rows: i64 =
             Connection::open(tmp.db())?
                 .query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))?;
-        assert_eq!(rows, 2);
+        assert_eq!(rows, 3, "theme, size and outline");
         Ok(())
     }
 
@@ -1113,7 +1112,7 @@ mod v10 {
     const SCHEMA_V9: &str = include_str!("../src/db/migrations/0009_templates.sql");
 
     /// A database exactly as Silex v9 left it (v8 content plus a template).
-    fn write_v9_database(path: &Path) -> anyhow::Result<()> {
+    pub(super) fn write_v9_database(path: &Path) -> anyhow::Result<()> {
         write_v8_database(path)?;
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA_V9)?;
@@ -1224,6 +1223,808 @@ mod v10 {
         assert!(db.get_page(&page)?.is_none());
         assert!(db.is_template("p3")?);
         format_first_block(&mut db)?;
+        Ok(())
+    }
+}
+
+mod v11 {
+    use super::v10::write_v9_database;
+    use super::*;
+    use silex_desktop::marks::{Mark, MarkKind};
+    use silex_desktop::model::BlockKind;
+
+    const SCHEMA_V10: &str = include_str!("../src/db/migrations/0010_inline_marks.sql");
+
+    /// A database exactly as Silex v10 left it (v9 content plus bold on
+    /// the first word of `p2`).
+    pub(super) fn write_v10_database(path: &Path) -> anyhow::Result<()> {
+        write_v9_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V10)?;
+        conn.execute_batch(
+            r#"UPDATE blocks SET marks = '[{"start":0,"end":6,"type":"bold"}]'
+                 WHERE page_id = 'p2' AND position = 0;
+               PRAGMA user_version = 10;"#,
+        )?;
+        Ok(())
+    }
+
+    /// A divider and a callout after `p2`'s blocks, saved and read back.
+    fn add_divider_and_callout(db: &mut Database) -> anyhow::Result<()> {
+        let mut blocks = db.list_blocks("p2")?;
+        let template = blocks[0].clone();
+        for (kind, content) in [(BlockKind::Divider, ""), (BlockKind::Callout, "Ojo 🌾")] {
+            blocks.push(silex_desktop::model::Block {
+                id: uuid::Uuid::new_v4().to_string(),
+                kind,
+                content: content.into(),
+                marks: if kind == BlockKind::Callout {
+                    vec![Mark::new(0, 3, MarkKind::Italic)]
+                } else {
+                    Vec::new()
+                },
+                ..template.clone()
+            });
+        }
+        let title = db.get_page("p2")?.expect("p2").title;
+        db.save_document("p2", &title, &blocks)?;
+        let saved = db.list_blocks("p2")?;
+        let n = saved.len();
+        assert_eq!(saved[n - 2].kind, BlockKind::Divider);
+        assert_eq!(saved[n - 1].kind, BlockKind::Callout);
+        assert_eq!(saved[n - 1].marks, vec![Mark::new(0, 3, MarkKind::Italic)]);
+        Ok(())
+    }
+
+    #[test]
+    fn v10_database_gets_dividers_and_callouts_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v10_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before, "rowids kept");
+        // Everything is where it was, formatting included.
+        let blocks = db.list_blocks("p2")?;
+        assert_eq!(blocks[0].content, "Harina de centeno 🌾");
+        assert_eq!(blocks[0].marks, vec![Mark::new(0, 6, MarkKind::Bold)]);
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert_eq!(db.page_versions("p1")?.len(), 1);
+        assert_eq!(db.list_favorites()?.len(), 1);
+        assert!(db.is_template("p3")?);
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v10 copy first"
+        );
+        add_divider_and_callout(&mut db)?;
+        // The callout's text is searchable; the indexes and triggers are back.
+        assert_eq!(db.search_pages("ojo")?.len(), 1);
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        let indexes: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE tbl_name = 'blocks'
+                   AND type IN ('index', 'trigger') AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert_eq!(
+            indexes,
+            [
+                "blocks_attachment_idx",
+                "blocks_link_idx",
+                "blocks_page_position_idx",
+                "blocks_search_ad",
+                "blocks_search_ai",
+                "blocks_search_au",
+            ]
+        );
+        // A divider never has text or formatting.
+        let with_text = conn.execute(
+            "INSERT INTO blocks (id, page_id, kind, content) VALUES ('d', 'p2', 'divider', 'x')",
+            [],
+        );
+        assert!(with_text.is_err());
+        let broken: Vec<String> = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert!(broken.is_empty(), "{broken:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v11() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        add_divider_and_callout(&mut db)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v10_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v10_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        // The new table's name is taken, so 0011 fails at its first step.
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE blocks_v11 (x);")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 11"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 10);
+        let marks: String = conn.query_row(
+            "SELECT marks FROM blocks WHERE page_id = 'p2' AND position = 0",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(marks.contains("bold"));
+        drop(conn);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        Ok(())
+    }
+
+    #[test]
+    fn v10_backup_restores_into_v11() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v10_database(&old_db)?;
+        let v10_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        let page = db.create_page("Se pierde al restaurar", None)?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v10_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.get_page(&page)?.is_none());
+        assert_eq!(
+            db.list_blocks("p2")?[0].marks,
+            vec![Mark::new(0, 6, MarkKind::Bold)]
+        );
+        add_divider_and_callout(&mut db)?;
+        Ok(())
+    }
+}
+
+mod v12 {
+    use super::v11::write_v10_database;
+    use super::*;
+    use silex_desktop::marks::{Mark, MarkKind};
+    use silex_desktop::model::{Block, BlockKind};
+
+    const SCHEMA_V11: &str = include_str!("../src/db/migrations/0011_divider_callout.sql");
+
+    /// A database exactly as Silex v11 left it (v10 content plus a
+    /// divider at the end of `p2`).
+    pub(super) fn write_v11_database(path: &Path) -> anyhow::Result<()> {
+        write_v10_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V11)?;
+        conn.execute_batch(
+            "INSERT INTO blocks (id, page_id, kind, position) VALUES ('div', 'p2', 'divider', 99);
+             PRAGMA user_version = 11;",
+        )?;
+        Ok(())
+    }
+
+    /// A toggle with a block inside it at the end of `p2`, saved and read
+    /// back.
+    fn add_toggle(db: &mut Database) -> anyhow::Result<String> {
+        let mut blocks = db.list_blocks("p2")?;
+        let template = blocks[0].clone();
+        let toggle = uuid::Uuid::new_v4().to_string();
+        blocks.push(Block {
+            id: toggle.clone(),
+            kind: BlockKind::Toggle,
+            content: "Más detalles".into(),
+            marks: vec![Mark::new(0, 3, MarkKind::Bold)],
+            indent: 0,
+            ..template.clone()
+        });
+        blocks.push(Block {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: BlockKind::Paragraph,
+            content: "dentro".into(),
+            marks: Vec::new(),
+            indent: 1,
+            ..template
+        });
+        let title = db.get_page("p2")?.expect("p2").title;
+        db.save_document("p2", &title, &blocks)?;
+        let saved = db.list_blocks("p2")?;
+        let n = saved.len();
+        assert_eq!(saved[n - 2].kind, BlockKind::Toggle);
+        assert_eq!(saved[n - 2].marks, vec![Mark::new(0, 3, MarkKind::Bold)]);
+        assert_eq!(saved[n - 1].indent, 1);
+        Ok(toggle)
+    }
+
+    #[test]
+    fn v11_database_gets_toggles_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v11_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before, "rowids kept");
+        let blocks = db.list_blocks("p2")?;
+        assert_eq!(blocks[0].marks, vec![Mark::new(0, 6, MarkKind::Bold)]);
+        assert!(blocks.iter().any(|b| b.kind == BlockKind::Divider));
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert_eq!(db.page_versions("p1")?.len(), 1);
+        assert!(db.is_template("p3")?);
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v11 copy first"
+        );
+        add_toggle(&mut db)?;
+        assert_eq!(db.search_pages("detalles")?.len(), 1);
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        // The divider rule is still there.
+        assert!(
+            conn.execute("UPDATE blocks SET content = 'x' WHERE id = 'div'", [])
+                .is_err()
+        );
+        let broken: Vec<String> = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert!(broken.is_empty(), "{broken:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v12() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        add_toggle(&mut db)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v11_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v11_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE blocks_v12 (x);")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 12"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 11);
+        drop(conn);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before);
+        Ok(())
+    }
+
+    #[test]
+    fn v11_backup_restores_into_v12() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v11_database(&old_db)?;
+        let v11_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        let page = db.create_page("Se pierde al restaurar", None)?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v11_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.get_page(&page)?.is_none());
+        add_toggle(&mut db)?;
+        Ok(())
+    }
+
+    /// Folded toggles are view state in `settings` (ADR 0016): they survive
+    /// reopening, and only toggles count.
+    #[test]
+    fn folded_toggles_are_remembered() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v11_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.folded_blocks()?, None);
+        let toggle = add_toggle(&mut db)?;
+        db.save_folded_blocks(&format!(r#"["{toggle}"]"#))?;
+        let ids = db.toggle_block_ids()?;
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains(&toggle));
+        drop(db);
+        let db = Database::open(tmp.db())?;
+        assert_eq!(db.folded_blocks()?, Some(format!(r#"["{toggle}"]"#)));
+        Ok(())
+    }
+}
+
+mod v13 {
+    use super::v12::write_v11_database;
+    use super::*;
+
+    const SCHEMA_V12: &str = include_str!("../src/db/migrations/0012_toggle.sql");
+
+    /// A database exactly as Silex v12 left it (v11 content plus a toggle).
+    pub(super) fn write_v12_database(path: &Path) -> anyhow::Result<()> {
+        write_v11_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V12)?;
+        conn.execute_batch(
+            "INSERT INTO blocks (id, page_id, kind, content, position)
+                 VALUES ('tog', 'p2', 'toggle', 'Más', 100);
+             PRAGMA user_version = 12;",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn v12_database_gets_page_icons_keeping_everything() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v12_database(&tmp.db())?;
+        let rowids_before = block_rowids(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(has_column(&tmp.db(), "pages", "icon")?);
+        assert_eq!(block_rowids(&tmp.db())?, rowids_before, "no rebuild");
+        assert!(db.page_icons()?.is_empty(), "no page has one yet");
+        assert_eq!(db.search_pages("centeno")?.len(), 1);
+        assert!(db.is_template("p3")?);
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v12 copy first"
+        );
+        db.set_page_icon("p2", Some("🌾"))?;
+        assert_eq!(db.page_icons()?.get("p2").map(String::as_str), Some("🌾"));
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        // The CHECK keeps any value short.
+        let conn = Connection::open(tmp.db())?;
+        assert!(
+            conn.execute(
+                "UPDATE pages SET icon = ?1 WHERE id = 'p1'",
+                ["muy largo para un icono"]
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v13() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        db.set_page_icon("p2", Some("📒"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v12_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v12_database(&tmp.db())?;
+        // Another tool already added an `icon` column: 0013 fails.
+        Connection::open(tmp.db())?.execute_batch("ALTER TABLE pages ADD COLUMN icon INTEGER;")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 13"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 12);
+        Ok(())
+    }
+
+    #[test]
+    fn v12_backup_restores_into_v13() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v12_database(&old_db)?;
+        let v12_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        let page = db.create_page("Se pierde al restaurar", None)?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v12_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.get_page(&page)?.is_none());
+        db.set_page_icon("p2", Some("🌾"))?;
+        Ok(())
+    }
+}
+
+mod v14 {
+    use super::v13::write_v12_database;
+    use super::*;
+    use silex_desktop::property::{CellValue, PropertyKind};
+
+    const SCHEMA_V13: &str = include_str!("../src/db/migrations/0013_page_icon.sql");
+
+    /// A database exactly as Silex v13 left it (v12 content plus an icon,
+    /// and properties, options and values in the database «Lecturas»: what
+    /// a rebuild of `db_properties` with foreign keys on would cascade away).
+    pub(super) fn write_v13_database(path: &Path) -> anyhow::Result<()> {
+        write_v12_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA_V13)?;
+        conn.execute_batch(
+            "UPDATE pages SET icon = '🌾' WHERE id = 'p2';
+             INSERT INTO pages (id, title, parent_id, sort_order) VALUES ('fila', 'Rayuela', 'base', 0);
+             INSERT INTO db_properties (id, database_id, name, kind, position) VALUES
+                 ('autor', 'base', 'Autor', 'text', 0),
+                 ('estado', 'base', 'Estado', 'select', 1);
+             INSERT INTO db_properties (id, database_id, name, kind, position, deleted_at) VALUES
+                 ('vieja', 'base', 'Vieja', 'number', 2, '2026-01-01T00:00:00.000Z');
+             INSERT INTO db_select_options (id, property_id, name, color, position) VALUES
+                 ('leyendo', 'estado', 'Leyendo', 'blue', 0),
+                 ('hecho', 'estado', 'Hecho', 'green', 1);
+             INSERT INTO db_values (page_id, property_id, text_value) VALUES ('fila', 'autor', 'Cortázar');
+             INSERT INTO db_values (page_id, property_id, option_id) VALUES ('fila', 'estado', 'hecho');
+             INSERT INTO db_values (page_id, property_id, number_value) VALUES ('fila', 'vieja', 7);
+             PRAGMA user_version = 13;",
+        )?;
+        Ok(())
+    }
+
+    fn count(path: &Path, table: &str) -> anyhow::Result<i64> {
+        Ok(Connection::open(path)?.query_row(
+            &format!("SELECT COUNT(*) FROM {table}"),
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    #[test]
+    fn v13_database_gets_multi_selects_keeping_properties_options_and_values() -> anyhow::Result<()>
+    {
+        let tmp = TempDir::new()?;
+        write_v13_database(&tmp.db())?;
+        let rowids = |path: &Path| -> anyhow::Result<Vec<(String, i64)>> {
+            Ok(Connection::open(path)?
+                .prepare("SELECT id, rowid FROM db_properties ORDER BY id")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        };
+        let before = rowids(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(rowids(&tmp.db())?, before, "rowids kept");
+        assert_eq!(count(&tmp.db(), "db_select_options")?, 2, "options kept");
+        assert_eq!(count(&tmp.db(), "db_values")?, 3, "values kept");
+        // As before: live properties, the deleted one restorable.
+        let names: Vec<String> = db
+            .database_properties("base")?
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["Autor", "Estado"]);
+        let values = db.database_values("base")?;
+        assert_eq!(values["fila"]["estado"], CellValue::Select("hecho".into()));
+        assert_eq!(db.page_icons()?.get("p2").map(String::as_str), Some("🌾"));
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v13 copy first"
+        );
+        // A multi-select works.
+        let generos = db.add_property("base", "Géneros", PropertyKind::MultiSelect)?;
+        let novela = db.add_select_option(
+            &generos,
+            "Novela",
+            silex_desktop::property::OptionColor::Blue,
+        )?;
+        db.set_value(
+            "fila",
+            &generos,
+            Some(&CellValue::MultiSelect(vec![novela.clone()])),
+        )?;
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let broken: i64 =
+            conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })?;
+        assert_eq!(broken, 0);
+        // Foreign keys still point at the rebuilt table: deleting a
+        // property takes its options and values.
+        conn.execute("DELETE FROM db_properties WHERE id = 'estado'", [])?;
+        assert_eq!(count(&tmp.db(), "db_select_options")?, 1);
+        // The CHECK takes the new kinds and nothing else.
+        for kind in ["url", "created", "edited"] {
+            conn.execute(
+                "INSERT INTO db_properties (id, database_id, name, kind, position)
+                 VALUES (?1, 'base', ?1, ?1, 9)",
+                [kind],
+            )?;
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO db_properties (id, database_id, name, kind, position)
+                 VALUES ('f', 'base', 'f', 'formula', 9)",
+                [],
+            )
+            .is_err()
+        );
+        // A cell cannot hold an option of another property.
+        assert!(
+            conn.execute(
+                "INSERT INTO db_multi_values (page_id, property_id, option_id)
+                 VALUES ('fila', ?1, 'leyendo')",
+                [&generos],
+            )
+            .is_err()
+        );
+        // Deleting an option takes it out of every cell.
+        conn.execute("DELETE FROM db_select_options WHERE id = ?1", [&novela])?;
+        assert_eq!(count(&tmp.db(), "db_multi_values")?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v14() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        let base = db.create_database("Lecturas", None)?;
+        let row = db.create_row(&base, "Rayuela")?;
+        let generos = db.add_property(&base, "Géneros", PropertyKind::MultiSelect)?;
+        let novela = db.add_select_option(
+            &generos,
+            "Novela",
+            silex_desktop::property::OptionColor::Blue,
+        )?;
+        db.set_value(
+            &row,
+            &generos,
+            Some(&CellValue::MultiSelect(vec![novela.clone()])),
+        )?;
+        assert_eq!(
+            db.database_values(&base)?[&row][&generos],
+            CellValue::MultiSelect(vec![novela])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v13_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v13_database(&tmp.db())?;
+        // Another tool already made a `db_multi_values` table: 0014 fails
+        // after `db_properties` was rebuilt, so all must roll back.
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE db_multi_values (x);")?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 14"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 13);
+        let leftover: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'db_properties_v14')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(!leftover, "new table rolled back");
+        assert_eq!(count(&tmp.db(), "db_values")?, 3, "nothing lost");
+        assert_eq!(count(&tmp.db(), "db_select_options")?, 2);
+        // The old CHECK is still there.
+        assert!(
+            conn.execute(
+                "INSERT INTO db_properties (id, database_id, name, kind, position)
+                 VALUES ('u', 'base', 'u', 'url', 9)",
+                [],
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_orphan_from_an_older_version_does_not_stop_the_upgrade() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v13_database(&tmp.db())?;
+        Connection::open(tmp.db())?.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO blocks (id, page_id, kind) VALUES ('huerfano', 'no-existe', 'paragraph');",
+        )?;
+        let db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        // Foreign keys are on again: a new orphan is refused.
+        assert!(db.create_page("Hija", Some("no-existe")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn v13_backup_restores_into_v14() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v13_database(&old_db)?;
+        let v13_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v13_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(
+            db.database_values("base")?["fila"]["estado"],
+            CellValue::Select("hecho".into())
+        );
+        db.add_property("base", "Géneros", PropertyKind::MultiSelect)?;
+        Ok(())
+    }
+}
+
+mod v15 {
+    use super::v14::write_v13_database;
+    use super::*;
+    use silex_desktop::model::ViewKind;
+    use silex_desktop::view::ViewConfig;
+
+    const SCHEMA_V14: &str = include_str!("../src/db/migrations/0014_property_kinds.sql");
+
+    /// A database exactly as Silex v14 left it: the v13 content, a date
+    /// property, and two views of «Lecturas» (a sorted table and a board),
+    /// the board remembered as its last view.
+    fn write_v14_database(path: &Path) -> anyhow::Result<()> {
+        write_v13_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        conn.execute_batch(SCHEMA_V14)?;
+        conn.execute_batch(
+            r#"INSERT INTO db_properties (id, database_id, name, kind, position)
+                   VALUES ('fin', 'base', 'Terminado', 'date', 3);
+               INSERT INTO db_values (page_id, property_id, date_value) VALUES ('fila', 'fin', '2026-09-14');
+               INSERT INTO db_views (id, database_id, name, kind, position, config) VALUES
+                   ('tabla', 'base', 'Tabla', 'table', 0, '{"sort":[{"property":"autor","direction":"asc"}]}'),
+                   ('tablero', 'base', 'Por estado', 'board', 1, '{"group_by":"estado"}');
+               INSERT INTO settings (key, value) VALUES ('last_view:base', 'tablero')
+                   ON CONFLICT (key) DO UPDATE SET value = excluded.value;
+               PRAGMA user_version = 14;"#,
+        )?;
+        Ok(())
+    }
+
+    fn views(path: &Path) -> anyhow::Result<Vec<(String, i64, String, String)>> {
+        Ok(Connection::open(path)?
+            .prepare("SELECT id, rowid, kind, config FROM db_views ORDER BY id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    #[test]
+    fn v14_database_gets_calendar_views_keeping_the_views() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v14_database(&tmp.db())?;
+        let before = views(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(
+            views(&tmp.db())?,
+            before,
+            "ids, rowids, kinds and settings kept"
+        );
+        let read = db.database_views("base")?;
+        let view = |id: &str| read.iter().find(|v| v.id == id).expect("view");
+        assert_eq!(view("tabla").kind, ViewKind::Table);
+        assert_eq!(view("tabla").config.sorts.len(), 1);
+        assert_eq!(view("tablero").kind, ViewKind::Board);
+        assert_eq!(view("tablero").config.group_by.as_deref(), Some("estado"));
+        assert_eq!(db.last_view("base")?.as_deref(), Some("tablero"));
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v14 copy first"
+        );
+        // A calendar view is stored and read back with its date property.
+        let mut config = ViewConfig::default();
+        config.date_by = Some("fin".into());
+        let calendar = db.add_view("base", "Calendario", ViewKind::Calendar, &config)?;
+        let read = db.database_views("base")?;
+        let shown = read.iter().find(|v| v.id == calendar).expect("calendar");
+        assert_eq!(shown.kind, ViewKind::Calendar);
+        assert_eq!(shown.config.date_by.as_deref(), Some("fin"));
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        // The CHECK takes the kinds of H13.5 and H13.6, and nothing else.
+        for kind in ["list", "gallery"] {
+            conn.execute(
+                "INSERT INTO db_views (id, database_id, name, kind, position)
+                 VALUES (?1, 'base', ?1, ?1, 9)",
+                [kind],
+            )?;
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO db_views (id, database_id, name, kind, position)
+                 VALUES ('t', 'base', 't', 'timeline', 9)",
+                [],
+            )
+            .is_err()
+        );
+        // Still a foreign key: deleting the database takes its views.
+        conn.execute("DELETE FROM pages WHERE id = 'base'", [])?;
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM db_views", [], |r| r.get(0))?;
+        assert_eq!(left, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v15() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        let base = db.create_database("Lecturas", None)?;
+        db.add_view(
+            &base,
+            "Calendario",
+            ViewKind::Calendar,
+            &ViewConfig::default(),
+        )?;
+        assert!(
+            db.database_views(&base)?
+                .iter()
+                .any(|v| v.kind == ViewKind::Calendar)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v14_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v14_database(&tmp.db())?;
+        // Another tool already made the new table: 0015 fails at once, and
+        // nothing may change.
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE db_views_v15 (x);")?;
+        let before = views(&tmp.db())?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 15"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 14);
+        assert_eq!(views(&tmp.db())?, before, "views untouched");
+        // The old CHECK is still there.
+        assert!(
+            conn.execute(
+                "INSERT INTO db_views (id, database_id, name, kind, position)
+                 VALUES ('c', 'base', 'c', 'calendar', 9)",
+                [],
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn v14_backup_restores_into_v15() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v14_database(&old_db)?;
+        let v14_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v14_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.database_views("base")?.iter().any(|v| v.id == "tablero"));
+        db.add_view(
+            "base",
+            "Calendario",
+            ViewKind::Calendar,
+            &ViewConfig::default(),
+        )?;
         Ok(())
     }
 }

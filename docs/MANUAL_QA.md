@@ -384,5 +384,243 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - Con un método de entrada (japonés o chino), pulsa Cmd/Ctrl+B y compón una palabra: sale en negrita entera.
 - En un bloque de código, Cmd/Ctrl+B no hace nada y un aviso dice que el código no tiene formato.
 - Selecciona texto y abre el menú «…» del bloque → «Formato» → «Cursiva»: solo ese texto, que vuelve a quedar seleccionado. Sin selección, el menú da formato a todo el bloque. Cada opción muestra su atajo.
-- Selecciona texto, abre Cmd/Ctrl+K y escribe «negrita» (o «tachar», «formato»): el comando da formato a lo seleccionado. En una base de datos no aparece.
+- Selecciona texto, haz clic en «Buscar» de la barra lateral y escribe «negrita» (o «tachar», «formato»): el comando da formato a lo seleccionado. En una base de datos no aparece. (Desde H12.1d, Cmd/Ctrl+K con texto seleccionado abre el campo de enlace: sección 43.)
 - «Atajos de teclado» lista Cmd/Ctrl+B, I, E y Cmd/Ctrl+Mayús+X. En Windows y Linux, con Ctrl.
+
+## 43. Enlaces web en el texto (H12.1d, ADR 0015)
+- Selecciona una palabra y pulsa Cmd/Ctrl+K: se abre un campo bajo ella, con la palabra resaltada. Escribe `ejemplo.com` e Intro: la palabra sale azul y subrayada, y vuelve a quedar seleccionada. Un Cmd/Ctrl+Z quita el enlace.
+- Sin texto seleccionado, Cmd/Ctrl+K sigue abriendo el buscador.
+- En el campo, escribe `javascript:alert(1)` o `file:///etc/passwd` e Intro: un aviso en rojo y el campo sigue abierto. Esc lo cierra sin cambiar nada y devuelve la selección. Un clic fuera también lo cierra.
+- Selecciona parte de un enlace y pulsa Cmd/Ctrl+K: el campo trae su URL. Bórrala e Intro (o «Quitar enlace»): solo esa parte deja de ser enlace.
+- Pasa el ratón por un enlace: se ve su URL y «Cmd+clic para abrir» (Ctrl en Windows y Linux). Con Cmd/Ctrl pulsado, el puntero es una mano. Cmd/Ctrl+clic lo abre en el navegador (un `mailto:`, en el correo). Un clic normal solo coloca el cursor.
+- Con el cursor dentro de un enlace, Cmd/Ctrl+Intro lo abre. Fuera de un enlace, no hace nada nuevo.
+- Menú «…» del bloque → «Formato» → «Enlace…»: con el cursor en un enlace, edita ese enlace; sin enlace ni selección, enlaza todo el bloque. En la paleta, «Enlace…» (busca «url» o «enlace») hace lo mismo con el último bloque editado.
+- En un bloque de código, Cmd/Ctrl+K con texto seleccionado muestra el aviso de que el código no tiene formato.
+- Con VoiceOver (o NVDA/Orca), en un bloque con enlaces se oye su descripción: «Enlace: texto (URL)». El campo de la URL se anuncia como «Dirección del enlace».
+- «Atajos de teclado» lista Cmd/Ctrl+K con texto seleccionado y Cmd/Ctrl+clic / Cmd/Ctrl+Intro.
+- La app no se conecta a ninguna dirección: abrir un enlace solo se lo pide al sistema.
+
+## 44. Formato en Markdown y al copiar y pegar (H12.1e, ADR 0015)
+- En la página «QA · Formato en línea» de la semilla, «…» → «Exportar la página a Markdown». Abre el `.md` en otro editor (o en GitHub): negrita, cursiva, código, tachado y enlaces se ven con su formato; los caracteres raros (`*`, `#`, `[`) se ven tal cual.
+- Importa ese `.md` (arrastrándolo a la ventana): la página nueva tiene el mismo texto y el mismo formato.
+- Importa un `.md` de Obsidian o de GitHub con `**negrita**`, `~~tachado~~`, `` `código` ``, `[enlace](https://…)`, `<https://…>`, `[nota](otra.md)` y una imagen: los cuatro primeros salen con formato; el enlace relativo y la imagen, como texto.
+- Las páginas importadas antes de esta versión no cambian: su `**texto**` literal sigue siendo texto.
+- Selecciona «pan **negro**» dentro de un bloque, Cmd/Ctrl+C, y pégalo en medio de un texto en cursiva de otro bloque: sale exactamente como se copió (negrita solo en «negro», sin cursiva). Cmd/Ctrl+Z lo quita de un paso.
+- Selecciona varios bloques con formato (Esc y Mayús+↓), Cmd/Ctrl+C, y pégalos en un párrafo vacío: vuelven los mismos bloques con su formato.
+- Copia texto desde otra app y pégalo dentro de una negrita: toma la negrita de alrededor, como antes. Pegado en otra app, lo copiado en Silex es texto plano.
+
+## 45. Separador y aviso (H12.2, H12.3)
+- Al abrir con una base de la versión anterior se crea una copia y todo sigue igual: páginas, formato, búsqueda, historial y plantillas.
+- En un párrafo vacío escribe `---`: se convierte en una línea y el cursor pasa a un párrafo nuevo debajo. Cmd/Ctrl+Z vuelve al `---` escrito.
+- Escribe «/sep» e Intro en un párrafo vacío: una línea. Con «/separador» delante de un texto (`/separadorHola`), la línea va encima y el texto se queda.
+- Con ↑ o ↓ llega el foco a la línea (se resalta). Intro añade un párrafo debajo; Retroceso o Supr la borran (Cmd/Ctrl+Z la devuelve). Retroceso al inicio del párrafo de debajo también la borra.
+- Selecciona bloques con una línea en medio (Esc, Mayús+↓), copia y pega en otro sitio: la línea vuelve.
+- «/aviso» (o «…» → «Convertir en» → «Aviso»): el texto sale sobre un fondo gris con una bombilla. Se puede poner negrita, enlaces, etc. Intro sigue en un párrafo normal; Intro en un aviso vacío lo vuelve texto.
+- En oscuro, el aviso y la línea se distinguen y se leen bien.
+- Exporta la página a Markdown: la línea es `---` y el aviso `> [!NOTE]`. En GitHub, el aviso se ve como una nota. Importa el `.md`: vuelven los dos.
+- Importa un `.md` de Obsidian con `> [!info]` en su propia línea: es un aviso. Una página importada antes con `---` como texto no cambia.
+- Con VoiceOver, la línea se anuncia como «Separador» y el aviso como «Aviso».
+
+## 46. Desplegable: plegar y teclado (H12.4a, ADR 0016)
+- Al abrir con una base de la versión anterior se crea una copia y todo sigue igual, también separadores, avisos y formato.
+- «/desplegable» en un párrafo vacío y escribe un título. Intro: el cursor pasa dentro (con sangría). Escribe dos bloques; Tab y Mayús+Tab meten y sacan bloques.
+- Clic en la flecha (o Cmd/Ctrl+Intro en el título): se pliega y el contenido desaparece. Otra vez: vuelve. El estado de guardado no cambia y Cmd/Ctrl+Z no lo deshace.
+- Cierra y abre la app: los desplegables siguen plegados o abiertos como los dejaste.
+- Con uno plegado, ↑ y ↓ saltan su contenido; Esc y Mayús+↓ también. Intro al final del título crea un párrafo después de todo su contenido.
+- Pliégalo con el cursor dentro: el cursor pasa al título.
+- Con uno plegado, Retroceso al inicio del párrafo de debajo lo despliega (no une el texto con nada oculto). «Buscar en la página» una palabra que está dentro: se despliega al mostrarla.
+- Un desplegable vacío y abierto muestra «Desplegable vacío: haz clic para escribir dentro»; el clic crea un bloque dentro.
+- Con VoiceOver, la flecha se anuncia como «Plegar «título»» o «Desplegar «título»».
+
+## 47. Desplegable con su contenido (H12.4b, ADR 0016)
+- Esc sobre un desplegable abierto: se seleccionan él y su contenido. Copia (Cmd/Ctrl+C) y pega en un párrafo vacío de otra página: vuelve el desplegable con su contenido y sangría. Pegado en otra app, es texto con «▸ » y espacios.
+- Alt+Mayús+↓ sobre el bloque de encima de un desplegable: lo pasa entero, no entra en él. Sobre el desplegable: se mueve con todo lo que tiene, plegado o no.
+- Cmd/Ctrl+D o «…» → «Duplicar» en un desplegable: la copia lleva el contenido y empieza abierta.
+- «…» → «Eliminar» en un desplegable plegado: se va con su contenido; el aviso dice cuántos bloques, y Cmd/Ctrl+Z los devuelve.
+- Arrastra un desplegable plegado por su asa: lo oculto va con él y sigue plegado.
+- Tab en el título de un desplegable (con un bloque encima): él y su contenido se sangran un nivel. Mayús+Tab los saca.
+- Retroceso al inicio del título lo vuelve párrafo y su contenido se queda donde está.
+
+## 48. Desplegable en Markdown (H12.4c, ADR 0016)
+- Exporta una página con desplegables (uno anidado, uno dentro de una lista, uno vacío) a Markdown. Ábrela en GitHub o en Obsidian: cada uno se ve plegable con su título y su contenido dentro.
+- Importa ese `.md`: vuelven los mismos desplegables con su contenido y sangría. El formato del título se pierde (va como texto).
+- Un título con `<`, `>` o `&` se exporta escapado y vuelve igual.
+- Importa un README de GitHub con `<details><summary>…</summary>` y texto dentro (separado por líneas en blanco): es un desplegable. Otro HTML (`<div>`, `<br>`) sigue como texto.
+
+## 49. Índice de la página (H12.5)
+- En una página con Título 1, 2 y 3, pulsa el botón del índice en la barra de la página (junto a la estrella): aparece «En esta página» a la derecha con los títulos sangrados por nivel. El botón queda resaltado.
+- Escribe o cambia un título: el índice se actualiza al momento. Un título vacío no sale.
+- Desplázate por una página larga: se marca el título de la sección que estás leyendo.
+- Clic en una entrada: la página sube hasta ese título, el cursor queda al final y esa entrada se marca (también los últimos títulos, que no pueden llegar arriba). Al desplazar a mano, se marca otra vez la sección que estás leyendo. Si el título está dentro de un desplegable plegado, se despliega.
+- Con el teclado: Tab hasta una entrada e Intro hace lo mismo.
+- «×» del panel, el botón otra vez o «Mostrar u ocultar el índice» en Cmd/Ctrl+K: se oculta. Cierra y abre la app: sigue como lo dejaste. El estado de guardado no cambia.
+- No aparece en una base de datos, ni con una página abierta al lado, ni si la ventana es muy estrecha (vuelve al ensancharla).
+- Con VoiceOver, cada entrada se anuncia con el texto de su título.
+
+## 50. Mover bloques a otra página (H12.6a, ADR 0017)
+- En el «…» de un bloque, «Mover a…»: se abre «Mover a una página». Escribe parte del título de otra página e Intro: el bloque desaparece de aquí y aparece al final de esa página. Un aviso dice cuántos bloques y adónde.
+- Selecciona varios bloques (Esc, Mayús+↓) y usa «Mover a…» en el «…» de uno de ellos, o «Mover a otra página…» en Cmd/Ctrl+K: se mueven todos, en su orden y con su sangría. Un desplegable lleva su contenido.
+- En el buscador no salen la página abierta ni las bases de datos.
+- Cmd/Ctrl+Z: los bloques vuelven a su sitio y salen de la otra página. Cmd/Ctrl+Mayús+Z: se van otra vez.
+- Mueve un bloque, abre la página de destino en otra pestaña (Cmd/Ctrl+clic), cambia su texto, vuelve a la primera pestaña y pulsa Cmd/Ctrl+Z: vuelve con el texto cambiado. En la pestaña de destino ya no hay nada que deshacer de antes.
+- Con la página de destino abierta al lado (Alt+clic), al mover se ve llegar el bloque.
+- Un bloque con un archivo o un enlace a otra página se mueve y sigue abriendo su archivo o su página; la búsqueda lo encuentra en la página nueva.
+
+## 51. Convertir en subpágina (H12.6b, ADR 0017)
+- Un título seguido de dos párrafos: selecciónalos (Esc, Mayús+↓ dos veces) y «…» → «Convertir en subpágina». En su sitio queda un enlace a una subpágina «Sin título»; en la barra lateral aparece, y dentro están los tres bloques, el título incluido.
+- Con un solo bloque: la subpágina «Sin título» lo tiene dentro.
+- En un desplegable: la subpágina lo tiene con su contenido, empezando en el borde izquierdo.
+- Cmd/Ctrl+Z: los bloques vuelven, el enlace desaparece y la subpágina va a la papelera. Cmd/Ctrl+Mayús+Z: vuelve todo.
+- Si escribes algo en la subpágina antes de deshacer, deshacer devuelve los bloques pero deja la subpágina con lo nuevo.
+- En una plantilla, «Convertir en subpágina» no aparece en la paleta, y desde el menú un aviso dice que una plantilla no puede tener subpáginas.
+- «Mover a…» con un bloque sangrado: llega al borde izquierdo de la otra página; al deshacer vuelve con su sangría.
+- Manda a la papelera una página con un título larguísimo (pega un texto muy largo como título) y abre la papelera: el diálogo cabe en la ventana, el título sale recortado con «…» (entero al pasar el ratón) y los botones se ven y funcionan, también «Vaciar la papelera» y su confirmación. Prueba también con la ventana estrecha.
+
+## 52. Pegar Markdown y copiar como Markdown (H12.7)
+- Copia de un README de GitHub (o de un `.md` en otro editor) unas líneas con un título, una lista, una tarea, una cita y un bloque de código entre ```, y pégalas en un párrafo vacío: salen como bloques de esos tipos, con negrita y enlaces. Un Cmd/Ctrl+Z lo quita todo.
+- Pega dos líneas normales sin Markdown: un bloque por línea, como siempre. Un texto sangrado con espacios (un poema, código sin valla) también se pega tal cual.
+- Pega en medio de un párrafo «**hola** y [web](https://ejemplo.com)»: entra «hola y web» con «hola» en negrita y «web» como enlace.
+- Cmd/Ctrl+Mayús+V con el mismo texto: entra tal cual, con los asteriscos y corchetes, y sin la negrita del texto de alrededor. Con varias líneas, una por bloque y sin interpretar.
+- Copia bloques dentro de Silex y pégalos: siguen saliendo con su formato exacto.
+- Pegado dentro de un bloque de código: el texto entra tal cual.
+- «…» de la página → «Copiar como Markdown» (o Cmd/Ctrl+K «Copiar la página como Markdown») y pega en otro editor: la página con su título, con formato, listas, avisos y desplegables en Markdown. Pegado otra vez en Silex, vuelve como bloques.
+- «Atajos de teclado» lista Cmd/Ctrl+Mayús+V.
+
+## 53. Icono de página (H12.8a)
+- Al abrir con una base de la versión anterior se crea una copia y todo sigue igual.
+- Pasa el ratón por el título de una página: aparece «Añadir icono» encima. Clic: se abre «Icono de la página». Escribe «pan» (o «café», sin acento también): salen esos emojis; Intro o un clic elige. El emoji aparece grande sobre el título y pequeño en la barra lateral, las pestañas, las migas de arriba, favoritos, tarjetas de enlace y los buscadores. Los emojis se ven en color.
+- Pega un emoji cualquiera en el buscador del selector (por ejemplo 🦀) e Intro: ese es el icono. Escribe una palabra sin resultados: Intro no hace nada.
+- Clic en el icono grande → «Quitar icono»: vuelve el icono normal.
+- Cmd/Ctrl+K «Cambiar el icono de la página…» abre el selector con el teclado. Con VoiceOver, cada emoji se anuncia («Icono: pan»…).
+- El estado de guardado no cambia y Cmd/Ctrl+Z no deshace el icono.
+- Duplica la página o guárdala como plantilla y crea otra desde ella: llevan el icono.
+- Una página sin icono no se mueve de sitio (el título está donde siempre).
+- En Windows y en Linux: los emojis se ven en color (en Linux, si está instalada una fuente de emojis como Noto Color Emoji; si no, cuadros).
+
+## 54. Icono de página en Markdown (H12.8b)
+- Da un icono a una página y expórtala a Markdown: el archivo se llama como el título (sin el emoji) y dentro empieza por `# 🌾 Título`. En GitHub u Obsidian se ve el emoji delante.
+- «Exportar todo el espacio»: las páginas y bases de datos con icono lo llevan delante de su título; las que no, igual que antes.
+- «Copiar como Markdown» de una página con icono: empieza por `# 🌾 Título`.
+- Importa (arrastrándolo) un `.md` que empiece por `# 🍞 Pan casero`: la página se llama «Pan casero» y tiene 🍞 de icono. Con `# 🍞Pan` (sin espacio) o `# Pan 🍞`, el emoji se queda en el título y no hay icono.
+
+## 55. Notas diarias (H12.9)
+- Clic en «Hoy» (bajo «Buscar»): se crea «Diario» 📓 con el mes (`2026-10`) y el día (`2026-10-30`) dentro, se despliegan en la barra lateral y se abre el día. Otra vez «Hoy» (o Cmd/Ctrl+Mayús+D, o Cmd/Ctrl+K «Abrir la nota de hoy»): la misma página, nada nuevo.
+- Cmd/Ctrl+Mayús+D con el cursor en un bloque: abre la nota de hoy, sin duplicar el bloque.
+- La fecha es la de tu reloj (prueba cerca de medianoche, o con otra zona horaria del sistema: el día cambia a medianoche local, no en UTC).
+- Al día siguiente (o cambiando la fecha del sistema): el nuevo día aparece el primero dentro del mes; un mes nuevo, el primero dentro de «Diario».
+- Renombra «Diario» o muévelo dentro de otra página: «Hoy» sigue usándolo. Mándalo a la papelera: «Hoy» crea otro.
+- Guarda una página como plantilla con `{{fecha}}` dentro y elígela en Ajustes → «Plantilla del diario»: el próximo día nuevo sale de ella, con la fecha escrita y su icono. «Ninguna»: los días nuevos salen vacíos. Si borras la plantilla, también.
+- «Atajos de teclado» lista Cmd/Ctrl+Mayús+D. Con VoiceOver, la fila se anuncia «Abrir la nota de hoy».
+
+## 56. Comparar versiones (H12.10)
+- Edita una página con historial (o espera 10 minutos entre cambios), abre «…» → «Historial de versiones…» y pulsa «Comparar con la actual»: arriba, el resumen y la leyenda; debajo, la página con lo añadido en verde, lo quitado en rojo y tachado y lo cambiado con una barra ámbar.
+- Cambia una palabra de un párrafo: solo esa palabra sale tachada y la nueva en verde. Reescríbelo entero: el texto viejo tachado y el nuevo entero, no palabras sueltas mezcladas.
+- Convierte un bloque en título, marca una tarea, sángrala o pon una palabra en negrita: el bloque sale cambiado con su nota («Antes: Texto», «Marcada», «Cambió la sangría», «Cambió el formato»).
+- Mueve un bloque arriba: sale quitado donde estaba y añadido donde está. Cambia el título de la página: sale marcado y el resumen dice «El título también cambió.»
+- Con la comparación activa, ↑ ↓ eligen otra versión y la comparan. Otro clic en «Comparar con la actual» vuelve a la versión sola. Intro (o «Restaurar esta versión») restaura como siempre; Cmd/Ctrl+Z lo deshace.
+- Una página sin cambios desde la versión: «La página está igual que en esta versión.»
+- Tema oscuro: los colores se distinguen y el texto se lee.
+- Con VoiceOver, cada bloque marcado se anuncia con lo que le pasó («Quitado: …», «Añadido: …», «Cambiado: …»).
+
+## 57. Base de datos dentro de una página (H12.11)
+- En un bloque vacío de una página, escribe `/base` (o `/tabla`, `/bbdd`) e Intro: se abre una base nueva con el nombre por escribir; en la barra lateral cuelga de la página, que se despliega.
+- Vuelve a la página: en el lugar del bloque hay una tarjeta con el nombre de la base; un clic la abre. Cambia el nombre de la base: la tarjeta lo sigue.
+- Menú «…» de la página (o clic derecho en la barra lateral) → «Nueva base de datos dentro»: la base se crea dentro, sin tarjeta. No aparece en el menú de una base, de una fila ni de una plantilla.
+- Cmd/Ctrl+K «base de datos dentro»: lo mismo, con una página abierta (no en una base ni en una plantilla).
+- En una plantilla, `/base de datos`: un aviso explica que una plantilla no puede tener bases dentro, y no se crea nada.
+- Arrastra la base fuera de la página en la barra lateral: la tarjeta sigue funcionando. Manda la página a la papelera: la base va con ella, y vuelve al restaurarla.
+- Exporta el espacio a Markdown: la base sale dentro de la carpeta de su página.
+- La tarjeta de la base es una mini tabla: nombre, «N filas · vista» y «Abrir»; las primeras 5 filas con sus valores (opciones en color, casillas, números a la derecha) y «+ N filas más». Una base vacía dice «Sin filas todavía».
+- En la base, cambia de vista (una con filtro, orden u ocultando columnas) y vuelve a la página: la tarjeta enseña esa vista. Añade o edita filas y vuelve: la tarjeta está al día.
+- Estrecha la ventana: las columnas que no caben desaparecen de la tarjeta, sin solaparse; los textos largos se cortan con «…».
+- Clic, o Tab hasta la tarjeta e Intro: abre la base. Con VoiceOver se anuncia «Base de datos «Lecturas», 7 filas. Abrir».
+- Tema oscuro: se lee bien y el borde se marca al pasar el ratón.
+
+## 58. Reordenar filas y tarjetas (H13.1)
+- En una tabla sin orden, pasa el ratón por una fila: a su izquierda, en el margen, aparece un asa ⋮⋮. Arrástrala: la fila se marca en su sitio, su nombre sigue al puntero y una línea azul indica dónde irá. Suéltala: la fila queda ahí.
+- Cierra y abre la base (y reinicia la app): el orden se conserva. La tarjeta de la base en una página enseña el orden nuevo.
+- Cmd/Ctrl+Z (sin estar escribiendo en una celda) deshace el movimiento; Cmd/Ctrl+Mayús+Z lo rehace.
+- Empieza a arrastrar y pulsa Esc: no se mueve nada. Suelta la fila en su sitio o fuera de la tabla: tampoco.
+- Elige dos filas con su casilla y arrastra una de ellas: van las dos juntas, en su orden, y siguen elegidas.
+- Con muchas filas, arrastra hacia el borde de abajo o de arriba: la tabla se desplaza.
+- Con un filtro que oculta filas, mueve una: al quitar el filtro, las ocultas siguen donde estaban.
+- Añade un orden («Ordenar»): el asa no arrastra; al pasar el ratón explica por qué, y un clic da el aviso «Esta vista está ordenada por «…». Para mover las filas a mano, quita el orden en «Ordenar».».
+- Menú «⋯» de una fila → «Subir» / «Bajar»: la fila se mueve un puesto en lo que se ve (desactivados en el borde). Con un orden activo, dan el mismo aviso. Por teclado: Tab hasta «⋯», Intro, flechas.
+- En el tablero, arrastra una tarjeta dentro de su columna: una línea indica dónde irá y queda ahí; a otra columna, la columna se ilumina y la tarjeta cambia de valor, como antes. Con un orden activo, soltarla en otro sitio de su columna da el aviso.
+- Manda una fila a la papelera, mueve otras y restáurala: vuelve junto a la fila que tenía delante.
+- Tema oscuro: el asa, la línea y la etiqueta se ven bien. Con VoiceOver, el asa se anuncia «Mover «…»» y no es una parada de Tab.
+
+## 59. Selección múltiple (H13.2)
+- Antes de abrir la versión nueva, haz una copia de un archivo con bases de datos de la versión anterior y ábrelo: se crea la copia previa, y las propiedades, opciones y valores siguen ahí (también las propiedades borradas, para restaurar).
+- En una base, «+» → «Selección múltiple»: una columna con el icono de etiquetas.
+- Clic en una celda: escribe «Novela» e Intro (se crea y queda marcada), escribe «Cuento» e Intro. El menú sigue abierto y la celda enseña las dos etiquetas en el orden de las opciones.
+- Clic en una opción marcada: se quita; en una sin marcar: se añade. Esc o un clic fuera cierran el menú. «Quitar todas» vacía la celda.
+- Cmd/Ctrl+Z deshace cada cambio de uno en uno.
+- Con muchas opciones en una celda estrecha, las que no caben salen como «+N».
+- En el menú de la propiedad, mueve una opción: se mueve en todas las celdas. Bórrala: el aviso dice de cuántas filas se quitará, y las demás opciones de esas celdas siguen.
+- Filtrar → la propiedad → «contiene» / «no contiene» una opción, «está vacío»: se ven las filas correctas. Ordenar por ella: por la primera opción, las vacías al final.
+- Abre una fila como página: la propiedad se edita igual. En el tablero, las tarjetas enseñan sus etiquetas, y «Agrupar» no ofrece la selección múltiple. La tarjeta de la base en una página enseña las etiquetas.
+- Elige varias filas → «Poner valor…» → la propiedad → «Solo «Novela»» o «Quitar todas».
+- Duplica una fila y la base entera: las celdas se copian.
+- Exporta a Markdown y a CSV: «Novela, Cuento» (en el CSV, entre comillas).
+- Tema oscuro y VoiceOver: la celda se anuncia «Géneros, Rayuela: Novela, Cuento» y cada opción del menú dice si está marcada.
+
+## 60. URL, «Creado» y «Editado» (H13.3)
+- En una base, «+» → «URL», «Creado» y «Editado»: tres columnas con los iconos de enlace, reloj y lápiz.
+- En la URL, escribe `ejemplo.com` e Intro: se guarda como `https://ejemplo.com`, en color de enlace. Al pasar el puntero (o con el foco) aparece el botón «Abrir», que la abre en el navegador; Cmd+clic y Cmd+Intro hacen lo mismo. Un clic normal la edita.
+- Escribe `file:///etc/hosts`: se ve como texto normal, y al abrirla sale el aviso «… no es una dirección web (http o https): no se abre.». `mailto:ana@ejemplo.com` abre el correo.
+- «Creado» y «Editado» enseñan la fecha y la hora local (`AAAA-MM-DD HH:MM`). Un clic no las edita y el tooltip explica que las pone Silex.
+- Cambia una celda, el nombre o el icono de una fila: su «Editado» pasa a ahora y «Creado» no se mueve. Abre la fila como página, escribe en ella y vuelve: también. Abre una página sin cambiar nada: «Editado» no se mueve.
+- Una fila nueva (también desde el tablero o una plantilla) y un duplicado tienen las dos fechas de ahora.
+- Filtrar → «Creado» → «es» / «antes de» / «después de» con `AAAA-MM-DD`: las filas correctas, por el día local. Ordenar por «Editado» descendente: la última editada arriba. Filtrar la URL por «contiene».
+- Elige varias filas → «Poner valor…»: la URL se ofrece y «Creado»/«Editado» no.
+- Cmd/Ctrl+Z deshace un cambio en la URL.
+- Exporta a Markdown y a CSV: la URL y las fechas como se ven.
+- Cierra y vuelve a abrir la app: las URL siguen ahí y las fechas no cambian.
+- Tema oscuro y VoiceOver: la celda se anuncia «Web, Rayuela: https://…», y el botón, «Abrir el enlace».
+
+## 61. Cambiar el tipo de una propiedad (H13.4)
+- En una base, clic en la cabecera de una propiedad de texto con valores (por ejemplo «Autor»): el menú tiene «Tipo: Texto» y debajo «Cambiar tipo…». Al pulsarlo se cierra el menú y se abre el diálogo «Cambiar el tipo de «Autor»», con los otros ocho tipos (no el actual) y el foco en el primero.
+- Sin elegir nada, «Cambiar tipo» está desactivado. Elige «Número»: la vista previa dice cuántos valores se convierten, cuántos no encajan y quedan vacíos («No se pierden…»), y «Cmd+Z lo deshace.». Elige otro tipo: la vista previa cambia. Nada se guarda todavía.
+- Esc (o un clic fuera, o «Cancelar») cierra el diálogo sin cambiar nada.
+- Elige «Selección» y confirma: la columna pasa a etiquetas con colores, una opción por cada valor distinto (sin repetir por mayúsculas o acentos), y sale el aviso «… ahora es de tipo «Selección». Cmd+Z lo deshace.».
+- Cmd/Ctrl+Z (con el foco fuera de un campo de texto): vuelve a Texto con los valores exactos y sin las opciones creadas. Cmd/Ctrl+Mayús+Z lo rehace.
+- Texto con `12.50` → Número → Texto: vuelve `12.50`, no `12,5`. Texto con nombres → Número → Texto: los nombres vuelven.
+- Con un filtro sobre la propiedad, la vista previa dice «Se quitará 1 filtro de las vistas.»; al confirmar, el filtro desaparece y las filas ocultas se ven. Cmd+Z devuelve el filtro.
+- Cambia a «Creado» o «Editado»: la vista previa lo explica, la columna muestra las fechas de las filas y no se edita. Vuelve al tipo anterior: los valores reaparecen.
+- Escribe en una celda de la propiedad y, sin salir, cambia el tipo desde la cabecera: lo escrito se guarda antes y se convierte.
+- Con más de 100 valores distintos, cambia a «Selección»: tras «Cambiar tipo» sale «¿Crear N opciones?». «Volver» regresa a la vista previa; «Crear N opciones y cambiar» lo hace.
+- En un tablero agrupado por esa selección, cámbiala a texto: el tablero agrupa por otra selección o explica que no hay ninguna.
+- Cierra y vuelve a abrir la app: el tipo nuevo y los valores siguen ahí.
+- Tema oscuro y VoiceOver: los tipos del diálogo se anuncian por su nombre y la vista previa se lee.
+
+## 62. Vista calendario (H13.5)
+- Abre una base de una versión anterior (v14): se actualiza sin perder vistas, y la base abre en la vista de la última vez.
+- En una base con una propiedad de fecha, «+» junto a las vistas → «Calendario»: una pestaña «Calendario» con el mes actual, la semana desde el lunes, hoy con el número en un círculo y los días de otros meses en gris. En la barra, «Fecha: <propiedad>».
+- Cada fila con fecha aparece en su día con su nombre; las que no tienen, debajo, en «Sin fecha · N». «‹» y «›» cambian de mes y «Hoy» vuelve al actual.
+- Un clic (o Tab hasta la etiqueta e Intro) abre la fila como página. El clic derecho da el menú de la página (renombrar, duplicar, papelera…); Supr con la etiqueta enfocada la manda a la papelera.
+- Arrastra una fila a otro día: se mueve allí, el día de destino se resalta mientras la llevas y soltarla fuera del calendario la deja como estaba. Cmd/Ctrl+Z la devuelve. Arrástrala a «Sin fecha»: pierde la fecha. Arrastra una de «Sin fecha» a un día: la gana.
+- Pasa el puntero por un día: aparece «+». Al pulsarlo se crea una fila con esa fecha y se abre para escribir su nombre. También se llega con Tab.
+- Pon muchas filas en un día: salen las que caben y «+N más», que abre un menú con todas; elegir una la abre.
+- Con dos propiedades de fecha, «Fecha: …» permite elegir la otra: las filas se recolocan y las que no la tienen pasan a «Sin fecha».
+- Los filtros y el orden de la vista se aplican: una fila filtrada no sale en ningún día ni en «Sin fecha», y dentro de un día el orden es el de «Ordenar».
+- En una base sin propiedades de fecha, el calendario lo explica y «Añadir la propiedad «Fecha»» la crea.
+- Cambia la ventana de tamaño y abre la base al lado de otra página: los días se encogen sin solaparse. En una ventana baja, «Sin fecha» queda debajo y se llega desplazando.
+- Cierra y vuelve a abrir la app: la base abre en el calendario.
+- Tema oscuro y VoiceOver: las etiquetas se anuncian «"Rayuela", 14 de septiembre de 2026», y «+», «Nueva fila el 14 de septiembre de 2026».
+
+## 63. Vistas lista y galería (H13.6)
+- En una base, «+» junto a las vistas → «Lista»: una línea por fila con su icono (o emoji) y su nombre, y a la derecha sus propiedades (opciones como etiquetas, casilla marcada como «✓ Nombre»). Estrecha la ventana o abre la base al lado de otra página: se ven menos propiedades y el nombre no se pisa con ellas.
+- «+» → «Galería»: una tarjeta por fila, en tantas columnas como quepan, todas del mismo alto. Sin imágenes en las filas, sin portada.
+- Abre una fila, pega o suelta una imagen PNG o JPEG en su página y vuelve a la base: en la galería, esa fila tiene la imagen como portada, recortada sin deformarse, y las demás tarjetas reservan el mismo hueco en gris. Con dos imágenes, sale la primera de la página. Un PDF no cuenta.
+- En las dos: un clic (o Tab e Intro) abre la fila; el clic derecho y «⋯» dan el menú de la página; Supr con la línea o tarjeta enfocada la manda a la papelera, y Cmd/Ctrl+Z la devuelve.
+- «Nueva» crea una fila y la abre para escribir su nombre.
+- «Propiedades» oculta o muestra propiedades en la lista y en las tarjetas; «Filtrar» y «Ordenar» funcionan como en la tabla.
+- Con muchas filas (la semilla o 1000 filas), desplazar va fluido y la galería pide las portadas solo de lo que se ve.
+- Cierra y vuelve a abrir la app: la base abre en la última vista (lista o galería).
+- Tema oscuro y VoiceOver: una línea se anuncia «"Rayuela"; Autor: Julio Cortázar; …», y una tarjeta, «Tarjeta "Rayuela"; …».
+
+## 64. Publicar la 1.1 (H13.9, ADR 0014)
+- Con la 1.0.0 instalada y una base con contenido (mejor una copia), instala la 1.1.0 y ábrela: la base se actualiza sola y en «Copias y exportación» aparece la copia previa a la actualización. Todo sigue ahí.
+- En Ajustes sale «Silex 1.1.0»; «Buscar actualizaciones…» abre la página de versiones.
+- Para publicar, como en la sección 40 pero con `v1.1.0`: PR de `develop` a `main` con la CI y «Paquetes» en verde; revisa la fecha de `## [1.1.0]` en `CHANGELOG.md` (pon la del día en que etiquetes); `git tag -a v1.1.0 -m "Silex 1.1.0"` en `main` y `git push origin v1.1.0`; revisa el borrador «Silex 1.1.0» (los cuatro paquetes y las notas), instala uno y publícalo.

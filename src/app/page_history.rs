@@ -6,8 +6,9 @@ use anyhow::{Context as _, Result};
 use eframe::egui;
 use silex_desktop::history::{EditKind, Snapshot};
 use silex_desktop::model::{Block, PageKind};
-use silex_desktop::versions::{VersionBlocks, VersionInfo, describe_when};
+use silex_desktop::versions::{Comparison, VersionBlocks, VersionInfo, compare, describe_when};
 
+use super::compare::comparison_view;
 use super::theme;
 use super::*;
 
@@ -25,6 +26,11 @@ pub(super) struct PageHistory {
     pub(super) selected: usize,
     /// The blocks of the selected version (read when it is chosen).
     preview: Option<(i64, VersionBlocks)>,
+    /// «Comparar con la actual» (H12.10): the right side shows what
+    /// changed from the version to the page now. Kept while choosing.
+    pub(super) compare: bool,
+    /// The selected version compared with the page (made when shown).
+    comparison: Option<(i64, Comparison)>,
 }
 
 impl PageHistory {
@@ -119,6 +125,8 @@ impl SilexApp {
             today,
             selected: 0,
             preview: None,
+            compare: false,
+            comparison: None,
         });
         Ok(())
     }
@@ -161,6 +169,16 @@ impl SilexApp {
                 },
                 None => None,
             };
+        }
+        // Compared with the page now once per version (the page cannot
+        // change while the window is open).
+        if history.compare
+            && history.comparison.as_ref().map(|(id, _)| *id) != chosen
+            && let (Some((id, Ok(blocks))), Some(version)) = (&history.preview, history.selected())
+        {
+            let now = self.snapshot();
+            let comparison = compare(&version.title, blocks, &now.title, &now.blocks);
+            history.comparison = Some((*id, comparison));
         }
         let readable = matches!(history.preview, Some((_, Ok(_))));
         restore &= readable;
@@ -232,6 +250,14 @@ impl SilexApp {
                             .id_salt("silex_history_preview")
                             .auto_shrink(false)
                             .show(ui, |ui| match (&history.preview, history.selected()) {
+                                (Some((id, Ok(_))), Some(_))
+                                    if history.compare
+                                        && let Some((compared, comparison)) =
+                                            &history.comparison
+                                        && compared == id =>
+                                {
+                                    comparison_view(ui, comparison, pages);
+                                }
                                 (Some((_, Ok(blocks))), Some(version)) => {
                                     // Nothing to open from here: read only.
                                     let _ = read_only_page(
@@ -259,6 +285,14 @@ impl SilexApp {
                         .clicked()
                 {
                     restore = true;
+                }
+                if !history.versions.is_empty() {
+                    let toggle = ui
+                        .selectable_label(history.compare, "Comparar con la actual")
+                        .on_hover_text("Resalta lo añadido, quitado y cambiado desde esta versión");
+                    if toggle.clicked() {
+                        history.compare = !history.compare;
+                    }
                 }
                 if ui.button("Cerrar").clicked() {
                     close = true;

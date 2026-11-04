@@ -6,15 +6,21 @@ use eframe::egui::{self};
 use silex_desktop::{
     db::{Database, Shift, backup::BackupJob},
     history::{History, Snapshot},
-    model::{Block, Page, PageKind, TreeRow, ancestors, build_tree, without_database_rows},
+    model::{
+        Block, BlockKind, Page, PageKind, TreeRow, ancestors, build_tree, without_database_rows,
+    },
     save_state::SaveState,
     settings::{Settings, ThemeMode},
 };
 
 mod blocks;
 mod board;
+mod calendar;
 mod cells;
+mod collection;
+mod compare;
 mod database;
+mod database_card;
 mod date_picker;
 mod dialogs;
 mod document;
@@ -22,14 +28,21 @@ mod duplicate;
 mod files;
 mod find;
 mod frame;
+mod graph;
+mod icon_picker;
 pub mod icons;
 mod inline;
 mod jobs;
+mod journal;
+mod kind_change;
 mod links;
+mod move_blocks;
+mod outline;
 mod page_history;
 mod palette;
 mod privacy;
 mod read_only;
+mod row_order;
 mod row_page;
 mod row_selection;
 mod search;
@@ -47,13 +60,14 @@ mod tests;
 pub mod theme;
 mod view_menus;
 mod view_tabs;
+mod web_links;
 
 pub use self::startup::StartupError;
 use self::{
     blocks::*, cells::*, database::*, date_picker::*, dialogs::*, duplicate::*, files::*, find::*,
-    links::*, page_history::*, privacy::*, read_only::*, row_page::*, row_selection::*, search::*,
-    side_panel::*, sidebar::*, space::*, tab_bar::*, table_undo::*, templates::*, view_menus::*,
-    view_tabs::*,
+    kind_change::*, links::*, page_history::*, privacy::*, read_only::*, row_order::*, row_page::*,
+    row_selection::*, search::*, side_panel::*, sidebar::*, space::*, tab_bar::*, table_undo::*,
+    templates::*, view_menus::*, view_tabs::*,
 };
 
 /// Window id on Linux (Wayland app id, X11 class). Matches the desktop
@@ -85,6 +99,7 @@ pub struct SilexApp {
     favorites: Vec<Page>,
     /// The search window (Cmd+K), while open.
     search: Option<SearchWindow>,
+    graph: Option<graph::Graph>,
     /// The open page's rows and views, when it is a database (ADR 0006).
     database: Option<DatabaseState>,
     /// The open page's properties, when it is a row of a database.
@@ -146,6 +161,35 @@ pub struct SilexApp {
     /// where the palette and the «…» menu apply bold, italic… (ADR 0015).
     /// egui drops a field's selection when it loses the focus.
     format_target: Option<(String, usize, usize)>,
+    /// The field giving a web link its URL, while open (H12.1d).
+    link_edit: Option<web_links::LinkEdit>,
+    /// The emoji of the pages that have one (H12.8), by page id.
+    page_icons: std::collections::HashMap<String, String>,
+    /// The icon picker, while open (H12.8).
+    icon_picker: Option<icon_picker::IconPicker>,
+    /// «/base de datos» was chosen in this block (H12.11): made after the
+    /// frame, see `database_from_slash`.
+    new_database_at: Option<String>,
+    /// The pointer was over the page's title last frame: «Añadir icono»
+    /// shows (H12.8).
+    title_hovered: bool,
+    /// The folded toggles (ADR 0016): view state, kept in `settings`.
+    folds: silex_desktop::folds::Folds,
+    /// `folds` as last stored, to save only when it changes.
+    saved_folds: String,
+    /// The heading being read, marked in the outline (H12.5).
+    outline_current: Option<String>,
+    /// A heading chosen in the outline, until the page is scrolled to it.
+    outline_target: Option<String>,
+    /// The heading chosen in the outline, marked until the page is scrolled
+    /// by hand: with the scroll offset it was left at, once known.
+    outline_chosen: Option<(String, Option<f32>)>,
+    /// The last text copied from a block or a block selection, with its
+    /// formatting: pasting that same text brings it back (ADR 0015).
+    clip: Option<silex_desktop::editor::Clip>,
+    /// A one-line paste of `clip` this frame: block id, where it goes, its
+    /// length in characters and its formatting.
+    paste_marks: Option<(String, usize, usize, Vec<silex_desktop::marks::Mark>)>,
     /// Block to focus (and cursor position) on the next frame.
     pending_focus: Option<(String, usize)>,
     /// With `pending_focus`, the other end of a selection in that block
@@ -154,7 +198,12 @@ pub struct SilexApp {
     /// The find bar of the open page (H11.7).
     find: Option<FindBar>,
     /// Multi-line paste taken this frame (block id, text), run after layout.
-    pending_paste: Option<(String, String)>,
+    /// A paste of several lines taken this frame: block id, text, and
+    /// whether it is plain (Cmd+Mayús+V, H12.7).
+    pending_paste: Option<(String, String, bool)>,
+    /// Cmd+Mayús+V (H12.7): the next paste, asked for from the system, is
+    /// plain text. Frames left to wait for it.
+    plain_paste: Option<u8>,
     /// Last exported file, offered with "Abrir carpeta".
     last_export: Option<PathBuf>,
     /// Markdown files being read on a worker thread.
@@ -245,6 +294,39 @@ fn display_title(title: &str) -> &str {
 }
 
 impl SilexApp {
+    /// The open page's icon (H12.8), if it has one.
+    fn open_icon(&self) -> Option<String> {
+        self.selected
+            .as_ref()
+            .and_then(|id| self.page_icons.get(id))
+            .cloned()
+    }
+
+    /// `title` with the page's emoji before it, if it has one (H12.8): for
+    /// text that shows a page with no icon slot (breadcrumbs).
+    fn titled(&self, id: &str, title: &str) -> String {
+        match self.page_icons.get(id) {
+            Some(icon) => format!("{icon} {title}"),
+            None => title.to_owned(),
+        }
+    }
+}
+
+/// Longest title a sentence in a dialog or a notice quotes whole.
+const SHORT_TITLE: usize = 80;
+
+/// [`display_title`] for a sentence: on one line, and a very long title
+/// cut with «…», so no window grows past the screen with it.
+fn short_title(title: &str) -> String {
+    let title = display_title(title).replace(['\n', '\r'], " ");
+    if title.chars().count() <= SHORT_TITLE {
+        return title;
+    }
+    let cut: String = title.chars().take(SHORT_TITLE - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+impl SilexApp {
     /// Prints, on the second frame (the first one is on screen by then),
     /// how long it took since `started` (H9.3b). `exit` closes the app then.
     pub fn time_startup(&mut self, started: Instant, exit: bool) {
@@ -268,6 +350,7 @@ impl SilexApp {
             duplicate_dialog: None,
             favorites: Vec::new(),
             search: None,
+            graph: None,
             database: None,
             row_page: None,
             last_views: std::collections::HashMap::new(),
@@ -298,10 +381,23 @@ impl SilexApp {
             pending_key: None,
             typing_format: None,
             format_target: None,
+            link_edit: None,
+            page_icons: std::collections::HashMap::new(),
+            icon_picker: None,
+            new_database_at: None,
+            title_hovered: false,
+            folds: silex_desktop::folds::Folds::default(),
+            saved_folds: String::new(),
+            outline_current: None,
+            outline_target: None,
+            outline_chosen: None,
+            clip: None,
+            paste_marks: None,
             pending_focus: None,
             pending_anchor: None,
             find: None,
             pending_paste: None,
+            plain_paste: None,
             last_export: None,
             import_job: None,
             export_job: None,
@@ -340,6 +436,15 @@ impl SilexApp {
         app.rebuild_tree();
         // Before a page opens, which is a visit (H11.8).
         app.load_recent();
+        // The folded toggles (ADR 0016), forgetting those deleted since.
+        if let Some(json) = app.db.folded_blocks().ok().flatten() {
+            let mut folds = silex_desktop::folds::Folds::from_json(&json);
+            if let Ok(live) = app.db.toggle_block_ids() {
+                folds.retain(|id| live.contains(id));
+            }
+            app.saved_folds = json;
+            app.folds = folds;
+        }
         // The tabs of last time (ADR 0011), those still live; else the
         // first page. A damaged value only loses the tabs.
         if let Some(json) = app.db.open_tabs().ok().flatten() {
@@ -366,6 +471,9 @@ impl SilexApp {
     fn open_page(&mut self, id: String) -> Result<()> {
         if self.db.get_page(&id)?.is_none() {
             return Ok(());
+        }
+        if self.graph_active() {
+            return self.open_in_new_tab(&id);
         }
         if let Some(left) = self.tabs.open_here(&id) {
             self.parked.remove(&left);
@@ -398,6 +506,16 @@ impl SilexApp {
                     scroll: self.editor_scroll,
                 },
             );
+        }
+        if id == graph::TAB_ID {
+            self.selected = None;
+            self.blocks.clear();
+            self.database = None;
+            self.selection = None;
+            self.find = None;
+            self.slash = None;
+            self.rebuild_graph()?;
+            return Ok(());
         }
         if !self.load_page(id.clone())? {
             // Gone meanwhile: its tab closes, and the next one is shown.
@@ -496,7 +614,9 @@ impl SilexApp {
             .chain(&self.templates.list)
             .map(|p| p.id.as_str())
             .collect();
-        let closed = self.tabs.retain(|id| live.contains(id));
+        let closed = self
+            .tabs
+            .retain(|id| id == graph::TAB_ID || live.contains(id));
         for id in closed {
             self.parked.remove(&id);
         }
@@ -505,6 +625,7 @@ impl SilexApp {
     fn reload_pages(&mut self) -> Result<()> {
         self.pages = self.db.list_pages()?;
         self.templates.list = self.db.list_templates()?;
+        self.page_icons = self.db.page_icons()?;
         self.close_tabs_not_live();
         self.save_tabs();
         self.refresh_side();
@@ -641,6 +762,68 @@ impl SilexApp {
     fn create_database(&mut self, parent: Option<&str>) -> Result<()> {
         self.save_now()?;
         let id = self.db.create_database("", parent)?;
+        if let Some(parent) = parent {
+            self.expanded.insert(parent.to_owned());
+        }
+        self.reload_pages()?;
+        self.open_page(id)?;
+        self.focus_title = true;
+        Ok(())
+    }
+
+    /// «/base de datos» in block `block_id` of the open page (H12.11): a
+    /// database inside the page and a card to it, in the block's place if
+    /// it was left empty (after it otherwise). Then the database opens to
+    /// be named. The card is a block like any other, and the database a
+    /// page like any other (to the trash from its menu).
+    fn database_from_slash(&mut self, block_id: &str) -> Result<()> {
+        let Some(open) = self.selected.clone() else {
+            return Ok(());
+        };
+        if !self.page_shows_blocks(&open) {
+            return Ok(());
+        }
+        if self.template_open() {
+            self.notice = Some("Una plantilla no puede tener bases de datos dentro.".into());
+            return Ok(());
+        }
+        self.save_now()?;
+        let base = self.db.create_database("", Some(&open))?;
+        let (at, indent) = match self.blocks.iter().position(|b| b.id == block_id) {
+            Some(index) => {
+                let block = &self.blocks[index];
+                let indent = block.indent;
+                if block.kind == BlockKind::Paragraph && block.content.trim().is_empty() {
+                    self.blocks.remove(index);
+                    (index, indent)
+                } else {
+                    (index + 1, indent)
+                }
+            }
+            None => (self.blocks.len(), 0),
+        };
+        let card = Block {
+            id: uuid::Uuid::new_v4().to_string(),
+            page_id: open.clone(),
+            kind: BlockKind::PageLink,
+            content: String::new(),
+            checked: false,
+            position: 0,
+            indent,
+            attachment: None,
+            link: Some(base.clone()),
+            marks: Vec::new(),
+        };
+        self.blocks.insert(at.min(self.blocks.len()), card);
+        self.mark_dirty();
+        self.save_now()?;
+        self.load_links()?;
+        self.create_database_opened(&open, base)
+    }
+
+    /// Shows database `id`, just made inside `parent`, with its name to write.
+    fn create_database_opened(&mut self, parent: &str, id: String) -> Result<()> {
+        self.expanded.insert(parent.to_owned());
         self.reload_pages()?;
         self.open_page(id)?;
         self.focus_title = true;
@@ -661,6 +844,19 @@ impl SilexApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut as Sc, Modifiers as M};
         let pressed = |sc: Sc| ctx.input_mut(|i| i.consume_shortcut(&sc));
+        // The link field has the keyboard while it is open (H12.1d).
+        if self.link_edit.is_some() {
+            return;
+        }
+        // Cmd+K over text selected in a block gives it a web link
+        // (ADR 0015); with nothing selected it is the search window.
+        if self.search.is_none()
+            && let Some(id) = self.link_shortcut_block(ctx)
+            && pressed(Sc::new(M::COMMAND, Key::K))
+        {
+            self.open_link_edit(ctx, &id, false);
+            return;
+        }
         // Cmd+K opens and closes the search window. While it is open no
         // other shortcut runs: the window has the keyboard.
         if pressed(Sc::new(M::COMMAND, Key::K)) {
@@ -676,7 +872,8 @@ impl SilexApp {
         // consume_shortcut would take Cmd+Opción+F as Cmd+F.
         let find_dialog = self.links.picker.is_some()
             || self.page_history.is_some()
-            || self.templates.picker.is_some();
+            || self.templates.picker.is_some()
+            || self.icon_picker.is_some();
         if !find_dialog {
             if pressed(replace_shortcut(ctx)) || pressed(Sc::new(M::COMMAND | M::ALT, Key::F)) {
                 self.open_find(ctx, true);
@@ -688,7 +885,8 @@ impl SilexApp {
         // a new tab: the search window, to choose its page.
         let dialog = self.links.picker.is_some()
             || self.page_history.is_some()
-            || self.templates.picker.is_some();
+            || self.templates.picker.is_some()
+            || self.icon_picker.is_some();
         if !dialog && pressed(Sc::new(M::COMMAND, Key::T)) {
             self.open_search(ctx);
             if let Some(window) = &mut self.search {
@@ -717,6 +915,9 @@ impl SilexApp {
                 .iter()
                 .position(|key| pressed(Sc::new(M::COMMAND, *key)))
         };
+        // Today's note (H12.9). Before the block keys: Cmd+D would take
+        // it as «Duplicar».
+        let today = !dialog && pressed(Sc::new(M::COMMAND | M::SHIFT, Key::D));
         let new_subpage = pressed(Sc::new(M::COMMAND | M::SHIFT, Key::N));
         let new_page = !new_subpage && pressed(Sc::new(M::COMMAND, Key::N));
         // Exact Alt only: Alt+Shift+↑/↓ moves blocks instead.
@@ -747,6 +948,9 @@ impl SilexApp {
                     number
                 };
                 self.select_tab(index)?;
+            }
+            if today {
+                self.open_today()?;
             }
             if new_subpage && let Some(id) = self.selected.clone() {
                 self.create_subpage(&id)?;
@@ -853,7 +1057,10 @@ impl SilexApp {
             )
             .show(ui, |ui| self.sidebar(ui));
         self.main_width = ui.available_width();
-        self.side_panel(ui);
+        if !self.graph_active() {
+            self.outline_panel(ui);
+            self.side_panel(ui);
+        }
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -879,12 +1086,18 @@ impl SilexApp {
         ui.painter()
             .rect_filled(ctx.content_rect(), 0.0, theme::current(&ctx).bg);
         self.handle_shortcuts(&ctx);
+        // Cmd+Mayús+V waits a couple of frames for its paste, no more.
+        self.plain_paste = self.plain_paste.and_then(|n| n.checked_sub(1));
+        self.remember_copy(&ctx);
         self.handle_dropped_files(&ctx);
         // The search window has the keyboard while it is open.
-        if self.search.is_none()
+        if !self.graph_active()
+            && self.search.is_none()
             && self.links.picker.is_none()
             && self.page_history.is_none()
             && self.templates.picker.is_none()
+            && self.icon_picker.is_none()
+            && self.link_edit.is_none()
         {
             self.take_pasted_image(&ctx);
             self.find_keys(&ctx);
@@ -893,6 +1106,8 @@ impl SilexApp {
             self.handle_selection_keys(&ctx);
         }
         self.layout(ui);
+        self.paste_marks = None;
+        self.link_edit_ui(&ctx);
         self.run_paste(&ctx);
         self.run_editor_key(&ctx);
         self.refresh_slash_and_selection();
@@ -904,6 +1119,10 @@ impl SilexApp {
         self.tick_backups(&ctx);
         self.tick_import();
         self.tick_files(&ctx);
+        if let Some(block) = self.new_database_at.take() {
+            let result = self.database_from_slash(&block);
+            self.report(result);
+        }
         self.tick_free_space();
         self.tick_workspace_export();
         self.tick_page_export();
@@ -932,6 +1151,7 @@ impl SilexApp {
         self.duplicate_dialog(&ctx);
         self.free_space_dialog(&ctx);
         self.link_picker(&ctx);
+        self.icon_picker(&ctx);
         self.link_restore_dialog(&ctx);
         self.template_picker(&ctx);
         self.synced_warning_dialog(&ctx);

@@ -23,6 +23,10 @@ pub(super) fn property_icon(kind: PropertyKind) -> &'static str {
         PropertyKind::Checkbox => icons::TODO,
         PropertyKind::Date => icons::CALENDAR,
         PropertyKind::Select => icons::CARET_CIRCLE_DOWN,
+        PropertyKind::MultiSelect => icons::TAGS,
+        PropertyKind::Url => icons::LINK,
+        PropertyKind::Created => icons::CLOCK_PLUS,
+        PropertyKind::Edited => icons::PENCIL_LINE,
     }
 }
 
@@ -65,6 +69,8 @@ pub(super) enum CellAction {
     },
     /// Save what was typed in a cell that is no longer being edited.
     Commit(CellEdit),
+    /// Say something in the notice bar (a URL that is not opened).
+    Notice(String),
 }
 
 /// Where a cell is drawn and what it shows.
@@ -119,10 +125,14 @@ pub(super) fn property_cell(
     actions: &mut Vec<CellAction>,
 ) {
     match cell.property.kind {
-        PropertyKind::Text | PropertyKind::Number => text_cell(ui, cell, editing, actions),
+        PropertyKind::Text | PropertyKind::Number | PropertyKind::Url => {
+            text_cell(ui, cell, editing, actions);
+        }
+        PropertyKind::Created | PropertyKind::Edited => time_cell(ui, cell),
         PropertyKind::Date => date_cell(ui, cell, editing, option_filter, actions),
         PropertyKind::Checkbox => checkbox_cell(ui, cell, actions),
         PropertyKind::Select => select_cell(ui, cell, editing, option_filter, actions),
+        PropertyKind::MultiSelect => multi_select_cell(ui, cell, editing, option_filter, actions),
     }
 }
 
@@ -138,9 +148,10 @@ pub(super) fn start_typing(
     }
 }
 
-/// A text or number cell: its value, or a text field while typing. (Dates
-/// have a calendar: `date_picker.rs`.)
-/// Enter or leaving the cell saves; Escape drops what was typed.
+/// A text, number or URL cell: its value, or a text field while typing.
+/// (Dates have a calendar: `date_picker.rs`.)
+/// Enter or leaving the cell saves; Escape drops what was typed. A URL
+/// opens with its button, Cmd+clic or Cmd+Intro (`url_opener`).
 pub(super) fn text_cell(
     ui: &mut egui::Ui,
     cell: &Cell<'_>,
@@ -158,7 +169,11 @@ pub(super) fn text_cell(
         let Some(edit) = editing.as_mut() else {
             return;
         };
-        let hint = if number { "0" } else { "Vacío" };
+        let hint = match cell.property.kind {
+            PropertyKind::Number => "0",
+            PropertyKind::Url => "https://…",
+            _ => "Vacío",
+        };
         // Frameless, in the same rect as the shown value: the text does not
         // move when typing starts.
         let field = inside(
@@ -204,6 +219,12 @@ pub(super) fn text_cell(
         return;
     }
     let shown = cell.shown();
+    let url = cell.value.filter(|v| matches!(v, CellValue::Url(_)));
+    // Cmd+Intro opens a URL; taken before the cell sees Intro, which would
+    // start typing.
+    let command_enter = url.is_some()
+        && ui.memory(|m| m.has_focus(cell.id()))
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
     let button = cell_button(ui, cell, &shown);
     if shown.is_empty() && cell.place == CellPlace::Page {
         paint_cell_text(
@@ -213,6 +234,20 @@ pub(super) fn text_cell(
             egui::Align2::LEFT_CENTER,
             p.text_faint,
         );
+    } else if let Some(url) = url {
+        // A web address in the link color; anything else as plain text.
+        let color = if url.web_url().is_some() {
+            p.accent
+        } else {
+            p.text
+        };
+        let text = cell.rect.with_max_x(cell.rect.right() - OPENER);
+        paint_cell_text(ui, text, &shown, align, color);
+        let command_click = button.clicked() && ui.input(|i| i.modifiers.command);
+        if url_opener(ui, cell, &button) || command_click || command_enter {
+            open_url(ui.ctx(), url, actions);
+            return;
+        }
     } else {
         paint_cell_text(ui, cell.rect, &shown, align, p.text);
     }
@@ -228,6 +263,75 @@ pub(super) fn text_cell(
             },
         );
     }
+}
+
+/// Room at the right of a URL cell for its «Abrir» button.
+const OPENER: f32 = 28.0;
+
+/// The «Abrir» button of a URL cell, shown while the pointer is over the
+/// cell or it has the focus (always on a row's page). Out of the Tab
+/// order: Cmd+Intro does the same. Returns whether it was clicked.
+fn url_opener(ui: &mut egui::Ui, cell: &Cell<'_>, button: &egui::Response) -> bool {
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(cell.rect.right() - OPENER / 2.0, cell.rect.center().y),
+        egui::vec2(22.0, 22.0),
+    );
+    let open = ui.interact(rect, cell.id().with("open"), egui::Sense::CLICK);
+    let shown =
+        cell.place == CellPlace::Page || button.hovered() || button.has_focus() || open.hovered();
+    if !shown {
+        return false;
+    }
+    let p = theme::current(ui.ctx());
+    open.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Abrir el enlace"));
+    if open.hovered() {
+        ui.painter().rect_filled(rect, theme::radius::SM, p.subtle);
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icons::OPEN_EXTERNAL,
+        icons::font(theme::icon::MD),
+        if open.hovered() { p.text } else { p.text_muted },
+    );
+    open.on_hover_text("Abrir (Cmd+clic)").clicked()
+}
+
+/// Opens a URL cell's address in the system (a browser or a mail app), or
+/// says why not: only web and mail links open (ADR 0015).
+fn open_url(ctx: &egui::Context, url: &CellValue, actions: &mut Vec<CellAction>) {
+    match url.web_url() {
+        Some(address) => web_links::open_web_link(ctx, address),
+        None => {
+            let shown: String = match url {
+                CellValue::Url(text) => text.chars().take(60).collect(),
+                _ => String::new(),
+            };
+            actions.push(CellAction::Notice(format!(
+                "«{shown}» no es una dirección web (http o https): no se abre."
+            )));
+        }
+    }
+}
+
+/// A «Creado» or «Editado» cell (H13.3): its date and time, read only.
+/// It takes the focus like any cell, but a click changes nothing.
+pub(super) fn time_cell(ui: &mut egui::Ui, cell: &Cell<'_>) {
+    let p = theme::current(ui.ctx());
+    let shown = cell.shown();
+    let what = if cell.property.kind == PropertyKind::Created {
+        "cuándo se creó la fila"
+    } else {
+        "cuándo se editó la fila por última vez"
+    };
+    cell_button(ui, cell, &shown).on_hover_text(format!("Lo pone Silex: {what}."));
+    paint_cell_text(
+        ui,
+        cell.rect,
+        &shown,
+        egui::Align2::LEFT_CENTER,
+        p.text_muted,
+    );
 }
 
 /// A checkbox cell: a click (or Space/Enter) ticks or unticks it.
@@ -363,6 +467,128 @@ pub(super) fn select_cell(
         });
 }
 
+/// A multi-select cell (H13.2, ADR 0018): its options as colored tags, and
+/// «+N» for those that do not fit. A click opens a menu where each click
+/// on an option adds or takes it out (the menu stays open), to search the
+/// options, create one or empty the cell.
+pub(super) fn multi_select_cell(
+    ui: &mut egui::Ui,
+    cell: &Cell<'_>,
+    editing: &mut Option<CellEdit>,
+    filter: &mut String,
+    actions: &mut Vec<CellAction>,
+) {
+    let chosen: Vec<&SelectOption> = cell
+        .property
+        .options
+        .iter()
+        .filter(|o| CellValue::option_ids(cell.value).contains(&o.id))
+        .collect();
+    let button = cell_button(ui, cell, &cell.shown());
+    if !chosen.is_empty() {
+        paint_tags(
+            ui,
+            ui.painter(),
+            egui::pos2(cell.rect.left() + CELL_PAD, cell.rect.center().y),
+            &chosen,
+            cell.rect.width() - 2.0 * CELL_PAD,
+        );
+    } else if cell.place == CellPlace::Page {
+        let p = theme::current(ui.ctx());
+        paint_cell_text(
+            ui,
+            cell.rect,
+            "Vacío",
+            egui::Align2::LEFT_CENTER,
+            p.text_faint,
+        );
+    }
+    let menu = select_menu_id(&cell.row.id, &cell.property.id);
+    let opening = button.clicked() && !egui::Popup::is_id_open(ui.ctx(), menu);
+    if opening {
+        filter.clear();
+        if let Some(old) = editing.take() {
+            actions.push(CellAction::Commit(old));
+        }
+    }
+    egui::Popup::menu(&button)
+        .id(menu)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(240.0)
+        .show(|ui| {
+            menu_spacing(ui);
+            let field = menu_field(
+                ui,
+                filter,
+                "Busca o crea una opción",
+                &format!("Opciones de {}", cell.name()),
+            );
+            if opening {
+                field.request_focus();
+            }
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let typed = filter.trim().to_owned();
+            let (matches, exact) = cell.property.matching_options(&typed);
+            let toggle = |option: &SelectOption| CellAction::SetValue {
+                row: cell.row.id.clone(),
+                property: cell.property.id.clone(),
+                value: CellValue::toggled(cell.property, cell.value, &option.id),
+            };
+            let create = || CellAction::CreateOption {
+                row: cell.row.id.clone(),
+                property: cell.property.id.clone(),
+                name: typed.clone(),
+            };
+            let mut action = None;
+            ui.add_space(theme::space::XS);
+            for option in &matches {
+                let on = chosen.iter().any(|c| c.id == option.id);
+                if option_row(ui, option, on).clicked() {
+                    action = Some(toggle(option));
+                }
+            }
+            if !typed.is_empty() && exact.is_none() {
+                let label = format!("Crear «{typed}»");
+                if ui
+                    .button((icons::icon(icons::PLUS), format!(" {label}")))
+                    .clicked()
+                {
+                    action = Some(create());
+                }
+            }
+            if cell.property.options.is_empty() && typed.is_empty() {
+                menu_caption(ui, "Escribe para crear la primera opción.");
+            }
+            // Enter adds or takes out the option with that name, else the
+            // first match, else creates it; the search is cleared to go on.
+            if enter && action.is_none() && !typed.is_empty() {
+                action = Some(match exact.or(matches.first().copied()) {
+                    Some(option) => toggle(option),
+                    None => create(),
+                });
+                filter.clear();
+                ui.memory_mut(|m| m.request_focus(field.id));
+            }
+            if !chosen.is_empty() {
+                ui.separator();
+                if ui
+                    .button((icons::icon(icons::CLOSE), " Quitar todas"))
+                    .clicked()
+                {
+                    action = Some(CellAction::SetValue {
+                        row: cell.row.id.clone(),
+                        property: cell.property.id.clone(),
+                        value: None,
+                    });
+                    ui.close();
+                }
+            }
+            if let Some(action) = action {
+                actions.push(action);
+            }
+        });
+}
+
 /// One option in a select menu: its tag, and a tick on the current one.
 pub(super) fn option_row(
     ui: &mut egui::Ui,
@@ -462,6 +688,46 @@ pub(super) fn paint_tag(
     max_width: f32,
 ) {
     paint_tag_on(ui, ui.painter(), left_center, option, max_width);
+}
+
+/// Options as pills in a row from `left_center`, within `max_width`; those
+/// that do not fit are counted in a «+N» at the end.
+pub(super) fn paint_tags(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    left_center: egui::Pos2,
+    options: &[&SelectOption],
+    max_width: f32,
+) {
+    let p = theme::current(ui.ctx());
+    let right = left_center.x + max_width;
+    let gap = 4.0;
+    // Room kept for «+N» while more options follow.
+    let more = 32.0;
+    let mut x = left_center.x;
+    for (i, option) in options.iter().enumerate() {
+        let left = options.len() - i;
+        let room = right - x - if left > 1 { more + gap } else { 0.0 };
+        // A pill narrower than this would show only its dot.
+        if room < 48.0 && i > 0 {
+            painter.text(
+                egui::pos2(x, left_center.y),
+                egui::Align2::LEFT_CENTER,
+                format!("+{left}"),
+                egui::TextStyle::Small.resolve(ui.style()),
+                p.text_muted,
+            );
+            return;
+        }
+        let rect = paint_tag_on(
+            ui,
+            painter,
+            egui::pos2(x, left_center.y),
+            option,
+            room.max(0.0),
+        );
+        x = rect.right() + gap;
+    }
 }
 
 /// Height of an option pill.
@@ -700,6 +966,7 @@ impl SilexApp {
         value: Option<CellValue>,
     ) -> Result<()> {
         self.db.set_value(row, property, value.as_ref())?;
+        self.refresh_row_times(&[row])?;
         let value = value.filter(|v| !v.is_empty());
         if let Some(state) = self.database.as_mut() {
             let cells = state.values.entry(row.to_owned()).or_default();
@@ -728,6 +995,9 @@ impl SilexApp {
             .map(|(row, property, value)| (row.as_str(), property.as_str(), value.as_ref()))
             .collect();
         self.db.set_values(&refs)?;
+        let mut rows: Vec<&str> = cells.iter().map(|(row, _, _)| row.as_str()).collect();
+        rows.dedup();
+        self.refresh_row_times(&rows)?;
         if let Some(state) = self.database.as_mut() {
             for (row, property, value) in cells {
                 let row_cells = state.values.entry(row).or_default();
@@ -741,9 +1011,12 @@ impl SilexApp {
     }
 
     /// Creates an option named `name` in a select property (next color in
-    /// turn) and puts it in the cell of `row`.
+    /// turn) and puts it in the cell of `row` (in a multi-select, with the
+    /// options it already has).
     pub(super) fn create_option(&mut self, row: &str, property: &str, name: &str) -> Result<()> {
-        let existing = self.cell_info(row, property).map_or(0, |(_, n, _)| n);
+        let Some((kind, existing, current)) = self.cell_info(row, property) else {
+            return Ok(());
+        };
         let option = self.db.add_select_option(
             property,
             name.trim(),
@@ -751,7 +1024,56 @@ impl SilexApp {
         )?;
         self.reload_properties()?;
         self.reload_row_page()?;
-        self.set_cell(row, property, Some(CellValue::Select(option)))
+        let value = if kind == PropertyKind::MultiSelect {
+            let Some(property) = self.find_property(property) else {
+                return Ok(());
+            };
+            CellValue::with_option(&property, current.as_ref(), &option)
+        } else {
+            Some(CellValue::Select(option))
+        };
+        self.set_cell(row, property, value)
+    }
+
+    /// A live property of the open table or the open row's page, as just read.
+    fn find_property(&self, id: &str) -> Option<Property> {
+        let in_table = self.database.as_ref().map(|d| &d.properties);
+        let in_page = self.row_page.as_ref().map(|page| &page.properties);
+        in_table
+            .into_iter()
+            .chain(in_page)
+            .flatten()
+            .find(|p| p.id == id)
+            .cloned()
+    }
+
+    /// Reads again when `rows` were created and last edited, where the open
+    /// table or row's page shows «Creado» or «Editado» (H13.3): a change to
+    /// a cell, a name, an icon or a row's page moves «Editado», and a new
+    /// row gets both. The rest of the values are not read again.
+    pub(super) fn refresh_row_times(&mut self, rows: &[&str]) -> Result<()> {
+        let shows_times = |properties: &[Property]| properties.iter().any(|p| p.kind.is_computed());
+        if let Some(state) = self.database.as_mut()
+            && shows_times(&state.properties)
+        {
+            for row in rows {
+                if state.rows.iter().any(|r| r.id == *row) {
+                    let times = self.db.row_times(row)?;
+                    let cells = state.values.entry((*row).to_owned()).or_default();
+                    cells.retain(|_, value| value.moment().is_none());
+                    cells.extend(times);
+                }
+            }
+        }
+        if let Some(page) = self.row_page.as_mut()
+            && rows.contains(&page.row.as_str())
+            && shows_times(&page.properties)
+        {
+            let times = self.db.row_times(&page.row)?;
+            page.values.retain(|_, value| value.moment().is_none());
+            page.values.extend(times);
+        }
+        Ok(())
     }
 
     /// Applies what the user did to cells this frame. Text typed in a cell
@@ -771,6 +1093,10 @@ impl SilexApp {
                     name,
                 } => self.create_option(&row, &property, &name),
                 CellAction::Commit(edit) => self.commit_cell_edit(&edit),
+                CellAction::Notice(text) => {
+                    self.notice = Some(text);
+                    Ok(())
+                }
             };
             self.report(result);
         }

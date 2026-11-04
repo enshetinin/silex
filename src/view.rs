@@ -33,6 +33,10 @@ pub struct ViewConfig {
     /// that is no longer a live select: the first select property
     /// ([`board_property`]).
     pub group_by: Option<String>,
+    /// The date property a calendar puts its rows by (H13.5). `None`, or
+    /// one that is no longer a live date: the first date property
+    /// ([`calendar_property`]).
+    pub date_by: Option<String>,
     /// Keys this version does not use, kept as they were.
     extra: Map<String, Value>,
 }
@@ -148,7 +152,9 @@ impl FilterOp {
     pub fn for_kind(kind: Option<PropertyKind>) -> &'static [FilterOp] {
         use FilterOp::*;
         match kind {
-            None | Some(PropertyKind::Text) => &[Contains, NotContains, Is, IsNot, Empty, NotEmpty],
+            None | Some(PropertyKind::Text | PropertyKind::Url) => {
+                &[Contains, NotContains, Is, IsNot, Empty, NotEmpty]
+            }
             Some(PropertyKind::Number) => &[
                 Is,
                 IsNot,
@@ -162,6 +168,10 @@ impl FilterOp {
             Some(PropertyKind::Checkbox) => &[Checked, Unchecked],
             Some(PropertyKind::Date) => &[Is, Before, After, Empty, NotEmpty],
             Some(PropertyKind::Select) => &[Is, IsNot, Empty, NotEmpty],
+            // One of its options (ADR 0018).
+            Some(PropertyKind::MultiSelect) => &[Contains, NotContains, Empty, NotEmpty],
+            // By the day (H13.3); never empty.
+            Some(PropertyKind::Created | PropertyKind::Edited) => &[Is, Before, After],
         }
     }
 
@@ -235,11 +245,16 @@ impl ViewConfig {
             Some(Value::String(id)) => Some(id),
             _ => None,
         };
+        let date_by = match map.remove("date_by") {
+            Some(Value::String(id)) => Some(id),
+            _ => None,
+        };
         Self {
             sorts,
             filters,
             hidden,
             group_by,
+            date_by,
             extra: map,
         }
     }
@@ -265,6 +280,9 @@ impl ViewConfig {
         if let Some(group_by) = &self.group_by {
             map.insert("group_by".into(), json!(group_by));
         }
+        if let Some(date_by) = &self.date_by {
+            map.insert("date_by".into(), json!(date_by));
+        }
         Value::Object(map).to_string()
     }
 
@@ -278,6 +296,20 @@ impl ViewConfig {
         if hidden {
             self.hidden.push(property.to_owned());
         }
+    }
+
+    /// The sorts that apply: those on the name or on a live property.
+    fn live_sorts<'a>(&'a self, properties: &[Property]) -> Vec<&'a Sort> {
+        self.sorts
+            .iter()
+            .filter(|s| s.property == NAME || properties.iter().any(|p| p.id == s.property))
+            .collect()
+    }
+
+    /// Whether the view orders its rows by a sort: then they cannot be
+    /// moved by hand (H13.1). A sort on a deleted property does not count.
+    pub fn is_sorted(&self, properties: &[Property]) -> bool {
+        !self.live_sorts(properties).is_empty()
     }
 }
 
@@ -319,12 +351,19 @@ impl Subject<'_> {
         }
     }
 
-    /// The text of a name or text value, for comparing.
+    /// The text of a name, text or URL value, for comparing.
     fn text(&self) -> Option<&str> {
         match self {
             Subject::Name(title) => Some(title),
-            Subject::Value(_, Some(CellValue::Text(text))) => Some(text),
+            Subject::Value(_, Some(CellValue::Text(text) | CellValue::Url(text))) => Some(text),
             _ => None,
+        }
+    }
+
+    fn value(&self) -> Option<&CellValue> {
+        match self {
+            Subject::Name(_) => None,
+            Subject::Value(_, value) => *value,
         }
     }
 }
@@ -349,10 +388,12 @@ impl Filter {
             return true;
         }
         match kind {
-            None | Some(PropertyKind::Text) => !self.value.trim().is_empty(),
+            None | Some(PropertyKind::Text | PropertyKind::Url) => !self.value.trim().is_empty(),
             Some(PropertyKind::Number) => parse_number(&self.value).is_some(),
-            Some(PropertyKind::Date) => Date::parse(&self.value).is_some(),
-            Some(PropertyKind::Select) => properties
+            Some(PropertyKind::Date | PropertyKind::Created | PropertyKind::Edited) => {
+                Date::parse(&self.value).is_some()
+            }
+            Some(PropertyKind::Select | PropertyKind::MultiSelect) => properties
                 .iter()
                 .any(|p| p.id == self.property && p.option(&self.value).is_some()),
             Some(PropertyKind::Checkbox) => true,
@@ -373,7 +414,7 @@ impl Filter {
             _ => {}
         }
         match subject.kind() {
-            None | Some(PropertyKind::Text) => {
+            None | Some(PropertyKind::Text | PropertyKind::Url) => {
                 let text = fold(subject.text().unwrap_or_default());
                 let wanted = fold(self.value.trim());
                 match self.op {
@@ -427,13 +468,44 @@ impl Filter {
                     _ => true,
                 }
             }
+            Some(PropertyKind::MultiSelect) => {
+                let has = matches!(
+                    subject,
+                    Subject::Value(_, Some(CellValue::MultiSelect(ids))) if ids.contains(&self.value)
+                );
+                match self.op {
+                    Contains => has,
+                    NotContains => !has,
+                    _ => true,
+                }
+            }
+            // The day of the moment, in local time.
+            Some(PropertyKind::Created | PropertyKind::Edited) => {
+                let Some(wanted) = Date::parse(&self.value) else {
+                    return true;
+                };
+                let Some(date) = subject
+                    .value()
+                    .and_then(CellValue::moment)
+                    .map(|m| m.date())
+                else {
+                    return false;
+                };
+                match self.op {
+                    Is => date == wanted,
+                    Before => date < wanted,
+                    After => date > wanted,
+                    _ => true,
+                }
+            }
             Some(PropertyKind::Checkbox) => true,
         }
     }
 }
 
 /// Orders two cells of the same column, ascending. Text ignores case and
-/// accents; a select goes by the order of its options.
+/// accents; a select goes by the order of its options, and a multi-select
+/// by its first option.
 fn compare(a: Subject<'_>, b: Subject<'_>) -> Ordering {
     if let (Some(x), Some(y)) = (a.text(), b.text()) {
         return fold(x.trim()).cmp(&fold(y.trim())).then_with(|| x.cmp(y));
@@ -445,9 +517,20 @@ fn compare(a: Subject<'_>, b: Subject<'_>) -> Ordering {
         (Some(CellValue::Number(x)), Some(CellValue::Number(y))) => x.total_cmp(y),
         (Some(CellValue::Checkbox(x)), Some(CellValue::Checkbox(y))) => x.cmp(y),
         (Some(CellValue::Date(x)), Some(CellValue::Date(y))) => x.cmp(y),
+        (Some(CellValue::Created(x)), Some(CellValue::Created(y)))
+        | (Some(CellValue::Edited(x)), Some(CellValue::Edited(y))) => x.cmp(y),
         (Some(CellValue::Select(x)), Some(CellValue::Select(y))) => {
             let position = |id: &str| property.options.iter().position(|o| o.id == id);
             position(x).cmp(&position(y))
+        }
+        // By its first option, then the next ones (ADR 0018).
+        (Some(CellValue::MultiSelect(x)), Some(CellValue::MultiSelect(y))) => {
+            let positions = |ids: &[String]| -> Vec<Option<usize>> {
+                ids.iter()
+                    .map(|id| property.options.iter().position(|o| o.id == *id))
+                    .collect()
+            };
+            positions(x).cmp(&positions(y))
         }
         _ => Ordering::Equal,
     }
@@ -475,11 +558,7 @@ pub fn visible_rows(
             })
         })
         .collect();
-    let sorts: Vec<&Sort> = config
-        .sorts
-        .iter()
-        .filter(|s| s.property == NAME || properties.iter().any(|p| p.id == s.property))
-        .collect();
+    let sorts = config.live_sorts(properties);
     if sorts.is_empty() {
         return shown;
     }
@@ -573,6 +652,54 @@ pub fn board_groups(
     groups
 }
 
+/// The property a calendar puts its rows by (H13.5): the view's choice if
+/// it is still a live date property, else the first one. `None` if the
+/// database has no date property (the calendar says how to add one).
+/// «Creado» and «Editado» are not offered: a row could not be moved to
+/// another day.
+pub fn calendar_property<'a>(
+    properties: &'a [Property],
+    config: &ViewConfig,
+) -> Option<&'a Property> {
+    let dates = || properties.iter().filter(|p| p.kind == PropertyKind::Date);
+    config
+        .date_by
+        .as_deref()
+        .and_then(|id| dates().find(|p| p.id == id))
+        .or_else(|| dates().next())
+}
+
+/// The rows in sight (`order`, indices into `rows`, already filtered and
+/// sorted) of a calendar by `property`: those with a date, by day, and
+/// those without one. Each list keeps the view's order.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CalendarRows {
+    pub days: std::collections::BTreeMap<Date, Vec<usize>>,
+    pub undated: Vec<usize>,
+}
+
+pub fn calendar_rows(
+    order: &[usize],
+    rows: &[Page],
+    values: &TableValues,
+    property: &Property,
+) -> CalendarRows {
+    let mut calendar = CalendarRows::default();
+    for &index in order {
+        let Some(row) = rows.get(index) else {
+            continue;
+        };
+        match values
+            .get(&row.id)
+            .and_then(|cells| cells.get(&property.id))
+        {
+            Some(CellValue::Date(date)) => calendar.days.entry(*date).or_default().push(index),
+            _ => calendar.undated.push(index),
+        }
+    }
+    calendar
+}
+
 /// A checkbox without a value is an unticked box, for sorting.
 fn unticked(subject: Subject<'_>) -> Subject<'_> {
     static NO: CellValue = CellValue::Checkbox(false);
@@ -582,11 +709,132 @@ fn unticked(subject: Subject<'_>) -> Subject<'_> {
     }
 }
 
+/// What the card of a database shows in a page (H12.11): the columns and
+/// first rows of one of its views, and how many rows that view has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TablePreview {
+    /// The view's name («Tabla»).
+    pub view: String,
+    /// The properties the view shows, in order (after «Nombre»).
+    pub columns: Vec<Property>,
+    /// The first rows the view shows, with their values.
+    pub rows: Vec<(Page, std::collections::HashMap<String, CellValue>)>,
+    /// How many rows the view shows in all.
+    pub total: usize,
+}
+
+/// The first `max` rows of a view (filtered and sorted as it is) and its
+/// columns that are not hidden. `rows` come in their manual order.
+pub fn table_preview(
+    view: &str,
+    rows: &[Page],
+    values: &TableValues,
+    properties: &[Property],
+    config: &ViewConfig,
+    max: usize,
+) -> TablePreview {
+    let shown = visible_rows(rows, values, properties, config);
+    TablePreview {
+        view: view.to_owned(),
+        columns: properties
+            .iter()
+            .filter(|p| !config.is_hidden(&p.id))
+            .cloned()
+            .collect(),
+        rows: shown
+            .iter()
+            .take(max)
+            .map(|&i| {
+                let row = &rows[i];
+                (
+                    row.clone(),
+                    values.get(&row.id).cloned().unwrap_or_default(),
+                )
+            })
+            .collect(),
+        total: shown.len(),
+    }
+}
+
+/// The manual order of a database's rows after moving `moving` to the
+/// gap `gap` of the list on show (`shown`, ids in the view's order,
+/// filtered: a table, or a board's column), H13.1. `all` is the manual
+/// order of every live row. The moved rows keep their order among
+/// themselves and go before the first row on show after the gap that is
+/// not moved, or else after the last one before it, so rows the view
+/// hides keep their place. `None` if nothing would change, or if nothing
+/// on show is left to place them by.
+pub fn drop_rows(
+    all: &[String],
+    shown: &[String],
+    moving: &[String],
+    gap: usize,
+) -> Option<Vec<String>> {
+    let moved = |id: &String| moving.contains(id);
+    let gap = gap.min(shown.len());
+    let before = shown[gap..].iter().find(|id| !moved(id));
+    let after = shown[..gap].iter().rev().find(|id| !moved(id));
+    // The moved rows, in their manual order.
+    let rows: Vec<String> = all.iter().filter(|id| moved(id)).cloned().collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let mut order: Vec<String> = all.iter().filter(|id| !moved(id)).cloned().collect();
+    let at = match (before, after) {
+        (Some(next), _) => order.iter().position(|id| id == next)?,
+        (None, Some(previous)) => order.iter().position(|id| id == previous)? + 1,
+        (None, None) => return None,
+    };
+    order.splice(at..at, rows);
+    (order != all).then_some(order)
+}
+
+/// The part of an order that changed between `before` and `after` (the
+/// same rows): what it was and what it is, without the rows that kept
+/// their place at either end. Undoing a move only needs this (H13.1).
+pub fn changed_span(before: &[String], after: &[String]) -> (Vec<String>, Vec<String>) {
+    let start = before.iter().zip(after).take_while(|(a, b)| a == b).count();
+    let end = before[start..]
+        .iter()
+        .rev()
+        .zip(after[start..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (
+        before[start..before.len() - end].to_vec(),
+        after[start..after.len() - end].to_vec(),
+    )
+}
+
+/// `all` with the rows of `wanted` put in that order, in the places those
+/// rows take in `all`; the other rows stay where they are. Rows of
+/// `wanted` not in `all` (trashed meanwhile) are left out. Applies a
+/// [`changed_span`] again, also after other rows came or went.
+pub fn arrange(all: &[String], wanted: &[String]) -> Vec<String> {
+    let index: std::collections::HashMap<&str, usize> = all
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let wanted: Vec<&String> = wanted
+        .iter()
+        .filter(|id| index.contains_key(id.as_str()) && seen.insert(id.as_str()))
+        .collect();
+    let mut places: Vec<usize> = wanted.iter().map(|id| index[id.as_str()]).collect();
+    places.sort_unstable();
+    let mut order = all.to_vec();
+    for (place, id) in places.into_iter().zip(wanted) {
+        order[place] = id.clone();
+    }
+    order
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::PageKind;
-    use crate::property::{OptionColor, SelectOption};
+    use crate::property::{Moment, OptionColor, SelectOption};
 
     fn page(id: &str, title: &str) -> Page {
         Page {
@@ -909,6 +1157,81 @@ mod tests {
     }
 
     #[test]
+    fn a_calendar_goes_by_its_date_property_or_the_first_one() {
+        let (_, _, mut properties) = library();
+        let mut config = ViewConfig::default();
+        assert_eq!(
+            calendar_property(&properties, &config).map(|p| p.id.as_str()),
+            Some("fin")
+        );
+        properties.push(property("inicio", PropertyKind::Date));
+        properties.push(property("creado", PropertyKind::Created));
+        config.date_by = Some("inicio".into());
+        assert_eq!(
+            calendar_property(&properties, &config).map(|p| p.id.as_str()),
+            Some("inicio")
+        );
+        // Not a date (also «Creado»), or gone: back to the first date.
+        for other in ["paginas", "creado", "borrada"] {
+            config.date_by = Some(other.into());
+            assert_eq!(
+                calendar_property(&properties, &config).map(|p| p.id.as_str()),
+                Some("fin"),
+                "{other}"
+            );
+        }
+        properties.retain(|p| p.kind != PropertyKind::Date);
+        assert!(calendar_property(&properties, &config).is_none());
+    }
+
+    #[test]
+    fn calendar_rows_go_on_their_day_in_the_view_order() {
+        let (rows, mut values, properties) = library();
+        let fin = properties.iter().find(|p| p.id == "fin").expect("fin");
+        let day = |d: &str| Date::parse(d).expect("date");
+        values
+            .entry("2".into())
+            .or_default()
+            .insert("fin".into(), CellValue::Date(day("2026-09-14")));
+        let by_pages = sorted(&[("paginas", Direction::Ascending)]);
+        let order = visible_rows(&rows, &values, &properties, &by_pages);
+        let calendar = calendar_rows(&order, &rows, &values, fin);
+        let days: Vec<(Date, Vec<String>)> = calendar
+            .days
+            .iter()
+            .map(|(d, r)| (*d, ids(&rows, r)))
+            .collect();
+        assert_eq!(
+            days,
+            [
+                (day("2025-01-02"), vec!["3".to_owned()]),
+                // Pedro Páramo (124) before Rayuela (736), as the view sorts.
+                (day("2026-09-14"), vec!["2".to_owned(), "1".to_owned()]),
+            ]
+        );
+        assert_eq!(ids(&rows, &calendar.undated), ["4", "5"]);
+        // Filtered out rows are on no day and not undated.
+        let only = filtered(&[(NAME, FilterOp::Contains, "rayuela")]);
+        let order = visible_rows(&rows, &values, &properties, &only);
+        let calendar = calendar_rows(&order, &rows, &values, fin);
+        assert_eq!(calendar.days.len(), 1);
+        assert!(calendar.undated.is_empty());
+    }
+
+    #[test]
+    fn the_calendar_date_property_is_stored_and_read_back() {
+        let config = ViewConfig {
+            date_by: Some("fin".into()),
+            ..ViewConfig::default()
+        };
+        let read = ViewConfig::from_json(&config.to_json());
+        assert_eq!(read.date_by.as_deref(), Some("fin"));
+        assert_eq!(read, config);
+        // Not text: as if there were none.
+        assert_eq!(ViewConfig::from_json(r#"{"date_by": 3}"#).date_by, None);
+    }
+
+    #[test]
     fn hiding_a_column_twice_keeps_one_entry() {
         let mut config = ViewConfig::default();
         config.set_hidden("autor", true);
@@ -917,5 +1240,370 @@ mod tests {
         assert!(config.is_hidden("autor"));
         config.set_hidden("autor", false);
         assert!(!config.is_hidden("autor"));
+    }
+
+    // ---- H12.11: the card of a database in a page ----
+
+    #[test]
+    fn a_preview_is_the_first_rows_of_the_view_and_its_visible_columns() {
+        let (rows, values, properties) = library();
+        let mut config = filtered(&[("leido", FilterOp::Unchecked, "")]);
+        config.sorts = sorted(&[(NAME, Direction::Ascending)]).sorts;
+        config.set_hidden("fin", true);
+        let preview = table_preview("Pendientes", &rows, &values, &properties, &config, 2);
+        assert_eq!(preview.view, "Pendientes");
+        assert_eq!(preview.total, 3, "Rayuela and Ficciones are read");
+        let titles: Vec<&str> = preview.rows.iter().map(|(p, _)| p.title.as_str()).collect();
+        assert_eq!(titles, ["el Aleph", "Pedro Páramo"]);
+        assert_eq!(
+            preview.rows[1].1.get("autor"),
+            Some(&CellValue::Text("Juan Rulfo".into()))
+        );
+        let columns: Vec<&str> = preview.columns.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(columns, ["paginas", "leido", "estado", "autor"]);
+        // An empty database: no rows, the columns all the same.
+        let empty = table_preview(
+            "Tabla",
+            &[],
+            &values,
+            &properties,
+            &ViewConfig::default(),
+            5,
+        );
+        assert_eq!(
+            (empty.total, empty.rows.len(), empty.columns.len()),
+            (0, 0, 5)
+        );
+    }
+
+    fn order(text: &str) -> Vec<String> {
+        text.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn a_row_dropped_in_a_gap_goes_there() {
+        let all = order("a b c d");
+        // Down: between c and d.
+        assert_eq!(
+            drop_rows(&all, &all, &order("a"), 3),
+            Some(order("b c a d"))
+        );
+        // Up, to the top, and to the end.
+        assert_eq!(
+            drop_rows(&all, &all, &order("d"), 0),
+            Some(order("d a b c"))
+        );
+        assert_eq!(
+            drop_rows(&all, &all, &order("a"), 4),
+            Some(order("b c d a"))
+        );
+        // Its own place, on either side: nothing changes.
+        assert_eq!(drop_rows(&all, &all, &order("b"), 1), None);
+        assert_eq!(drop_rows(&all, &all, &order("b"), 2), None);
+        // A gap past the end is the end.
+        assert_eq!(
+            drop_rows(&all, &all, &order("a"), 99),
+            Some(order("b c d a"))
+        );
+    }
+
+    #[test]
+    fn rows_hidden_by_the_view_keep_their_place() {
+        // The view hides x and y.
+        let all = order("a x b y c");
+        let shown = order("a b c");
+        // Between a and b: before b, so after x.
+        assert_eq!(
+            drop_rows(&all, &shown, &order("c"), 1),
+            Some(order("a x c b y"))
+        );
+        // At the end of what is shown: after c, the last one shown.
+        assert_eq!(
+            drop_rows(&all, &shown, &order("a"), 3),
+            Some(order("x b y c a"))
+        );
+        // A board's column shows its rows in their manual order too.
+        assert_eq!(
+            drop_rows(&all, &order("x y"), &order("y"), 0),
+            Some(order("a y x b c"))
+        );
+    }
+
+    #[test]
+    fn several_rows_move_together_in_their_order() {
+        let all = order("a b c d e");
+        // a and c (chosen in that order or not) to the end.
+        assert_eq!(
+            drop_rows(&all, &all, &order("c a"), 5),
+            Some(order("b d e a c"))
+        );
+        // Dropped in a gap next to one of them: placed by the first row
+        // that is not moved.
+        assert_eq!(drop_rows(&all, &all, &order("b c"), 2), None,);
+        assert_eq!(
+            drop_rows(&all, &all, &order("a c"), 2),
+            Some(order("b a c d e"))
+        );
+        // Every row on show moved: nothing to place them by.
+        assert_eq!(drop_rows(&all, &order("b c"), &order("b c"), 0), None);
+        assert_eq!(drop_rows(&all, &all, &order("zz"), 0), None);
+    }
+
+    #[test]
+    fn the_changed_span_undoes_and_redoes_a_move() {
+        let before = order("a b c d e f");
+        let after = order("a d b c e f");
+        let (was, is) = changed_span(&before, &after);
+        assert_eq!((was.clone(), is.clone()), (order("b c d"), order("d b c")));
+        assert_eq!(arrange(&after, &was), before);
+        assert_eq!(arrange(&before, &is), after);
+        // Also after a row came and another went meanwhile.
+        let now = order("a d b z c f");
+        assert_eq!(arrange(&now, &was), order("a b c z d f"));
+        // Nothing changed: nothing to keep.
+        assert_eq!(changed_span(&before, &before), (vec![], vec![]));
+        // Repeated or unknown ids are left out.
+        assert_eq!(arrange(&order("a b c"), &order("c c q a")), order("c b a"));
+    }
+
+    /// Small deterministic generator (no new crates).
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % n as u64) as usize
+        }
+    }
+
+    #[test]
+    fn random_drops_keep_every_row_and_undo_exactly() {
+        let mut rng = Rng(0x5eed_1301);
+        for _ in 0..3000 {
+            let len = 1 + rng.next(12);
+            let all: Vec<String> = (0..len).map(|i| format!("r{i}")).collect();
+            let shown: Vec<String> = all.iter().filter(|_| rng.next(4) > 0).cloned().collect();
+            if shown.is_empty() {
+                continue;
+            }
+            let moving: Vec<String> = shown.iter().filter(|_| rng.next(3) == 0).cloned().collect();
+            let gap = rng.next(shown.len() + 1);
+            let Some(after) = drop_rows(&all, &shown, &moving, gap) else {
+                continue;
+            };
+            // The same rows, the moved ones together and in their order,
+            // the others in theirs.
+            let mut sorted = after.clone();
+            sorted.sort();
+            let mut expected = all.clone();
+            expected.sort();
+            assert_eq!(sorted, expected);
+            let first = after.iter().position(|id| moving.contains(id)).unwrap();
+            let together: Vec<String> = after[first..first + moving.len()].to_vec();
+            let in_order: Vec<String> = all
+                .iter()
+                .filter(|id| moving.contains(id))
+                .cloned()
+                .collect();
+            assert_eq!(together, in_order);
+            let rest = |order: &[String]| -> Vec<String> {
+                order
+                    .iter()
+                    .filter(|id| !moving.contains(id))
+                    .cloned()
+                    .collect()
+            };
+            assert_eq!(rest(&after), rest(&all));
+            // The span is enough to undo and redo it.
+            let (was, is) = changed_span(&all, &after);
+            assert_eq!(arrange(&after, &was), all);
+            assert_eq!(arrange(&all, &is), after);
+        }
+    }
+
+    #[test]
+    fn a_view_is_sorted_only_by_rules_that_apply() {
+        let properties = vec![property("autor", PropertyKind::Text)];
+        let sort = |property: &str| Sort {
+            property: property.into(),
+            direction: Direction::Ascending,
+        };
+        let mut config = ViewConfig::default();
+        assert!(!config.is_sorted(&properties));
+        config.sorts = vec![sort("borrada")];
+        assert!(!config.is_sorted(&properties));
+        config.sorts.push(sort("autor"));
+        assert!(config.is_sorted(&properties));
+        config.sorts = vec![sort(NAME)];
+        assert!(config.is_sorted(&properties));
+    }
+
+    #[test]
+    fn a_multi_select_filters_by_one_option_and_sorts_by_its_first() {
+        use FilterOp::*;
+        let mut generos = property("generos", PropertyKind::Select);
+        generos.kind = PropertyKind::MultiSelect;
+        let properties = vec![generos];
+        let rows = vec![
+            page("1", "Rayuela"),
+            page("2", "Ficciones"),
+            page("3", "Aleph"),
+            page("4", "Sin géneros"),
+        ];
+        let multi =
+            |ids: &[&str]| CellValue::MultiSelect(ids.iter().map(|i| (*i).into()).collect());
+        let mut values = TableValues::new();
+        for (row, ids) in [
+            ("1", &["leyendo", "leido"][..]),
+            ("2", &["leido"][..]),
+            ("3", &["pendiente", "leido"][..]),
+        ] {
+            values
+                .entry(row.into())
+                .or_default()
+                .insert("generos".into(), multi(ids));
+        }
+        let with = |rules: &[(&str, FilterOp, &str)]| {
+            let config = ViewConfig {
+                filters: rules
+                    .iter()
+                    .map(|(property, op, value)| Filter {
+                        property: (*property).into(),
+                        op: *op,
+                        value: (*value).into(),
+                    })
+                    .collect(),
+                ..ViewConfig::default()
+            };
+            ids(&rows, &visible_rows(&rows, &values, &properties, &config))
+        };
+        assert_eq!(
+            FilterOp::for_kind(Some(PropertyKind::MultiSelect))[0],
+            Contains
+        );
+        assert_eq!(with(&[("generos", Contains, "leido")]), ["1", "2", "3"]);
+        assert_eq!(with(&[("generos", Contains, "leyendo")]), ["1"]);
+        // A row without options contains none of them.
+        assert_eq!(
+            with(&[("generos", NotContains, "leyendo")]),
+            ["2", "3", "4"]
+        );
+        assert_eq!(with(&[("generos", Empty, "")]), ["4"]);
+        assert_eq!(with(&[("generos", NotEmpty, "")]), ["1", "2", "3"]);
+        // An option of no property, or `Is`, does not apply.
+        assert_eq!(with(&[("generos", Contains, "otra")]), ["1", "2", "3", "4"]);
+        assert_eq!(with(&[("generos", Is, "leido")]), ["1", "2", "3", "4"]);
+        // Sorted by the first option (pendiente, leyendo, leido), empty last
+        // either way.
+        let sorted = |direction| {
+            let config = ViewConfig {
+                sorts: vec![Sort {
+                    property: "generos".into(),
+                    direction,
+                }],
+                ..ViewConfig::default()
+            };
+            ids(&rows, &visible_rows(&rows, &values, &properties, &config))
+        };
+        assert_eq!(sorted(Direction::Ascending), ["3", "1", "2", "4"]);
+        assert_eq!(sorted(Direction::Descending), ["2", "1", "3", "4"]);
+    }
+
+    /// A view of `rows` with `values` filtered by `rules` and sorted by `by`.
+    fn shown(
+        rows: &[Page],
+        values: &TableValues,
+        properties: &[Property],
+        rules: &[(&str, FilterOp, &str)],
+        by: &[(&str, Direction)],
+    ) -> Vec<String> {
+        let config = ViewConfig {
+            filters: rules
+                .iter()
+                .map(|(property, op, value)| Filter {
+                    property: (*property).into(),
+                    op: *op,
+                    value: (*value).into(),
+                })
+                .collect(),
+            ..sorted(by)
+        };
+        ids(rows, &visible_rows(rows, values, properties, &config))
+    }
+
+    #[test]
+    fn a_url_filters_and_sorts_as_text() {
+        use FilterOp::*;
+        let properties = vec![property("web", PropertyKind::Url)];
+        let rows = vec![page("1", "a"), page("2", "b"), page("3", "c")];
+        let mut values = TableValues::new();
+        for (row, url) in [("1", "https://Zeta.es"), ("2", "https://alfa.es/docs")] {
+            values
+                .entry(row.into())
+                .or_default()
+                .insert("web".into(), CellValue::Url(url.into()));
+        }
+        let view = |rules: &[(&str, FilterOp, &str)], by: &[(&str, Direction)]| {
+            shown(&rows, &values, &properties, rules, by)
+        };
+        assert_eq!(
+            FilterOp::for_kind(Some(PropertyKind::Url)),
+            FilterOp::for_kind(None)
+        );
+        assert_eq!(view(&[("web", Contains, "ZETA")], &[]), ["1"]);
+        assert_eq!(view(&[("web", NotContains, "docs")], &[]), ["1", "3"]);
+        assert_eq!(view(&[("web", Is, "https://alfa.es/docs")], &[]), ["2"]);
+        assert_eq!(view(&[("web", Empty, "")], &[]), ["3"]);
+        assert_eq!(view(&[], &[("web", Direction::Ascending)]), ["2", "1", "3"]);
+        assert_eq!(
+            view(&[], &[("web", Direction::Descending)]),
+            ["1", "2", "3"]
+        );
+    }
+
+    #[test]
+    fn created_and_edited_filter_by_the_day_and_sort_to_the_minute() {
+        use FilterOp::*;
+        let properties = vec![
+            property("creado", PropertyKind::Created),
+            property("editado", PropertyKind::Edited),
+        ];
+        let rows = vec![page("1", "a"), page("2", "b"), page("3", "c")];
+        let at = |s: &str| Moment::parse(s).expect("moment");
+        let mut values = TableValues::new();
+        for (row, created, edited) in [
+            ("1", "2026-10-30 18:00", "2026-10-31 09:00"),
+            ("2", "2026-10-30 09:15", "2026-11-02 10:00"),
+            ("3", "2026-10-29 23:59", "2026-10-30 08:00"),
+        ] {
+            let cells = values.entry(row.into()).or_default();
+            cells.insert("creado".into(), CellValue::Created(at(created)));
+            cells.insert("editado".into(), CellValue::Edited(at(edited)));
+        }
+        let view = |rules: &[(&str, FilterOp, &str)], by: &[(&str, Direction)]| {
+            shown(&rows, &values, &properties, rules, by)
+        };
+        // Never empty: no «está vacío».
+        assert_eq!(
+            FilterOp::for_kind(Some(PropertyKind::Created)),
+            [Is, Before, After]
+        );
+        assert_eq!(view(&[("creado", Is, "2026-10-30")], &[]), ["1", "2"]);
+        assert_eq!(view(&[("creado", Is, "30/10/2026")], &[]), ["1", "2"]);
+        assert_eq!(view(&[("creado", Before, "2026-10-30")], &[]), ["3"]);
+        assert_eq!(view(&[("editado", After, "2026-10-31")], &[]), ["2"]);
+        // A value that is not a date, or an operator of another type, does not apply.
+        let all = ["1", "2", "3"];
+        assert_eq!(view(&[("creado", Is, "ayer")], &[]), all);
+        assert_eq!(view(&[("creado", Empty, "")], &[]), all);
+        assert_eq!(
+            view(&[], &[("creado", Direction::Ascending)]),
+            ["3", "2", "1"]
+        );
+        assert_eq!(
+            view(&[], &[("editado", Direction::Descending)]),
+            ["2", "1", "3"]
+        );
     }
 }

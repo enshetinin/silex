@@ -83,7 +83,11 @@ pub fn enter(
     }
     let leaves_list = matches!(
         block.kind,
-        BlockKind::Bulleted | BlockKind::Numbered | BlockKind::Todo | BlockKind::Quote
+        BlockKind::Bulleted
+            | BlockKind::Numbered
+            | BlockKind::Todo
+            | BlockKind::Quote
+            | BlockKind::Callout
     );
     if block.content.is_empty() && leaves_list {
         let block = &mut blocks[index];
@@ -150,6 +154,14 @@ pub fn backspace_at_start(blocks: &mut Vec<Block>, index: usize) -> Option<Caret
             char: 0,
         });
     }
+    // A divider above goes, as in Notion; the text stays where it is.
+    if index > 0 && blocks[index - 1].kind == BlockKind::Divider {
+        blocks.remove(index - 1);
+        return Some(Caret {
+            block: index - 1,
+            char: 0,
+        });
+    }
     if index == 0 || !blocks[index - 1].kind.is_text() {
         return None;
     }
@@ -167,6 +179,16 @@ pub fn backspace_at_start(blocks: &mut Vec<Block>, index: usize) -> Option<Caret
 
 /// Delete at the very end of block `index`: pulls the next block's text in.
 pub fn delete_at_end(blocks: &mut Vec<Block>, index: usize) -> Option<Caret> {
+    // A divider below goes (H12.2).
+    if blocks.get(index).is_some_and(|b| b.kind.is_text())
+        && blocks
+            .get(index + 1)
+            .is_some_and(|b| b.kind == BlockKind::Divider)
+    {
+        blocks.remove(index + 1);
+        let char = char_len(&blocks[index].content);
+        return Some(Caret { block: index, char });
+    }
     let mergeable = |i: usize| blocks.get(i).is_some_and(|b| b.kind.is_text());
     if !mergeable(index) || !mergeable(index + 1) {
         return None;
@@ -385,8 +407,11 @@ fn aliases(kind: BlockKind) -> &'static [&'static str] {
         BlockKind::Numbered => &["numerada", "ol", "1.", "numero"],
         BlockKind::Quote => &["cita", "quote", ">"],
         BlockKind::Code => &["codigo", "code", "```"],
-        // Not offered: made by attaching a file or choosing a page.
-        BlockKind::File | BlockKind::PageLink => &[],
+        BlockKind::Callout => &["aviso", "callout", "nota", "destacado", "info"],
+        BlockKind::Toggle => &["desplegable", "toggle", "plegable", "details", "acordeon"],
+        // Not offered as a type: made by attaching a file, choosing a
+        // page or «/separador» (a divider has no text to keep).
+        BlockKind::File | BlockKind::PageLink | BlockKind::Divider => &[],
     }
 }
 
@@ -410,7 +435,26 @@ pub enum SlashItem {
     AttachFiles,
     /// A link to another page (H7.5, ADR 0008): opens the page picker.
     LinkPage,
+    /// A divider (H12.2): see [`insert_divider`].
+    Divider,
+    /// A new database inside the page, with a card to it (H12.11).
+    Database,
 }
+
+/// Words «Separador» answers to in the slash menu.
+const DIVIDER_WORDS: &[&str] = &["separador", "divisor", "linea", "divider", "hr", "---"];
+
+/// Words «Base de datos» answers to in the slash menu.
+const DATABASE_WORDS: &[&str] = &[
+    "basededatos",
+    "bbdd",
+    "bd",
+    "tabla",
+    "coleccion",
+    "database",
+    "db",
+    "table",
+];
 
 /// Words «Enlazar a una página» answers to in the slash menu.
 const LINK_WORDS: &[&str] = &["enlace", "enlazar", "pagina", "link", "vincular", "mencion"];
@@ -429,13 +473,23 @@ const ATTACH_WORDS: &[&str] = &[
 ];
 
 /// The slash menu for `query`: the matching types (see [`slash_matches`]),
-/// then «Adjuntar archivos» if it matches too.
+/// then «Separador», «Base de datos», «Enlazar a una página» and
+/// «Adjuntar archivos» if they match too.
 pub fn slash_items(query: &str) -> Vec<SlashItem> {
     let mut items: Vec<SlashItem> = slash_matches(query)
         .into_iter()
         .map(SlashItem::Kind)
         .collect();
     let folded = fold(query);
+    if DIVIDER_WORDS.iter().any(|w| w.starts_with(&folded)) {
+        items.push(SlashItem::Divider);
+    }
+    if DATABASE_WORDS
+        .iter()
+        .any(|w| w.starts_with(&folded.replace(' ', "")))
+    {
+        items.push(SlashItem::Database);
+    }
     if LINK_WORDS.iter().any(|w| w.starts_with(&folded)) {
         items.push(SlashItem::LinkPage);
     }
@@ -469,6 +523,265 @@ pub fn apply_slash(
         block: index,
         char: 0,
     })
+}
+
+/// A divider at block `index` (H12.2), from «/separador» (the text
+/// before `cursor` is the slash query) or `---` typed in a paragraph (all
+/// of it). If nothing is left, the block becomes the divider and a new
+/// paragraph below takes the cursor; otherwise the divider goes above the
+/// text, which keeps the cursor.
+pub fn insert_divider(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    cursor: usize,
+    new_id: impl FnOnce() -> String,
+) -> Option<Caret> {
+    let block = blocks.get_mut(index)?;
+    if !block.kind.is_text() {
+        return None;
+    }
+    let cut = byte_index(&block.content, cursor);
+    block.content.replace_range(..cut, "");
+    block.marks = marks::replace(&block.marks, 0, cursor, 0);
+    if block.content.is_empty() {
+        block.kind = BlockKind::Divider;
+        block.checked = false;
+        block.marks.clear();
+        let below = new_block_like(block, BlockKind::Paragraph, new_id(), String::new());
+        blocks.insert(index + 1, below);
+        return Some(Caret {
+            block: index + 1,
+            char: 0,
+        });
+    }
+    let divider = new_block_like(block, BlockKind::Divider, new_id(), String::new());
+    blocks.insert(index, divider);
+    Some(Caret {
+        block: index + 1,
+        char: 0,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Outline (H12.5)
+// ---------------------------------------------------------------------------
+
+/// A heading of the page, as its outline lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineEntry {
+    /// Where it is in the page.
+    pub index: usize,
+    /// How far in it goes: 0 for the largest heading the page uses.
+    pub level: u8,
+    /// Its text on one line.
+    pub text: String,
+}
+
+/// The page's H1–H3 with text, in order, for its outline. Levels start at
+/// the largest one used, so a page of H2 and H3 starts at the left.
+pub fn outline(blocks: &[Block]) -> Vec<OutlineEntry> {
+    let number = |kind: BlockKind| match kind {
+        BlockKind::Heading1 => Some(0u8),
+        BlockKind::Heading2 => Some(1),
+        BlockKind::Heading3 => Some(2),
+        _ => None,
+    };
+    let headings: Vec<(usize, u8, String)> = blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            let text = block.content.replace('\n', " ").trim().to_owned();
+            Some((index, number(block.kind)?, text)).filter(|(_, _, t)| !t.is_empty())
+        })
+        .collect();
+    let top = headings.iter().map(|(_, n, _)| *n).min().unwrap_or(0);
+    headings
+        .into_iter()
+        .map(|(index, n, text)| OutlineEntry {
+            index,
+            level: n - top,
+            text,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Toggle blocks (ADR 0016)
+// ---------------------------------------------------------------------------
+
+/// End (exclusive) of block `index` with its content: the blocks after it
+/// with more indent. For any block, not only toggles.
+pub fn subtree_end(blocks: &[Block], index: usize) -> usize {
+    let Some(block) = blocks.get(index) else {
+        return index;
+    };
+    blocks[index + 1..]
+        .iter()
+        .position(|b| b.indent <= block.indent)
+        .map_or(blocks.len(), |n| index + 1 + n)
+}
+
+/// Which blocks are hidden: those inside a toggle that `folded` says is
+/// folded (also inside another hidden block).
+pub fn hidden_blocks(blocks: &[Block], folded: impl Fn(&Block) -> bool) -> Vec<bool> {
+    let mut hidden = Vec::with_capacity(blocks.len());
+    // The indent of the folded toggle being skipped.
+    let mut hiding: Option<u8> = None;
+    for block in blocks {
+        if let Some(level) = hiding {
+            if block.indent > level {
+                hidden.push(true);
+                continue;
+            }
+            hiding = None;
+        }
+        hidden.push(false);
+        if block.kind == BlockKind::Toggle && folded(block) {
+            hiding = Some(block.indent);
+        }
+    }
+    hidden
+}
+
+/// The blocks that contain block `index`, nearest first: each one is the
+/// closest block above with less indent than the one before.
+pub fn ancestors(blocks: &[Block], index: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let Some(mut level) = blocks.get(index).map(|b| b.indent) else {
+        return out;
+    };
+    for i in (0..index).rev() {
+        if level == 0 {
+            break;
+        }
+        if blocks[i].indent < level {
+            level = blocks[i].indent;
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// The last block of `first..=last` with the content of the toggles in it
+/// (ADR 0016): moving, copying or deleting a toggle takes its content.
+pub fn with_content(blocks: &[Block], first: usize, last: usize) -> usize {
+    (first..=last.min(blocks.len().saturating_sub(1)))
+        .filter(|&i| blocks[i].kind == BlockKind::Toggle)
+        .map(|i| subtree_end(blocks, i) - 1)
+        .fold(last, usize::max)
+}
+
+/// Moves blocks `first..=last`, with the content of their toggles, one
+/// place up or down. A toggle next to them is passed whole, content
+/// included, never entered (Tab puts a block inside one). Returns the new
+/// range, or `None` at the edges.
+pub fn move_with_content(
+    blocks: &mut [Block],
+    first: usize,
+    last: usize,
+    up: bool,
+) -> Option<(usize, usize)> {
+    let (first, last) = (first.min(last), first.max(last));
+    if last >= blocks.len() {
+        return None;
+    }
+    let last = with_content(blocks, first, last);
+    let to = if up {
+        let above = first.checked_sub(1)?;
+        // The outermost toggle that ends right here, not shallower than
+        // the moved blocks: all of it is passed.
+        (0..first)
+            .find(|&t| {
+                blocks[t].kind == BlockKind::Toggle
+                    && blocks[t].indent >= blocks[first].indent
+                    && subtree_end(blocks, t) == first
+            })
+            .unwrap_or(above)
+    } else {
+        let below = last + 1;
+        if below >= blocks.len() {
+            return None;
+        }
+        if blocks[below].kind == BlockKind::Toggle {
+            subtree_end(blocks, below)
+        } else {
+            below + 1
+        }
+    };
+    move_range_to(blocks, first, last, to)
+}
+
+/// Tab (`delta` = 1) or Shift+Tab (`delta` = -1) on block `index`, as
+/// [`change_indent`]; a toggle takes its content along. Tab does nothing
+/// if that would push its content past [`MAX_INDENT`].
+pub fn change_indent_with_content(blocks: &mut [Block], index: usize, delta: i8) -> bool {
+    let Some(block) = blocks.get(index) else {
+        return false;
+    };
+    if block.kind != BlockKind::Toggle {
+        return change_indent(blocks, index, delta);
+    }
+    let end = subtree_end(blocks, index);
+    if delta > 0 && blocks[index..end].iter().any(|b| b.indent >= MAX_INDENT) {
+        return false;
+    }
+    let before = blocks[index].indent;
+    if !change_indent(blocks, index, delta) {
+        return false;
+    }
+    let after = blocks[index].indent;
+    for block in &mut blocks[index + 1..end] {
+        block.indent = if after > before {
+            block.indent + (after - before)
+        } else {
+            block.indent - (before - after)
+        };
+    }
+    true
+}
+
+/// Enter at `at_char` in block `index`, knowing whether it is a folded
+/// toggle (ADR 0016). In a toggle, the text after the cursor goes inside
+/// it, first, when it is open; after all its content when it is folded;
+/// and an empty toggle becomes a paragraph. Other blocks: [`enter`].
+pub fn enter_with_fold(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    at_char: usize,
+    folded: bool,
+    new_id: impl FnOnce() -> String,
+) -> Option<Caret> {
+    let block = blocks.get(index)?;
+    if block.kind != BlockKind::Toggle || (at_char == 0 && !block.content.is_empty()) {
+        return enter(blocks, index, at_char, new_id);
+    }
+    if block.content.is_empty() {
+        blocks[index].kind = BlockKind::Paragraph;
+        return Some(Caret {
+            block: index,
+            char: 0,
+        });
+    }
+    let (at, indent) = if folded {
+        (subtree_end(blocks, index), block.indent)
+    } else {
+        (index + 1, block.indent.saturating_add(1).min(MAX_INDENT))
+    };
+    let split_at = byte_index(&block.content, at_char);
+    let (before, after) = marks::split(&block.marks, at_char);
+    let tail = blocks[index].content.split_off(split_at);
+    blocks[index].marks = before;
+    let mut below = new_block_like(&blocks[index], BlockKind::Paragraph, new_id(), tail);
+    below.indent = indent;
+    below.marks = after;
+    blocks.insert(at, below);
+    Some(Caret { block: at, char: 0 })
+}
+
+/// Whether a paragraph's text is a divider written as Markdown (`---`):
+/// typing it turns the paragraph into one (H12.2).
+pub fn is_divider_text(kind: BlockKind, content: &str) -> bool {
+    kind == BlockKind::Paragraph && content == "---"
 }
 
 // ---------------------------------------------------------------------------
@@ -511,26 +824,82 @@ pub fn restore_deleted(blocks: &mut Vec<Block>, deleted: DeletedBlocks) {
 /// Plain text of blocks `first..=last`: one line per block, two spaces per
 /// indent level, list markers and task boxes. (Markdown is milestone 4.)
 pub fn selection_text(blocks: &[Block], first: usize, last: usize) -> String {
+    selection_clip(blocks, first, last).text
+}
+
+/// Text copied inside Silex, with its formatting over it (ADR 0015).
+/// Pasting exactly this text gives the formatting back; other apps only
+/// get the text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Clip {
+    pub text: String,
+    pub marks: Vec<marks::Mark>,
+}
+
+impl Clip {
+    /// The characters `[start, end)` of a block, with their formatting.
+    /// `None` if the text would change when pasted (control characters).
+    pub fn of_text(block: &Block, start: usize, end: usize) -> Option<Clip> {
+        let text: String = block
+            .content
+            .chars()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .collect();
+        (normalize_pasted(&text) == text).then(|| Clip {
+            marks: marks::slice(&block.marks, start, end),
+            text,
+        })
+    }
+
+    /// The formatting of `pasted` if it is this text (line endings aside).
+    pub fn marks_for(&self, pasted: &str) -> Option<&[marks::Mark]> {
+        (normalize_pasted(pasted) == self.text).then_some(self.marks.as_slice())
+    }
+}
+
+/// [`selection_text`] with the formatting of each block, moved to where
+/// its text is in the copied lines.
+pub fn selection_clip(blocks: &[Block], first: usize, last: usize) -> Clip {
     let (first, last) = (first.min(last), first.max(last));
     let numbers = crate::model::list_numbers(blocks);
-    blocks
-        .iter()
-        .zip(numbers)
-        .enumerate()
-        .filter(|(i, _)| (first..=last).contains(i))
-        .map(|(_, (block, number))| {
-            let indent = "  ".repeat(usize::from(block.indent));
-            let marker = match block.kind {
-                BlockKind::Bulleted => "• ".to_owned(),
-                BlockKind::Numbered => format!("{}. ", number.unwrap_or(1)),
-                BlockKind::Todo if block.checked => "[x] ".to_owned(),
-                BlockKind::Todo => "[ ] ".to_owned(),
-                _ => String::new(),
-            };
-            format!("{indent}{marker}{}", block.content)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut clip = Clip::default();
+    let mut at = 0;
+    for (i, (block, number)) in blocks.iter().zip(numbers).enumerate() {
+        if !(first..=last).contains(&i) {
+            continue;
+        }
+        if i > first {
+            clip.text.push('\n');
+            at += 1;
+        }
+        let indent = "  ".repeat(usize::from(block.indent));
+        let marker = match block.kind {
+            BlockKind::Bulleted => "• ".to_owned(),
+            BlockKind::Numbered => format!("{}. ", number.unwrap_or(1)),
+            BlockKind::Todo if block.checked => "[x] ".to_owned(),
+            BlockKind::Todo => "[ ] ".to_owned(),
+            BlockKind::Toggle => TOGGLE_MARKER.to_owned(),
+            _ => String::new(),
+        };
+        let marker = if block.kind == BlockKind::Divider {
+            "---".to_owned()
+        } else {
+            marker
+        };
+        let prefix = format!("{indent}{marker}");
+        at += char_len(&prefix);
+        clip.text.push_str(&prefix);
+        clip.text.push_str(&block.content);
+        clip.marks.extend(
+            block
+                .marks
+                .iter()
+                .map(|m| marks::Mark::new(m.start + at, m.end + at, m.kind.clone())),
+        );
+        at += char_len(&block.content);
+    }
+    clip
 }
 
 // ---------------------------------------------------------------------------
@@ -622,6 +991,10 @@ pub struct PastedLine {
     pub content: String,
 }
 
+/// How a toggle's line starts when copied (ADR 0016), so pasting it in
+/// Silex gives a toggle back.
+const TOGGLE_MARKER: &str = "▸ ";
+
 /// Line endings to `\n`, and invisible control characters removed (tabs kept).
 pub fn normalize_pasted(text: &str) -> String {
     text.replace("\r\n", "\n")
@@ -632,19 +1005,39 @@ pub fn normalize_pasted(text: &str) -> String {
 }
 
 pub fn parse_pasted_line(line: &str) -> PastedLine {
+    parse_line(line, false)
+}
+
+/// [`parse_pasted_line`]; `copied` (text copied inside Silex) also reads
+/// two leading spaces per level as the indent of plain text, as Silex
+/// copies it (ADR 0016: a toggle's content is often plain paragraphs).
+fn parse_line(line: &str, copied: bool) -> PastedLine {
     let spaces = line.chars().take_while(|c| *c == ' ').count();
     let indent = u8::try_from(spaces / 2)
         .unwrap_or(MAX_INDENT)
         .min(MAX_INDENT);
     let rest = &line[spaces / 2 * 2..];
+    if rest == "---" {
+        // A divider, as Silex copies it (and as Markdown writes it).
+        return PastedLine {
+            kind: BlockKind::Divider,
+            indent,
+            checked: false,
+            content: String::new(),
+        };
+    }
     let (kind, checked, content) = if let Some(text) = rest.strip_prefix("• ") {
         (BlockKind::Bulleted, false, text)
+    } else if let Some(text) = rest.strip_prefix(TOGGLE_MARKER) {
+        (BlockKind::Toggle, false, text)
     } else if let Some(text) = rest.strip_prefix("[ ] ") {
         (BlockKind::Todo, false, text)
     } else if let Some(text) = rest.strip_prefix("[x] ") {
         (BlockKind::Todo, true, text)
     } else if let Some(text) = numbered_text(rest) {
         (BlockKind::Numbered, false, text)
+    } else if copied {
+        (BlockKind::Paragraph, false, rest)
     } else {
         // Plain text keeps its leading spaces only beyond the indent we took.
         return PastedLine {
@@ -680,17 +1073,111 @@ pub fn paste_lines(
     index: usize,
     cursor: usize,
     text: &str,
-    mut new_id: impl FnMut() -> String,
+    new_id: impl FnMut() -> String,
+) -> Option<Caret> {
+    paste(blocks, index, cursor, text, &[], false, new_id)
+}
+
+/// [`paste_lines`] of text copied inside Silex: `pasted` is its formatting
+/// (over the text with `\r\n` as `\n`, see [`Clip`]), which each line
+/// keeps without its list marker.
+pub fn paste_lines_marked(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    cursor: usize,
+    text: &str,
+    pasted: &[marks::Mark],
+    new_id: impl FnMut() -> String,
+) -> Option<Caret> {
+    paste(blocks, index, cursor, text, pasted, true, new_id)
+}
+
+/// [`paste_lines`] (`copied` false) or [`paste_lines_marked`] (true).
+fn paste(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    cursor: usize,
+    text: &str,
+    pasted: &[marks::Mark],
+    copied: bool,
+    new_id: impl FnMut() -> String,
 ) -> Option<Caret> {
     let text = normalize_pasted(text);
-    let mut lines = text.split('\n').map(parse_pasted_line);
-    let first = lines.next()?;
+    let mut at = 0;
+    let lines: Vec<(PastedLine, Vec<marks::Mark>)> = text
+        .split('\n')
+        .map(|raw| {
+            let line = parse_line(raw, copied);
+            let len = char_len(raw);
+            // The content is the end of the line, after its marker.
+            let start = at + len - char_len(&line.content);
+            let line_marks = marks::slice(pasted, start, at + len);
+            at += len + 1;
+            (line, line_marks)
+        })
+        .collect();
+    paste_parsed(blocks, index, cursor, lines, new_id)
+}
+
+/// Pastes Markdown at `cursor` in block `index` (H12.7): its blocks, read
+/// by [`crate::markdown::markdown_to_blocks`], go in as copied lines do
+/// (the first joins the text before the cursor, the text after it ends up
+/// after the last one), with their formatting.
+pub fn paste_blocks(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    cursor: usize,
+    pasted: Vec<crate::model::NewBlock>,
+    new_id: impl FnMut() -> String,
+) -> Option<Caret> {
+    let lines = pasted
+        .into_iter()
+        .map(|b| {
+            let line = PastedLine {
+                kind: b.kind,
+                indent: b.indent,
+                checked: b.checked,
+                content: b.content,
+            };
+            (line, b.marks)
+        })
+        .collect();
+    paste_parsed(blocks, index, cursor, lines, new_id)
+}
+
+/// Puts pasted lines, each with its formatting, at `cursor` in block
+/// `index`.
+fn paste_parsed(
+    blocks: &mut Vec<Block>,
+    index: usize,
+    cursor: usize,
+    mut lines: Vec<(PastedLine, Vec<marks::Mark>)>,
+    mut new_id: impl FnMut() -> String,
+) -> Option<Caret> {
     let block = blocks.get_mut(index)?;
+    // A divider never takes text (H12.2): one pasted after some text goes
+    // on a line of its own.
+    if lines
+        .first()
+        .is_some_and(|(l, _)| l.kind == BlockKind::Divider)
+        && byte_index(&block.content, cursor) > 0
+    {
+        let empty = PastedLine {
+            kind: BlockKind::Paragraph,
+            indent: 0,
+            checked: false,
+            content: String::new(),
+        };
+        lines.insert(0, (empty, Vec::new()));
+    }
+    let mut lines = lines.into_iter();
+    let (first, first_marks) = lines.next()?;
     let split_at = byte_index(&block.content, cursor);
     let tail = block.content.split_off(split_at);
-    // The text after the cursor keeps its formatting; pasted text has none.
+    // The text after the cursor keeps its formatting; the pasted text
+    // gets its own (none, if it was not copied in Silex).
     let (head_marks, tail_marks) = marks::split(&block.marks, cursor);
-    block.marks = head_marks;
+    block.marks = marks::join(&head_marks, char_len(&block.content), &first_marks);
     let base_indent = block.indent;
     if block.content.is_empty() && first.kind != BlockKind::Paragraph {
         block.kind = first.kind;
@@ -698,23 +1185,37 @@ pub fn paste_lines(
         block.indent = base_indent.saturating_add(first.indent).min(MAX_INDENT);
     }
     block.content.push_str(&first.content);
+    fit_marks(block);
 
     let template = block.clone();
     let mut last = index;
-    for line in lines {
+    for (line, line_marks) in lines {
         last += 1;
-        blocks.insert(
-            last,
-            Block {
-                id: new_id(),
-                kind: line.kind,
-                checked: line.checked,
-                indent: base_indent.saturating_add(line.indent).min(MAX_INDENT),
-                content: line.content,
-                marks: Vec::new(),
-                ..template.clone()
-            },
-        );
+        let mut new = Block {
+            id: new_id(),
+            kind: line.kind,
+            checked: line.checked,
+            indent: base_indent.saturating_add(line.indent).min(MAX_INDENT),
+            content: line.content,
+            marks: line_marks,
+            ..template.clone()
+        };
+        fit_marks(&mut new);
+        blocks.insert(last, new);
+    }
+    // The text after the cursor never ends up in a divider.
+    if blocks[last].kind == BlockKind::Divider {
+        let below = Block {
+            id: new_id(),
+            kind: BlockKind::Paragraph,
+            checked: false,
+            indent: blocks[last].indent,
+            content: String::new(),
+            marks: Vec::new(),
+            ..template.clone()
+        };
+        last += 1;
+        blocks.insert(last, below);
     }
     let target = &mut blocks[last];
     let char = char_len(&target.content);

@@ -131,6 +131,7 @@ fn blocks_that_do_not_match_their_attachment_are_refused() -> anyhow::Result<()>
         indent: 0,
         checked: false,
         content: "x".into(),
+        marks: Vec::new(),
     };
     assert!(
         db.create_page_with_blocks("Importada", None, &[new])
@@ -244,7 +245,7 @@ fn file_blocks_export_as_links_next_to_their_page() -> anyhow::Result<()> {
     let out = tmp.0.join("Exportaciones");
     fs::create_dir_all(out.join("Facturas (adjuntos)"))?;
     fs::write(out.join("Facturas (adjuntos)").join("mío.txt"), "mío")?;
-    let md = export_page_with_files(&db, &out, "Facturas", &blocks)?;
+    let md = export_page_with_files(&db, &out, "Facturas", None, &blocks)?;
     assert_eq!(md, out.join("Facturas.md"));
     let text = fs::read_to_string(&md)?;
     assert!(
@@ -266,7 +267,7 @@ fn file_blocks_export_as_links_next_to_their_page() -> anyhow::Result<()> {
         "mío"
     );
     // Exporting again never overwrites.
-    let again = export_page_with_files(&db, &out, "Facturas", &blocks)?;
+    let again = export_page_with_files(&db, &out, "Facturas", None, &blocks)?;
     assert_eq!(again, out.join("Facturas (2).md"));
     assert!(
         out.join("Facturas (2) (adjuntos)")
@@ -298,8 +299,8 @@ fn a_page_without_files_exports_as_before() -> anyhow::Result<()> {
     let tmp = TempDir::new()?;
     let db = Database::open_in_memory()?;
     let blocks = vec![block("p", BlockKind::Paragraph, "Hola", None)];
-    let with = export_page_with_files(&db, &tmp.0.join("a"), "Nota", &blocks)?;
-    let without = export_page(&tmp.0.join("b"), "Nota", &blocks)?;
+    let with = export_page_with_files(&db, &tmp.0.join("a"), "Nota", None, &blocks)?;
+    let without = export_page(&tmp.0.join("b"), "Nota", None, &blocks)?;
     assert_eq!(fs::read(with)?, fs::read(without)?);
     assert_eq!(fs::read_dir(tmp.0.join("a"))?.count(), 1, "no folder");
     Ok(())
@@ -483,6 +484,7 @@ fn a_page_with_files_exports_on_its_own_thread() -> anyhow::Result<()> {
         tmp.db(),
         out.clone(),
         "Facturas".into(),
+        None,
         blocks.clone(),
         move || {
             let _ = done.send(());
@@ -500,9 +502,53 @@ fn a_page_with_files_exports_on_its_own_thread() -> anyhow::Result<()> {
         tmp.0.join("no-existe").join("silex.sqlite3"),
         out,
         "Facturas".into(),
+        None,
         blocks,
         || {},
     )?;
     assert!(wait(missing)?.is_err());
+    Ok(())
+}
+
+#[test]
+fn a_gallery_cover_is_the_first_image_of_each_row() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let base = db.create_database("Recetas", None)?;
+    let png = |name: &str| NewAttachment::from_bytes(name, b"\x89PNG\r\n\x1a\nresto".to_vec());
+    let jpeg = NewAttachment::from_bytes("plato.jpg", b"\xff\xd8\xff\xe0resto".to_vec())?;
+    let (primera, segunda, foto) = (
+        db.add_attachment(&png("primera.png")?)?,
+        db.add_attachment(&png("segunda.png")?)?,
+        db.add_attachment(&jpeg)?,
+    );
+    let factura = db.add_attachment(&pdf("factura.pdf")?)?;
+    let file = |page: &str, a: &silex_desktop::attachment::Attachment| {
+        block(page, BlockKind::File, &a.name, Some(a.id.clone()))
+    };
+    // A PDF first, then two images: the first image.
+    let sopa = db.create_row(&base, "Sopa")?;
+    let blocks = vec![
+        block(&sopa, BlockKind::Paragraph, "Caliente", None),
+        file(&sopa, &factura),
+        file(&sopa, &primera),
+        file(&sopa, &segunda),
+    ];
+    db.save_document(&sopa, "Sopa", &blocks)?;
+    // A JPEG counts too.
+    let tarta = db.create_row(&base, "Tarta")?;
+    db.save_document(&tarta, "Tarta", &[file(&tarta, &foto)])?;
+    // Only a PDF, or nothing: no cover.
+    let pan = db.create_row(&base, "Pan")?;
+    db.save_document(&pan, "Pan", &[file(&pan, &factura)])?;
+    db.create_row(&base, "Agua")?;
+    // A row in the trash is left out.
+    let vieja = db.create_row(&base, "Vieja")?;
+    db.save_document(&vieja, "Vieja", &[file(&vieja, &segunda)])?;
+    db.trash_page(&vieja)?;
+
+    let covers = db.database_covers(&base)?;
+    assert_eq!(covers.len(), 2, "{covers:?}");
+    assert_eq!(covers.get(&sopa), Some(&primera.id));
+    assert_eq!(covers.get(&tarta), Some(&foto.id));
     Ok(())
 }

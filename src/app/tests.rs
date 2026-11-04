@@ -55,8 +55,11 @@ fn frame(
                     attachment: None,
                     preview: None,
                     link: None,
+                    table: None,
                     found: Vec::new(),
                     reveal: false,
+                    link_edit: None,
+                    folded: false,
                 },
             )
             .text_changed;
@@ -339,6 +342,7 @@ fn search_pages(app: &mut SilexApp) -> anyhow::Result<(String, String)> {
             indent: 0,
             checked: false,
             content: (*text).to_owned(),
+            marks: Vec::new(),
         })
         .collect();
     let notas = app.db.create_page_with_blocks("Notas", None, &new)?;
@@ -1737,11 +1741,10 @@ fn database_scale_smoke() -> anyhow::Result<()> {
         for round in 0..2 {
             for kind in PropertyKind::ALL {
                 let id = db.add_property(&base, &format!("{} {round}", kind.label()), kind)?;
-                let option = match kind {
-                    PropertyKind::Select => {
-                        Some(db.add_select_option(&id, "Hecho", OptionColor::Green)?)
-                    }
-                    _ => None,
+                let option = if kind.has_options() {
+                    Some(db.add_select_option(&id, "Hecho", OptionColor::Green)?)
+                } else {
+                    None
                 };
                 properties.push((id, kind, option));
             }
@@ -1756,6 +1759,12 @@ fn database_scale_smoke() -> anyhow::Result<()> {
                     PropertyKind::Checkbox => Some(CellValue::Checkbox(i % 2 == 0)),
                     PropertyKind::Date => date.clone(),
                     PropertyKind::Select => option.clone().map(CellValue::Select),
+                    PropertyKind::MultiSelect => {
+                        option.clone().map(|o| CellValue::MultiSelect(vec![o]))
+                    }
+                    PropertyKind::Url => Some(CellValue::Url(format!("https://a.es/{i}"))),
+                    // Read from the row's page; never written.
+                    PropertyKind::Created | PropertyKind::Edited => continue,
                 };
                 db.set_value(&row, property, value.as_ref())?;
             }
@@ -3431,6 +3440,81 @@ fn slash_enlace_and_the_palette_open_the_picker_and_escape_closes_it() -> anyhow
     Ok(())
 }
 
+// ---- H12.11: a database inside a page ----
+
+#[test]
+fn slash_base_de_datos_makes_one_inside_the_page_with_a_card() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    use silex_desktop::editor::SlashItem;
+    let (mut app, ctx, _, empty) = links_app()?;
+    let diario = app.selected.clone().expect("«Diario» is open");
+    app_frame(&mut app, &ctx, type_text("/base"));
+    let menu = app.slash.clone().expect("slash menu");
+    assert_eq!(menu.matches, [SlashItem::Database]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    // The database opens, inside «Diario», to be named.
+    let base = app.selected.clone().expect("something open");
+    assert_ne!(base, diario);
+    let page = app.db.get_page(&base)?.expect("made");
+    assert_eq!(page.kind, PageKind::Database);
+    assert_eq!(page.parent_id.as_deref(), Some(diario.as_str()));
+    assert!(app.database.is_some(), "its table is shown");
+    assert!(app.expanded.contains(&diario), "seen in the sidebar");
+    // «Diario» has a card to it in the empty block's place, saved.
+    let blocks = app.db.list_blocks(&diario)?;
+    let kinds: Vec<(BlockKind, Option<String>)> =
+        blocks.iter().map(|b| (b.kind, b.link.clone())).collect();
+    assert_eq!(
+        kinds,
+        [
+            (BlockKind::Paragraph, None),
+            (BlockKind::PageLink, Some(base.clone()))
+        ]
+    );
+    assert!(blocks.iter().all(|b| b.id != empty));
+    // Named, the card shows its name.
+    app.db.rename_page(&base, "Lecturas")?;
+    app.open_page(diario.clone())?;
+    app.reload_pages()?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "Lecturas"), "{painted:?}");
+    Ok(())
+}
+
+#[test]
+fn a_database_can_be_made_inside_a_page_from_the_palette_but_not_in_a_template()
+-> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let (mut app, ctx, recetas, _) = links_app()?;
+    app.open_page(recetas.clone())?;
+    app.run_command(&ctx, Command::NewDatabaseHere)?;
+    let base = app.selected.clone().expect("open");
+    let page = app.db.get_page(&base)?.expect("made");
+    assert_eq!(page.kind, PageKind::Database);
+    assert_eq!(page.parent_id.as_deref(), Some(recetas.as_str()));
+    assert!(app.expanded.contains(&recetas));
+    // No card from the palette or the menu (as «Nueva subpágina»).
+    assert!(
+        app.db
+            .list_blocks(&recetas)?
+            .iter()
+            .all(|b| b.kind != BlockKind::PageLink)
+    );
+    // In a template, «/base de datos» explains why not.
+    let template = app.db.save_as_template(&recetas)?;
+    app.reload_pages()?;
+    app.open_page(template.clone())?;
+    let before = app.db.list_pages()?.len();
+    app.database_from_slash("nada")?;
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Una plantilla no puede tener bases de datos dentro.")
+    );
+    assert_eq!(app.db.list_pages()?.len(), before);
+    Ok(())
+}
+
 // ---- H7.8: page history ----
 
 #[test]
@@ -3481,6 +3565,43 @@ fn the_history_lists_versions_and_restores_one_that_cmd_z_takes_back() -> anyhow
         app.db.get_page(&page)?.map(|p| p.title),
         Some("Recetas".into())
     );
+    Ok(())
+}
+
+// ---- H12.10: comparing a version with the page now ----
+
+#[test]
+fn comparing_a_version_says_what_changed_and_follows_the_chosen_one() -> anyhow::Result<()> {
+    use egui::{Key, Modifiers as M};
+    let (mut app, page) = page_history::history_fixture()?;
+    let ctx = egui::Context::default();
+    page_history::open_fixed_history(&mut app)?;
+    app_frame(&mut app, &ctx, vec![]);
+    if let Some(history) = &mut app.page_history {
+        history.compare = true;
+    }
+    // The newest version (10 blocks, «Recetas de otoño»): the paragraph
+    // is the same block, edited; the rest is gone.
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    let summary = "Desde esta versión: 9 bloques quitados y 1 cambiado. El título también cambió.";
+    assert!(painted.iter().any(|t| t == summary), "{painted:?}");
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.contains("Solo queda la idea de la sopa."))
+    );
+    // ↓ chooses an older version and compares that one.
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    let summary = "Desde esta versión: 7 bloques quitados y 1 cambiado. El título también cambió.";
+    assert!(painted.iter().any(|t| t == summary), "{painted:?}");
+    // Comparing changes nothing; Intro still restores the version.
+    assert_eq!(app.title, "Recetas");
+    assert_eq!(app.db.page_versions(&page)?.len(), 3);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.page_history.is_none());
+    assert_eq!(app.title, "Recetas de otoño");
+    assert_eq!(app.blocks.len(), 8);
     Ok(())
 }
 
@@ -4171,6 +4292,7 @@ fn startup_and_navigation_smoke() -> anyhow::Result<()> {
                         indent: 0,
                         checked: false,
                         content: format!("Bloque {b} de la página {p}: texto de ejemplo"),
+                        marks: Vec::new(),
                     })
                     .collect();
                 let under = if p % 10 == 0 { None } else { parent.as_deref() };
@@ -4967,9 +5089,11 @@ fn the_palette_formats_the_last_block_edited() -> anyhow::Result<()> {
     use silex_desktop::palette::Command;
     let (mut app, ctx) = editor_app(&[(Par, 0, "uno dos")], 0, 0)?;
     select_text(&mut app, &ctx, 0, 0, 3);
-    // Cmd+K takes the focus away, and egui drops the selection of a field
-    // without focus: the command still formats what was selected.
-    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    // The search window takes the focus away, and egui drops the selection
+    // of a field without focus: the command still formats what was
+    // selected. (Cmd+K over a selection makes a link instead, H12.1d.)
+    app.open_search(&ctx);
+    app_frame(&mut app, &ctx, vec![]);
     app_frame(&mut app, &ctx, type_text("negr"));
     assert_eq!(block_selection(&app, &ctx, 0), Some((3, 3)));
     assert!(app.search.is_some());
@@ -4980,5 +5104,1879 @@ fn the_palette_formats_the_last_block_edited() -> anyhow::Result<()> {
     app_frame(&mut app, &ctx, vec![]);
     assert_eq!(marked_words(&app, 0), ["uno"]);
     assert_eq!(block_selection(&app, &ctx, 0), Some((0, 3)));
+    Ok(())
+}
+
+// ---- Web links (H12.1d, ADR 0015) ----
+
+fn web_link(start: usize, end: usize, url: &str) -> silex_desktop::marks::Mark {
+    silex_desktop::marks::Mark::new(start, end, silex_desktop::marks::MarkKind::Link(url.into()))
+}
+
+/// The URLs this frame asked the system to open.
+fn opened_urls(app: &mut SilexApp, ctx: &egui::Context, events: Vec<egui::Event>) -> Vec<String> {
+    app_frame_commands(app, ctx, events)
+        .iter()
+        .filter_map(|c| match c {
+            egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn url_field_focused(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.has_focus(super::web_links::url_field_id()))
+}
+
+#[test]
+fn cmd_k_over_a_selection_gives_it_a_link() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "lee la documentación")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 7, 20);
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    assert!(app.search.is_none(), "not the search window");
+    let edit = app.link_edit.as_ref().expect("link field open");
+    assert_eq!((edit.start, edit.end), (7, 20));
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(url_field_focused(&ctx));
+    app_frame(&mut app, &ctx, type_text("ejemplo.com/docs"));
+    assert_eq!(
+        app.blocks[0].content, "lee la documentación",
+        "typed in the field"
+    );
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.link_edit.is_none());
+    assert_eq!(
+        app.blocks[0].marks,
+        vec![web_link(7, 20, "https://ejemplo.com/docs")]
+    );
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(0), "focus back on the text");
+    assert_eq!(block_selection(&app, &ctx, 0), Some((7, 20)));
+    // One undo step.
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert!(app.blocks[0].marks.is_empty());
+    Ok(())
+}
+
+#[test]
+fn cmd_k_with_nothing_selected_still_opens_the_search_window() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno dos")], 0, 2)?;
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    assert!(app.search.is_some());
+    assert!(app.link_edit.is_none());
+    Ok(())
+}
+
+#[test]
+fn a_url_that_is_not_allowed_is_refused_and_esc_changes_nothing() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "pulsa aquí")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 6, 10);
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![]);
+    for url in ["javascript:alert(1)", "file:///etc/passwd"] {
+        app.link_edit.as_mut().expect("open").url = url.into();
+        app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+        let edit = app.link_edit.as_ref().expect("still open");
+        assert!(edit.error.is_some(), "{url}");
+        assert!(app.blocks[0].marks.is_empty());
+    }
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(url_field_focused(&ctx), "the field keeps the keyboard");
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.link_edit.is_none());
+    assert!(app.blocks[0].marks.is_empty());
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(block_selection(&app, &ctx, 0), Some((6, 10)));
+    Ok(())
+}
+
+#[test]
+fn an_empty_url_removes_the_link_and_the_field_starts_with_it() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "ver la web")], 0, 0)?;
+    app.blocks[0].marks = vec![bold(0, 3), web_link(4, 10, "https://a.es")];
+    app_frame(&mut app, &ctx, vec![]);
+    select_text(&mut app, &ctx, 0, 7, 10);
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    assert_eq!(
+        app.link_edit.as_ref().map(|e| e.url.as_str()),
+        Some("https://a.es")
+    );
+    app_frame(&mut app, &ctx, vec![]);
+    // Select all in the field and delete it.
+    app_frame(&mut app, &ctx, vec![key(Key::A, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    assert_eq!(app.link_edit.as_ref().map(|e| e.url.as_str()), Some(""));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(
+        app.blocks[0].marks,
+        vec![bold(0, 3), web_link(4, 7, "https://a.es")],
+        "only the selected part loses it"
+    );
+    Ok(())
+}
+
+#[test]
+fn the_menu_edits_the_link_at_the_cursor_or_links_the_whole_block() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "ver la web"), (Bul, 0, "dos")], 0, 6)?;
+    app.blocks[0].marks = vec![web_link(4, 10, "https://a.es")];
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    let first = app.blocks[0].id.clone();
+    // The cursor is in the link: that link.
+    app.block_action(BlockAction::Link, &first);
+    app_frame(&mut app, &ctx, vec![]);
+    let edit = app.link_edit.as_ref().expect("open");
+    assert_eq!(
+        (edit.start, edit.end, edit.url.as_str()),
+        (4, 10, "https://a.es")
+    );
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    // No link and nothing selected: the whole block.
+    let second = app.blocks[1].id.clone();
+    app.block_action(BlockAction::Link, &second);
+    app_frame(&mut app, &ctx, vec![]);
+    app.link_edit.as_mut().expect("open").url = "https://b.es".into();
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(app.blocks[1].marks, vec![web_link(0, 3, "https://b.es")]);
+    Ok(())
+}
+
+#[test]
+fn the_palette_links_the_last_text_selected() -> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno dos")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 4, 7);
+    app.open_search(&ctx);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(Command::Link.available(&app.palette_context()));
+    app.search = None;
+    app.run_command(&ctx, Command::Link)?;
+    app_frame(&mut app, &ctx, vec![]);
+    let edit = app.link_edit.as_ref().expect("open");
+    assert_eq!((edit.start, edit.end), (4, 7));
+    Ok(())
+}
+
+#[test]
+fn a_code_block_takes_no_link() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Cod, 0, "let x = 1;")], 0, 0)?;
+    select_text(&mut app, &ctx, 0, 0, 3);
+    app_frame(&mut app, &ctx, vec![key(Key::K, M::COMMAND)]);
+    assert!(app.link_edit.is_none());
+    assert!(app.search.is_none());
+    assert!(app.notice.as_deref().is_some_and(|n| n.contains("código")));
+    Ok(())
+}
+
+#[test]
+fn cmd_enter_opens_the_link_at_the_cursor_and_nothing_else() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "ver la web y más")], 0, 6)?;
+    app.blocks[0].marks = vec![web_link(7, 10, "https://ejemplo.com/a")];
+    app_frame(&mut app, &ctx, vec![]);
+    // Outside the link: no URL.
+    assert!(opened_urls(&mut app, &ctx, vec![key(Key::Enter, M::COMMAND)]).is_empty());
+    app.pending_focus = Some((app.blocks[0].id.clone(), 8));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    let before = app.blocks[0].content.clone();
+    assert_eq!(
+        opened_urls(&mut app, &ctx, vec![key(Key::Enter, M::COMMAND)]),
+        ["https://ejemplo.com/a"]
+    );
+    assert_eq!(app.blocks[0].content, before, "no new line");
+    assert_eq!(app.blocks.len(), 1, "no new block");
+    Ok(())
+}
+
+#[test]
+fn screen_readers_hear_the_links_of_a_block() {
+    use super::web_links::links_description;
+    assert_eq!(links_description("sin enlaces", &[bold(0, 3)]), None);
+    assert_eq!(
+        links_description("lee la guía", &[web_link(7, 11, "https://a.es")]).as_deref(),
+        Some("Enlace: guía (https://a.es)")
+    );
+    assert_eq!(
+        links_description(
+            "uno dos",
+            &[
+                web_link(0, 3, "https://a.es"),
+                web_link(4, 7, "mailto:b@c.es")
+            ]
+        )
+        .as_deref(),
+        Some("Enlaces: uno (https://a.es); dos (mailto:b@c.es)")
+    );
+}
+
+// ---- Copy and paste with formatting (H12.1e, ADR 0015) ----
+
+/// Focuses block `index` with the cursor at `char`.
+fn focus_at(app: &mut SilexApp, ctx: &egui::Context, index: usize, char: usize) {
+    app.pending_focus = Some((app.blocks[index].id.clone(), char));
+    app_frame(app, ctx, vec![]);
+    app_frame(app, ctx, vec![]);
+}
+
+#[test]
+fn text_copied_in_a_block_is_pasted_with_its_formatting() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "pan negro"), (Par, 0, "un  más")], 0, 0)?;
+    app.blocks[0].marks = vec![bold(4, 9)];
+    app.blocks[1].marks = vec![italic(0, 7)];
+    app.mark_dirty();
+    app_frame(&mut app, &ctx, vec![]);
+    // Copy «n negro»: the bold part comes along.
+    select_text(&mut app, &ctx, 0, 2, 9);
+    let commands = app_frame_commands(&mut app, &ctx, vec![egui::Event::Copy]);
+    assert!(commands.contains(&egui::OutputCommand::CopyText("n negro".into())));
+    // Pasted inside the italic text: exactly its own formatting.
+    focus_at(&mut app, &ctx, 1, 3);
+    app_frame(&mut app, &ctx, vec![paste("n negro")]);
+    assert_eq!(app.blocks[1].content, "un n negro más");
+    assert_eq!(
+        app.blocks[1].marks,
+        vec![italic(0, 3), bold(5, 10), italic(10, 14)]
+    );
+    // One undo step takes the paste away, formatting included.
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(app.blocks[1].content, "un  más");
+    assert_eq!(app.blocks[1].marks, vec![italic(0, 7)]);
+    Ok(())
+}
+
+#[test]
+fn other_text_pasted_follows_the_text_around_it() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "pan negro"), (Par, 0, "abc")], 0, 0)?;
+    app.blocks[0].marks = vec![bold(4, 9)];
+    app.blocks[1].marks = vec![bold(0, 3)];
+    app_frame(&mut app, &ctx, vec![]);
+    select_text(&mut app, &ctx, 0, 0, 3);
+    app_frame(&mut app, &ctx, vec![egui::Event::Copy]);
+    focus_at(&mut app, &ctx, 1, 1);
+    // Not what was copied: it takes the bold it is pasted into.
+    app_frame(&mut app, &ctx, vec![paste("xyz")]);
+    assert_eq!(app.blocks[1].marks, vec![bold(0, 6)]);
+    Ok(())
+}
+
+#[test]
+fn copied_lines_and_blocks_are_pasted_with_their_formatting() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[(Bul, 0, "pan negro"), (Bul, 0, "café"), (Par, 0, "")],
+        0,
+        0,
+    )?;
+    app.blocks[0].marks = vec![bold(4, 9)];
+    app.blocks[1].marks = vec![italic(0, 4)];
+    app_frame(&mut app, &ctx, vec![]);
+    // A block selection, copied.
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::SHIFT)]);
+    assert_eq!(app.selection_range(), Some((0, 1)));
+    app_frame(&mut app, &ctx, vec![egui::Event::Copy]);
+    let copied = app.clip.as_ref().map(|c| c.text.clone());
+    assert_eq!(copied.as_deref(), Some("• pan negro\n• café"));
+    // Pasted into the empty paragraph: two list items, as they were.
+    app.selection = None;
+    focus_at(&mut app, &ctx, 2, 0);
+    app_frame(&mut app, &ctx, vec![paste("• pan negro\r\n• café")]);
+    let pasted: Vec<_> = app.blocks[2..]
+        .iter()
+        .map(|b| (b.kind, b.content.as_str(), b.marks.clone()))
+        .collect();
+    assert_eq!(
+        pasted,
+        vec![
+            (Bul, "pan negro", vec![bold(4, 9)]),
+            (Bul, "café", vec![italic(0, 4)]),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn copying_elsewhere_forgets_the_formatting() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "pan negro"), (Par, 0, "abc")], 0, 0)?;
+    app.blocks[0].marks = vec![bold(0, 9)];
+    app_frame(&mut app, &ctx, vec![]);
+    select_text(&mut app, &ctx, 0, 0, 3);
+    app_frame(&mut app, &ctx, vec![egui::Event::Copy]);
+    assert!(app.clip.is_some());
+    // Copy with no text selected in a block (another field, say).
+    focus_at(&mut app, &ctx, 1, 1);
+    app_frame(&mut app, &ctx, vec![egui::Event::Copy]);
+    assert!(app.clip.is_none());
+    app_frame(&mut app, &ctx, vec![paste("pan")]);
+    assert!(app.blocks[1].marks.is_empty());
+    Ok(())
+}
+
+// ---- Divider and callout blocks (H12.2, H12.3) ----
+
+#[test]
+fn typing_three_dashes_makes_a_divider_and_one_undo_brings_them_back() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "antes"), (Par, 0, "")], 1, 0)?;
+    app_frame(&mut app, &ctx, type_text("--"));
+    assert_eq!(app.blocks[1].kind, Par, "not yet");
+    app_frame(&mut app, &ctx, type_text("-"));
+    app_frame(&mut app, &ctx, vec![]);
+    let kinds: Vec<_> = app.blocks.iter().map(|b| b.kind).collect();
+    assert_eq!(kinds, [Par, BlockKind::Divider, Par]);
+    assert_eq!(app.blocks[1].content, "");
+    assert_eq!(focused_block(&app, &ctx), Some(2), "typing goes on below");
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(contents(&app)[1], (Par, 0, "---".into()));
+    assert_eq!(app.blocks.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn slash_divider_and_the_keys_of_its_card() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno"), (Par, 0, "")], 1, 0)?;
+    app_frame(&mut app, &ctx, type_text("/separ"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let divider = app.blocks[1].id.clone();
+    assert_eq!(app.blocks[1].kind, BlockKind::Divider);
+    // ↑ from the paragraph below reaches the divider; Intro adds a
+    // paragraph below it.
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(ctx.memory(|m| m.has_focus(app.block_field_id(&divider))));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks.len(), 4);
+    assert_eq!(focused_block(&app, &ctx), Some(2));
+    // Backspace on the card deletes it.
+    ctx.memory_mut(|m| m.request_focus(app.block_field_id(&divider)));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(app.blocks.iter().all(|b| b.kind != BlockKind::Divider));
+    // Saved without text.
+    app.save_now()?;
+    let page = app.selected.clone().expect("page");
+    assert_eq!(app.db.list_blocks(&page)?.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn slash_callout_and_enter_goes_on_as_text() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+    app_frame(&mut app, &ctx, type_text("/aviso"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks[0].kind, BlockKind::Callout);
+    app_frame(&mut app, &ctx, type_text("Ojo"));
+    app_frame(&mut app, &ctx, vec![key(Key::B, M::COMMAND)]);
+    app_frame(&mut app, &ctx, type_text(" caliente"));
+    assert_eq!(marked_words(&app, 0), [" caliente"]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(contents(&app)[1], (Par, 0, String::new()));
+    app.save_now()?;
+    let page = app.selected.clone().expect("page");
+    assert_eq!(app.db.list_blocks(&page)?[0].kind, BlockKind::Callout);
+    Ok(())
+}
+
+// ---- Toggle blocks (H12.4a, ADR 0016) ----
+
+const TOG: BlockKind = BlockKind::Toggle;
+
+/// A toggle with two blocks inside, then a paragraph; the caret in `focus`.
+fn toggle_app(focus: usize, char: usize) -> anyhow::Result<(SilexApp, egui::Context)> {
+    editor_app(
+        &[
+            (TOG, 0, "Detalles"),
+            (Par, 1, "oculto uno"),
+            (Bul, 1, "oculto dos"),
+            (Par, 0, "después"),
+        ],
+        focus,
+        char,
+    )
+}
+
+#[test]
+fn folding_hides_the_content_without_touching_the_document() -> anyhow::Result<()> {
+    let (mut app, ctx) = toggle_app(3, 0)?;
+    app.save_now()?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "oculto uno"));
+    let toggle = app.blocks[0].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        !painted.iter().any(|t| t.starts_with("oculto")),
+        "{painted:?}"
+    );
+    assert!(painted.iter().any(|t| t == "después"));
+    // View state: nothing to save, nothing to undo, remembered in settings.
+    assert!(app.save.can_close());
+    assert_eq!(app.db.folded_blocks()?, Some(format!(r#"["{toggle}"]"#)));
+    app_frame(&mut app, &ctx, vec![key(Key::Z, M::COMMAND)]);
+    assert_eq!(app.blocks.len(), 4);
+    assert!(app.folds.is_folded(&toggle));
+    // Open again.
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "oculto dos"));
+    assert_eq!(app.db.folded_blocks()?, Some("[]".into()));
+    Ok(())
+}
+
+#[test]
+fn arrows_skip_what_is_folded_and_cmd_enter_folds() -> anyhow::Result<()> {
+    let (mut app, ctx) = toggle_app(0, 8)?;
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::COMMAND)]);
+    assert!(app.folds.is_folded(&app.blocks[0].id));
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(3), "past the hidden blocks");
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowUp, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(0));
+    // Folding with the cursor inside takes it to the title.
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::COMMAND)]);
+    focus_at(&mut app, &ctx, 2, 3);
+    let toggle = app.blocks[0].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(focused_block(&app, &ctx), Some(0));
+    Ok(())
+}
+
+#[test]
+fn hidden_text_is_revealed_before_it_is_found_or_merged() -> anyhow::Result<()> {
+    let (mut app, ctx) = toggle_app(3, 0)?;
+    let toggle = app.blocks[0].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    app_frame(&mut app, &ctx, vec![]);
+    // Backspace at the start of the block after it: the toggle opens,
+    // nothing merges into a hidden block.
+    app_frame(&mut app, &ctx, vec![key(Key::Backspace, M::NONE)]);
+    assert!(!app.folds.is_folded(&toggle));
+    assert_eq!(app.blocks[2].content, "oculto dos");
+    assert_eq!(app.blocks[3].content, "después");
+    // A match inside a folded toggle opens it when shown.
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    app_frame(&mut app, &ctx, vec![key(Key::F, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("oculto"));
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(!app.folds.is_folded(&toggle));
+    Ok(())
+}
+
+#[test]
+fn enter_in_an_open_toggle_writes_inside_it() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+    app_frame(&mut app, &ctx, type_text("/despleg"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, type_text("Pasos"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, type_text("primero"));
+    assert_eq!(
+        contents(&app),
+        [(TOG, 0, "Pasos".into()), (Par, 1, "primero".into())]
+    );
+    // Folded, Enter goes after it.
+    let toggle = app.blocks[0].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    focus_at(&mut app, &ctx, 0, 5);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(contents(&app)[2], (Par, 0, String::new()));
+    assert_eq!(focused_block(&app, &ctx), Some(2));
+    Ok(())
+}
+
+#[test]
+fn an_empty_toggle_offers_to_write_inside_it() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(TOG, 0, "Vacío"), (Par, 0, "fuera")], 1, 0)?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t == "Desplegable vacío: haz clic para escribir dentro")
+    );
+    app.add_inside_toggle(0);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(contents(&app)[1], (Par, 1, String::new()));
+    assert_eq!(focused_block(&app, &ctx), Some(1));
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(!painted.iter().any(|t| t.starts_with("Desplegable vacío")));
+    Ok(())
+}
+
+// ---- Toggles with their content (H12.4b, ADR 0016) ----
+
+fn ids_and_indents(app: &SilexApp) -> Vec<(String, u8)> {
+    app.blocks
+        .iter()
+        .map(|b| (b.content.clone(), b.indent))
+        .collect()
+}
+
+#[test]
+fn deleting_a_folded_toggle_takes_its_content_and_undo_brings_it_back() -> anyhow::Result<()> {
+    let (mut app, ctx) = toggle_app(3, 0)?;
+    let toggle = app.blocks[0].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    app_frame(&mut app, &ctx, vec![]);
+    app.block_action(BlockAction::Delete, &toggle);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(contents(&app), [(Par, 0, "después".into())]);
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("3 bloque"))
+    );
+    app.undo();
+    assert_eq!(app.blocks.len(), 4);
+    assert_eq!(app.blocks[1].content, "oculto uno");
+    Ok(())
+}
+
+#[test]
+fn duplicating_a_toggle_copies_its_content_open() -> anyhow::Result<()> {
+    let (mut app, ctx) = toggle_app(0, 0)?;
+    let toggle = app.blocks[0].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    app_frame(&mut app, &ctx, vec![key(Key::D, M::COMMAND)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let got = ids_and_indents(&app);
+    assert_eq!(got.len(), 7);
+    assert_eq!(got[3..6], got[0..3], "the copy, content included");
+    assert_eq!(focused_block(&app, &ctx), Some(3));
+    assert!(
+        !app.folds.is_folded(&app.blocks[3].id),
+        "a copy starts open"
+    );
+    Ok(())
+}
+
+#[test]
+fn moving_passes_a_toggle_whole_and_moves_it_with_its_content() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (Par, 0, "arriba"),
+            (TOG, 0, "Detalles"),
+            (Par, 1, "dentro"),
+            (Par, 0, "abajo"),
+        ],
+        0,
+        0,
+    )?;
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::ALT | M::SHIFT)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let order: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(order, ["Detalles", "dentro", "arriba", "abajo"]);
+    assert_eq!(focused_block(&app, &ctx), Some(2));
+    // The toggle itself, down past «arriba» and «abajo», one step each.
+    focus_at(&mut app, &ctx, 0, 0);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::ALT | M::SHIFT)]);
+    app_frame(&mut app, &ctx, vec![]);
+    let order: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(order, ["arriba", "Detalles", "dentro", "abajo"]);
+    // One undo step each.
+    app.undo();
+    let order: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(order, ["Detalles", "dentro", "arriba", "abajo"]);
+    Ok(())
+}
+
+#[test]
+fn tab_on_a_toggle_indents_its_content_too() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[(Par, 0, "antes"), (TOG, 0, "Detalles"), (Par, 1, "dentro")],
+        1,
+        0,
+    )?;
+    app_frame(&mut app, &ctx, vec![key(Key::Tab, M::NONE)]);
+    let indents: Vec<u8> = app.blocks.iter().map(|b| b.indent).collect();
+    assert_eq!(indents, [0, 1, 2]);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Tab, M::SHIFT)]);
+    let indents: Vec<u8> = app.blocks.iter().map(|b| b.indent).collect();
+    assert_eq!(indents, [0, 0, 1]);
+    Ok(())
+}
+
+#[test]
+fn a_selected_toggle_is_copied_and_pasted_with_its_content() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (TOG, 0, "Detalles"),
+            (Par, 1, "dentro"),
+            (Bul, 1, "punto"),
+            (Par, 0, ""),
+        ],
+        0,
+        0,
+    )?;
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        app.selection_range(),
+        Some((0, 2)),
+        "its content is selected too"
+    );
+    app_frame(&mut app, &ctx, vec![egui::Event::Copy]);
+    let copied = app
+        .clip
+        .as_ref()
+        .map(|c| c.text.clone())
+        .unwrap_or_default();
+    assert_eq!(copied, "▸ Detalles\n  dentro\n  • punto");
+    app.selection = None;
+    focus_at(&mut app, &ctx, 3, 0);
+    app_frame(&mut app, &ctx, vec![paste(&copied)]);
+    assert_eq!(
+        contents(&app)[3..],
+        [
+            (TOG, 0, "Detalles".into()),
+            (Par, 1, "dentro".into()),
+            (Bul, 1, "punto".into()),
+        ]
+    );
+    Ok(())
+}
+
+// ---- Outline (H12.5) ----
+
+const H1: BlockKind = BlockKind::Heading1;
+const H2: BlockKind = BlockKind::Heading2;
+
+#[test]
+fn the_outline_shows_and_hides_and_is_remembered() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (H1, 0, "Introducción"),
+            (Par, 0, "texto"),
+            (H2, 0, "Detalles"),
+        ],
+        1,
+        0,
+    )?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(!painted.iter().any(|t| t == "En esta página"));
+    app.run_command(&ctx, silex_desktop::palette::Command::ToggleOutline)?;
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(painted.iter().any(|t| t == "En esta página"), "{painted:?}");
+    assert!(
+        painted.iter().filter(|t| *t == "Detalles").count() >= 2,
+        "page and outline"
+    );
+    assert!(app.db.load_settings()?.outline, "saved");
+    // Not a document change.
+    assert!(app.save.can_close());
+    app.toggle_outline(&ctx);
+    let painted = app_frame(&mut app, &ctx, vec![]);
+    assert!(!painted.iter().any(|t| t == "En esta página"));
+    assert!(!app.db.load_settings()?.outline);
+    Ok(())
+}
+
+#[test]
+fn going_to_a_heading_opens_what_hides_it_and_focuses_it() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (H1, 0, "Arriba"),
+            (TOG, 0, "Plegado"),
+            (H2, 1, "Escondido"),
+            (Par, 0, "abajo"),
+        ],
+        3,
+        0,
+    )?;
+    let toggle = app.blocks[1].id.clone();
+    app.block_action(BlockAction::ToggleFold, &toggle);
+    app.settings.outline = true;
+    app_frame(&mut app, &ctx, vec![]);
+    let heading = app.blocks[2].id.clone();
+    app.go_to_heading(&heading);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(!app.folds.is_folded(&toggle), "the toggle opened");
+    assert_eq!(focused_block(&app, &ctx), Some(2));
+    assert_eq!(caret_char(&app), Some(9), "at the end of the heading");
+    // The page is short and the heading cannot reach the top: as chosen,
+    // it is the one marked anyway.
+    assert_eq!(app.outline_current.as_deref(), Some(heading.as_str()));
+    Ok(())
+}
+
+// ---- Moving blocks to another page (H12.6a, ADR 0017) ----
+
+/// A second page, «Destino», with one block.
+fn add_destination(app: &mut SilexApp) -> anyhow::Result<String> {
+    let dest = app.db.create_page("Destino", None)?;
+    let id = app.db.add_block(&dest, Par)?;
+    let mut blocks = app.db.list_blocks(&dest)?;
+    blocks[0].content = "ya estaba".into();
+    assert_eq!(blocks[0].id, id);
+    app.db.save_document(&dest, "Destino", &blocks)?;
+    app.reload_pages()?;
+    Ok(dest)
+}
+
+fn stored_texts(app: &SilexApp, page: &str) -> anyhow::Result<Vec<String>> {
+    Ok(app
+        .db
+        .list_blocks(page)?
+        .into_iter()
+        .map(|b| b.content)
+        .collect())
+}
+
+#[test]
+fn a_block_moves_with_the_picker_and_undo_and_redo_follow_it() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno"), (Par, 0, "dos"), (Par, 0, "tres")], 0, 0)?;
+    let origin = app.selected.clone().expect("page");
+    let dest = add_destination(&mut app)?;
+    let second = app.blocks[1].id.clone();
+    app.block_action(BlockAction::MoveTo, &second);
+    assert_eq!(
+        app.links.picker.as_ref().and_then(|p| p.moving.clone()),
+        Some(vec![second.clone()])
+    );
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("dest"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.links.picker.is_none());
+    let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(texts, ["uno", "tres"]);
+    assert_eq!(stored_texts(&app, &origin)?, ["uno", "tres"]);
+    assert_eq!(
+        stored_texts(&app, &dest)?,
+        ["ya estaba", "dos"],
+        "at the end"
+    );
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Se movió 1 bloque a «Destino»")),
+        "{:?}",
+        app.notice
+    );
+    // Cmd+Z brings it back, out of the other page.
+    app.undo();
+    let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(texts, ["uno", "dos", "tres"]);
+    assert_eq!(stored_texts(&app, &origin)?, ["uno", "dos", "tres"]);
+    assert_eq!(stored_texts(&app, &dest)?, ["ya estaba"]);
+    assert_eq!(app.blocks[1].id, second, "the same block");
+    // Cmd+Mayús+Z sends it again.
+    app.redo();
+    assert_eq!(stored_texts(&app, &origin)?, ["uno", "tres"]);
+    assert_eq!(stored_texts(&app, &dest)?, ["ya estaba", "dos"]);
+    Ok(())
+}
+
+#[test]
+fn undo_brings_the_blocks_back_with_what_was_written_in_them_there() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno"), (Par, 0, "dos")], 0, 0)?;
+    let origin = app.selected.clone().expect("page");
+    let dest = add_destination(&mut app)?;
+    let page = app.find_page(&dest).cloned().expect("dest");
+    let ids = vec![app.blocks[1].id.clone()];
+    app.move_blocks_to(&ids, &page)?;
+    // Written in the other page, in its own tab.
+    app.open_in_new_tab(&dest)?;
+    app_frame(&mut app, &ctx, vec![]);
+    let moved = app
+        .blocks
+        .iter()
+        .position(|b| b.id == ids[0])
+        .expect("moved");
+    app.blocks[moved].content = "dos, editado allí".into();
+    app.mark_dirty();
+    assert!(app.history.can_undo());
+    app.save_now()?;
+    // Back to the first tab: undo brings it with the edit.
+    app.select_tab(0)?;
+    app_frame(&mut app, &ctx, vec![]);
+    app.undo();
+    assert_eq!(stored_texts(&app, &origin)?, ["uno", "dos, editado allí"]);
+    assert_eq!(stored_texts(&app, &dest)?, ["ya estaba"]);
+    // The other page's undo no longer matches it: it is gone.
+    app.select_tab(1)?;
+    app_frame(&mut app, &ctx, vec![]);
+    assert!(!app.history.can_undo());
+    Ok(())
+}
+
+#[test]
+fn a_selected_toggle_moves_with_its_content_and_databases_are_not_offered() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (Par, 0, "antes"),
+            (TOG, 0, "Detalles"),
+            (Par, 1, "dentro"),
+            (Par, 0, "después"),
+        ],
+        1,
+        0,
+    )?;
+    let dest = add_destination(&mut app)?;
+    app.db.create_database("Tabla destino", None)?;
+    app.reload_pages()?;
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    let toggle = app.blocks[1].id.clone();
+    app.block_action(BlockAction::MoveTo, &toggle);
+    assert_eq!(
+        app.links
+            .picker
+            .as_ref()
+            .and_then(|p| p.moving.as_ref())
+            .map(Vec::len),
+        Some(2),
+        "the toggle and what it holds"
+    );
+    // A database is not a place for blocks.
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("tabla"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.links.picker.is_some(), "nothing to choose");
+    if let Some(picker) = app.links.picker.as_mut() {
+        picker.query = "destino".into();
+    }
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(texts, ["antes", "después"]);
+    let moved: Vec<(String, u8)> = app
+        .db
+        .list_blocks(&dest)?
+        .into_iter()
+        .map(|b| (b.content, b.indent))
+        .collect();
+    assert_eq!(
+        moved,
+        [
+            ("ya estaba".into(), 0),
+            ("Detalles".into(), 0),
+            ("dentro".into(), 1)
+        ]
+    );
+    Ok(())
+}
+
+// ---- Converting blocks into a subpage (H12.6b, ADR 0017) ----
+
+/// The live subpages of the open page.
+fn subpages(app: &SilexApp) -> Vec<Page> {
+    let open = app.selected.clone().unwrap_or_default();
+    app.pages
+        .iter()
+        .filter(|p| p.parent_id.as_deref() == Some(open.as_str()))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn blocks_become_an_untitled_subpage_and_undo_takes_them_back() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(
+        &[
+            (H2, 0, "Receta de pan"),
+            (Par, 0, "harina"),
+            (Par, 1, "agua"),
+            (Par, 0, "fuera"),
+        ],
+        0,
+        0,
+    )?;
+    let origin = app.selected.clone().expect("page");
+    let heading = app.blocks[0].id.clone();
+    // The first three, selected.
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::SHIFT)]);
+    app_frame(&mut app, &ctx, vec![key(Key::ArrowDown, M::SHIFT)]);
+    assert_eq!(app.selection_range(), Some((0, 2)));
+    app.block_action(BlockAction::ToSubpage, &heading);
+    app_frame(&mut app, &ctx, vec![]);
+    let pages = subpages(&app);
+    assert_eq!(pages.len(), 1);
+    assert_eq!(
+        pages[0].title, "Sin título",
+        "a plain title, like any new page"
+    );
+    let sub = pages[0].id.clone();
+    let inside: Vec<(BlockKind, String, u8)> = app
+        .db
+        .list_blocks(&sub)?
+        .into_iter()
+        .map(|b| (b.kind, b.content, b.indent))
+        .collect();
+    assert_eq!(
+        inside,
+        [
+            (H2, "Receta de pan".into(), 0),
+            (Par, "harina".into(), 0),
+            (Par, "agua".into(), 1),
+        ],
+        "every block, the first one too"
+    );
+    // A link in their place.
+    assert_eq!(app.blocks.len(), 2);
+    assert_eq!(app.blocks[0].kind, BlockKind::PageLink);
+    assert_eq!(app.blocks[0].link.as_deref(), Some(sub.as_str()));
+    assert_eq!(app.blocks[1].content, "fuera");
+    assert_eq!(focused_block(&app, &ctx), Some(0));
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Se pasaron 3 bloques")),
+        "{:?}",
+        app.notice
+    );
+    // Undo: the blocks come back, and the empty subpage goes to the trash.
+    app.undo();
+    assert_eq!(
+        contents(&app),
+        [
+            (H2, 0, "Receta de pan".into()),
+            (Par, 0, "harina".into()),
+            (Par, 1, "agua".into()),
+            (Par, 0, "fuera".into()),
+        ]
+    );
+    assert!(subpages(&app).is_empty());
+    assert!(app.db.list_trash()?.iter().any(|t| t.page.id == sub));
+    assert_eq!(stored_texts(&app, &origin)?.len(), 4);
+    // Redo: back from the trash, with its blocks.
+    app.redo();
+    assert_eq!(subpages(&app).len(), 1);
+    assert_eq!(stored_texts(&app, &sub)?.len(), 3);
+    assert_eq!(app.blocks[0].kind, BlockKind::PageLink);
+    Ok(())
+}
+
+#[test]
+fn a_toggle_becomes_a_subpage_with_it_and_a_used_subpage_stays() -> anyhow::Result<()> {
+    let (mut app, _ctx) = editor_app(
+        &[
+            (TOG, 1, "Notas"),
+            (Par, 2, "una"),
+            (Bul, 3, "dos"),
+            (Par, 0, "fuera"),
+        ],
+        3,
+        0,
+    )?;
+    app.convert_to_subpage(0, 0)?;
+    let sub = subpages(&app)[0].clone();
+    let inside: Vec<(String, u8)> = app
+        .db
+        .list_blocks(&sub.id)?
+        .into_iter()
+        .map(|b| (b.content, b.indent))
+        .collect();
+    assert_eq!(
+        inside,
+        [("Notas".into(), 0), ("una".into(), 1), ("dos".into(), 2)],
+        "the toggle with its content, from the left edge"
+    );
+    assert_eq!(app.blocks[0].indent, 1, "the link where the toggle was");
+    // Something new is written in the subpage: undo brings the blocks
+    // back but leaves the page, which is not empty.
+    let mut blocks = app.db.list_blocks(&sub.id)?;
+    let mut extra = blocks[0].clone();
+    extra.id = "nuevo".into();
+    extra.kind = Par;
+    extra.content = "escrito después".into();
+    blocks.push(extra);
+    app.db.save_document(&sub.id, &sub.title, &blocks)?;
+    app.undo();
+    assert_eq!(app.blocks.len(), 4);
+    assert_eq!(subpages(&app).len(), 1, "kept, not empty");
+    assert_eq!(stored_texts(&app, &sub.id)?, ["escrito después"]);
+    Ok(())
+}
+
+// ---- Pasting Markdown and copying a page as Markdown (H12.7) ----
+
+#[test]
+fn pasted_markdown_becomes_blocks_in_one_undo_step() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "antes"), (Par, 0, "")], 1, 0)?;
+    app.mark_dirty();
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![paste(
+            "# Receta\n\n- harina **fuerte**\n- [x] agua\n\n> Ojo con el horno",
+        )],
+    );
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        contents(&app),
+        [
+            (Par, 0, "antes".into()),
+            (H1, 0, "Receta".into()),
+            (Bul, 0, "harina fuerte".into()),
+            (BlockKind::Todo, 0, "agua".into()),
+            (BlockKind::Quote, 0, "Ojo con el horno".into()),
+        ]
+    );
+    assert_eq!(marked_words(&app, 2), ["fuerte"]);
+    assert!(app.blocks[3].checked);
+    app.undo();
+    assert_eq!(
+        contents(&app),
+        [(Par, 0, "antes".into()), (Par, 0, String::new())]
+    );
+    Ok(())
+}
+
+#[test]
+fn plain_lines_are_still_pasted_line_by_line() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+    app_frame(&mut app, &ctx, vec![paste("uno\ndos")]);
+    let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(texts, ["uno", "dos"]);
+    Ok(())
+}
+
+#[test]
+fn one_line_of_markdown_is_pasted_with_its_formatting() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "Dice: ")], 0, 6)?;
+    app_frame(
+        &mut app,
+        &ctx,
+        vec![paste("**hola** y [web](https://a.es)")],
+    );
+    assert_eq!(app.blocks[0].content, "Dice: hola y web");
+    let marked: Vec<(String, bool)> = app.blocks[0]
+        .marks
+        .iter()
+        .map(|m| {
+            let text: String = app.blocks[0]
+                .content
+                .chars()
+                .skip(m.start)
+                .take(m.end - m.start)
+                .collect();
+            (text, m.url().is_some())
+        })
+        .collect();
+    assert_eq!(marked, [("hola".into(), false), ("web".into(), true)]);
+    // A heading on one line is pasted as typed.
+    app_frame(&mut app, &ctx, vec![paste(" # no")]);
+    assert!(app.blocks[0].content.ends_with(" # no"));
+    Ok(())
+}
+
+#[test]
+fn cmd_shift_v_pastes_plain_text() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "")], 0, 0)?;
+    // The system answers the request with a paste next frame.
+    app_frame(&mut app, &ctx, vec![key(Key::V, M::COMMAND | M::SHIFT)]);
+    app_frame(&mut app, &ctx, vec![paste("# Título\n- **uno**")]);
+    let texts: Vec<String> = app.blocks.iter().map(|b| b.content.clone()).collect();
+    assert_eq!(texts, ["# Título", "- **uno**"]);
+    assert!(
+        app.blocks
+            .iter()
+            .all(|b| b.kind == Par && b.marks.is_empty())
+    );
+    // One line, inside bold: no formatting either.
+    app.blocks[1].marks = vec![bold(0, 9)];
+    app.pending_focus = Some((app.blocks[1].id.clone(), 4));
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![key(Key::V, M::COMMAND | M::SHIFT)]);
+    app_frame(&mut app, &ctx, vec![paste("**x**")]);
+    assert_eq!(app.blocks[1].content, "- ****x**uno**", "inserted as typed");
+    assert_eq!(app.blocks[1].marks, vec![bold(0, 4), bold(9, 14)]);
+    // The next paste is not plain any more.
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![paste("**y**")]);
+    assert!(app.blocks[1].content.contains('y'));
+    assert!(!app.blocks[1].content.contains("**y**"));
+    Ok(())
+}
+
+#[test]
+fn copy_as_markdown_puts_the_page_on_the_clipboard() -> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let (mut app, ctx) = editor_app(&[(H2, 0, "Sección"), (Bul, 0, "punto")], 1, 0)?;
+    app.blocks[1].marks = vec![bold(0, 5)];
+    app.title = "Mi página".into();
+    app.run_command(&ctx, Command::CopyMarkdown)?;
+    let commands = app_frame_commands(&mut app, &ctx, vec![]);
+    let copied: Vec<String> = commands
+        .iter()
+        .filter_map(|c| match c {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(copied, ["# Mi página\n\n## Sección\n\n- **punto**\n"]);
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Markdown"))
+    );
+    Ok(())
+}
+
+// ---- Page icons (H12.8) ----
+
+#[test]
+fn the_icon_picker_sets_pastes_and_removes_the_icon() -> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let (mut app, ctx) = editor_app(&[(Par, 0, "texto")], 0, 0)?;
+    let page = app.selected.clone().expect("page");
+    app.run_command(&ctx, Command::PageIcon)?;
+    assert!(app.icon_picker.is_some());
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("trigo"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.icon_picker.is_none());
+    assert_eq!(app.page_icons.get(&page).map(String::as_str), Some("🌾"));
+    assert_eq!(
+        app.db.page_icons()?.get(&page).map(String::as_str),
+        Some("🌾")
+    );
+    assert!(app.save.can_close(), "not an edit of the document");
+    // Any emoji can be pasted; text that is not one gives nothing.
+    app.open_icon_picker(&page);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, vec![paste("🦀")]);
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert_eq!(app.page_icons.get(&page).map(String::as_str), Some("🦀"));
+    app.open_icon_picker(&page);
+    app_frame(&mut app, &ctx, vec![]);
+    app_frame(&mut app, &ctx, type_text("zzz"));
+    app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
+    assert!(app.icon_picker.is_some(), "nothing to choose");
+    assert_eq!(app.page_icons.get(&page).map(String::as_str), Some("🦀"));
+    app_frame(&mut app, &ctx, vec![key(Key::Escape, M::NONE)]);
+    assert!(app.icon_picker.is_none());
+    // Removed: back to no icon.
+    app.set_page_icon(&page, None)?;
+    assert!(app.db.page_icons()?.is_empty());
+    Ok(())
+}
+
+// ---- Page icons in Markdown (H12.8b) ----
+
+#[test]
+fn an_imported_page_gets_the_icon_of_its_title_and_copies_it_back() -> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let tmp = TempFolder::new("silex-icon-import")?;
+    let file = tmp.0.join("pan.md");
+    std::fs::write(&file, "# 🍞 Pan casero\n\nharina\n")?;
+    let mut app = SilexApp::new(Database::open_in_memory()?)?;
+    let ctx = egui::Context::default();
+    drop_frame(&mut app, &ctx, &[file]);
+    let start = std::time::Instant::now();
+    while app.import_job.is_some() && start.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app_frame(&mut app, &ctx, vec![]);
+    }
+    assert_eq!(app.title, "Pan casero");
+    let page = app.selected.clone().expect("open");
+    assert_eq!(app.page_icons.get(&page).map(String::as_str), Some("🍞"));
+    app.run_command(&ctx, Command::CopyMarkdown)?;
+    let copied: Vec<String> = app_frame_commands(&mut app, &ctx, vec![])
+        .iter()
+        .filter_map(|c| match c {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(copied, ["# 🍞 Pan casero\n\nharina\n"]);
+    Ok(())
+}
+
+// ---- Daily notes (H12.9) ----
+
+#[test]
+fn cmd_shift_d_opens_todays_note_making_it_once() -> anyhow::Result<()> {
+    let (mut app, ctx) = editor_app(&[(Par, 0, "uno")], 0, 0)?;
+    let today = app.db.local_today()?;
+    let pages_before = app.pages.len();
+    app_frame(&mut app, &ctx, vec![key(Key::D, M::COMMAND | M::SHIFT)]);
+    assert_eq!(app.title, today, "today's note is open");
+    let day = app.selected.clone().expect("day");
+    assert_eq!(
+        app.pages.len(),
+        pages_before + 3,
+        "Diario, the month and the day"
+    );
+    let (root, _) = app.db.journal_settings()?;
+    let root = root.expect("journal remembered");
+    assert!(app.expanded.contains(&root), "in sight in the sidebar");
+    // Again: the same note, nothing new; Cmd+D did not duplicate a block.
+    app.open_page(app.pages[0].id.clone())?;
+    app_frame(&mut app, &ctx, vec![key(Key::D, M::COMMAND | M::SHIFT)]);
+    assert_eq!(app.selected.as_deref(), Some(day.as_str()));
+    assert_eq!(app.pages.len(), pages_before + 3);
+    Ok(())
+}
+
+#[test]
+fn todays_note_comes_from_the_journal_template() -> anyhow::Result<()> {
+    use silex_desktop::palette::Command;
+    let (mut app, ctx) = editor_app(&[(H2, 0, "Hoy es {{fecha}}")], 0, 0)?;
+    let model = app.selected.clone().expect("page");
+    app.save_now()?;
+    let template = app.db.save_as_template(&model)?;
+    app.db.set_journal_template(Some(&template))?;
+    app.run_command(&ctx, Command::OpenToday)?;
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(app.blocks.len(), 1);
+    assert_eq!(app.blocks[0].kind, H2);
+    assert!(!app.blocks[0].content.contains("{{fecha}}"));
+    Ok(())
+}
+
+// ---- H13.1: rows and cards in their manual order ----
+
+/// A table with rows A, B, C and D, open in a window of the default size.
+fn rows_app() -> anyhow::Result<(SilexApp, egui::Context, String, Vec<String>)> {
+    let (mut app, ctx, base) = database_app()?;
+    let rows = ["A", "B", "C", "D"]
+        .into_iter()
+        .map(|title| app.db.create_row(&base, title))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    app.reload_pages()?;
+    app.open_page(base.clone())?;
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, base, rows))
+}
+
+fn stored_titles(app: &SilexApp, base: &str) -> anyhow::Result<Vec<String>> {
+    Ok(app
+        .db
+        .database_rows(base)?
+        .into_iter()
+        .map(|p| p.title)
+        .collect())
+}
+
+fn row_rect(ctx: &egui::Context, row: &str) -> egui::Rect {
+    ctx.read_response(database::row_name_id(row))
+        .map(|r| r.rect)
+        .unwrap_or_else(|| panic!("row {row} drawn"))
+}
+
+/// Points at a row so its handle shows, and returns where the handle is.
+fn row_handle_at(app: &mut SilexApp, ctx: &egui::Context, row: &str) -> egui::Pos2 {
+    // Rects are read one frame late.
+    sized_frame(app, ctx, vec![]);
+    let name = row_rect(ctx, row);
+    sized_frame(app, ctx, vec![egui::Event::PointerMoved(name.center())]);
+    sized_frame(app, ctx, vec![]);
+    ctx.read_response(egui::Id::unique(("silex-row-handle", row)))
+        .map(|r| r.rect.center())
+        .unwrap_or_else(|| panic!("handle of {row} drawn"))
+}
+
+#[test]
+fn a_row_dragged_by_its_handle_moves_and_one_undo_puts_it_back() -> anyhow::Result<()> {
+    let (mut app, ctx, base, rows) = rows_app()?;
+    let handle = row_handle_at(&mut app, &ctx, &rows[0]);
+    // In the gutter, left of the row.
+    assert!(handle.x < row_rect(&ctx, &rows[0]).left());
+    // A, let go just above the line between C and D.
+    let to = egui::pos2(
+        row_rect(&ctx, &rows[2]).center().x,
+        row_rect(&ctx, &rows[2]).bottom() - 3.0,
+    );
+    drag(&mut app, &ctx, handle, to);
+    assert_eq!(shown_titles(&app), ["B", "C", "A", "D"]);
+    assert_eq!(stored_titles(&app, &base)?, ["B", "C", "A", "D"]);
+    // One step of Cmd+Z, and back again.
+    app.undo_table();
+    assert_eq!(shown_titles(&app), ["A", "B", "C", "D"]);
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    app.redo_table();
+    assert_eq!(stored_titles(&app, &base)?, ["B", "C", "A", "D"]);
+    // To the top: above the first row.
+    sized_frame(&mut app, &ctx, vec![]);
+    let handle = row_handle_at(&mut app, &ctx, &rows[3]);
+    let to = row_rect(&ctx, &rows[1]).left_top() + egui::vec2(20.0, 2.0);
+    drag(&mut app, &ctx, handle, to);
+    assert_eq!(stored_titles(&app, &base)?, ["D", "B", "C", "A"]);
+    Ok(())
+}
+
+#[test]
+fn esc_or_letting_go_in_place_moves_nothing() -> anyhow::Result<()> {
+    let (mut app, ctx, base, rows) = rows_app()?;
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let handle = row_handle_at(&mut app, &ctx, &rows[0]);
+    let to = row_rect(&ctx, &rows[3]).center();
+    sized_frame(&mut app, &ctx, vec![button(handle, true)]);
+    sized_frame(
+        &mut app,
+        &ctx,
+        vec![egui::Event::PointerMoved(handle + egui::vec2(0.0, 24.0))],
+    );
+    sized_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(to)]);
+    assert!(egui::DragAndDrop::has_payload_of_type::<RowDrag>(&ctx));
+    sized_frame(
+        &mut app,
+        &ctx,
+        vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+    );
+    sized_frame(&mut app, &ctx, vec![button(to, false)]);
+    sized_frame(&mut app, &ctx, vec![]);
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    // Let go on its own place: nothing to undo.
+    let handle = row_handle_at(&mut app, &ctx, &rows[1]);
+    drag(&mut app, &ctx, handle, row_rect(&ctx, &rows[1]).center());
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    assert!(app.database.as_ref().is_some_and(|d| !d.history.can_undo()));
+    Ok(())
+}
+
+#[test]
+fn chosen_rows_are_dragged_together() -> anyhow::Result<()> {
+    let (mut app, ctx, base, rows) = rows_app()?;
+    if let Some(state) = app.database.as_mut() {
+        state.selection.extend([rows[0].clone(), rows[2].clone()]);
+    }
+    sized_frame(&mut app, &ctx, vec![]);
+    let handle = row_handle_at(&mut app, &ctx, &rows[2]);
+    let to = row_rect(&ctx, &rows[3]).center() + egui::vec2(0.0, 15.0);
+    drag(&mut app, &ctx, handle, to);
+    assert_eq!(stored_titles(&app, &base)?, ["B", "D", "A", "C"]);
+    // They stay chosen; one undo puts both back.
+    assert_eq!(app.database.as_ref().map(|d| d.selection.len()), Some(2));
+    app.undo_table();
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    Ok(())
+}
+
+#[test]
+fn rows_hidden_by_a_filter_keep_their_place() -> anyhow::Result<()> {
+    use silex_desktop::view::{Filter, FilterOp, NAME};
+    let (mut app, ctx, base, rows) = rows_app()?;
+    // B is hidden.
+    change_view(&mut app, |c| {
+        c.filters.push(Filter {
+            property: NAME.into(),
+            op: FilterOp::NotContains,
+            value: "B".into(),
+        });
+    });
+    sized_frame(&mut app, &ctx, vec![]);
+    assert_eq!(shown_titles(&app), ["A", "C", "D"]);
+    let handle = row_handle_at(&mut app, &ctx, &rows[3]);
+    let to = row_rect(&ctx, &rows[2]).left_top() + egui::vec2(20.0, 2.0);
+    drag(&mut app, &ctx, handle, to);
+    assert_eq!(shown_titles(&app), ["A", "D", "C"]);
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "D", "C"]);
+    Ok(())
+}
+
+#[test]
+fn a_sorted_view_says_why_rows_stay() -> anyhow::Result<()> {
+    use silex_desktop::view::{Direction, NAME, Sort};
+    let (mut app, ctx, base, rows) = rows_app()?;
+    change_view(&mut app, |c| {
+        c.sorts.push(Sort {
+            property: NAME.into(),
+            direction: Direction::Descending,
+        });
+    });
+    sized_frame(&mut app, &ctx, vec![]);
+    assert_eq!(shown_titles(&app), ["D", "C", "B", "A"]);
+    // The handle cannot be dragged; a click explains.
+    let handle = row_handle_at(&mut app, &ctx, &rows[0]);
+    drag(&mut app, &ctx, handle, row_rect(&ctx, &rows[3]).center());
+    assert!(!egui::DragAndDrop::has_any_payload(&ctx));
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    let handle = row_handle_at(&mut app, &ctx, &rows[0]);
+    let button = |pressed| egui::Event::PointerButton {
+        pos: handle,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    sized_frame(&mut app, &ctx, vec![button(true)]);
+    sized_frame(&mut app, &ctx, vec![button(false)]);
+    sized_frame(&mut app, &ctx, vec![]);
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(notice.contains("ordenada por «Nombre»"), "{notice}");
+    // «Subir» in the row's menu says the same.
+    app.notice = None;
+    app.apply_table_action(
+        &base,
+        TableAction::Row(RowAction::Reorder(rows[1].clone(), Shift::Up)),
+    )?;
+    assert!(app.notice.is_some());
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    Ok(())
+}
+
+#[test]
+fn up_and_down_in_a_row_menu_follow_the_view_and_undo() -> anyhow::Result<()> {
+    use silex_desktop::view::{Filter, FilterOp, NAME};
+    let (mut app, _ctx, base, rows) = rows_app()?;
+    app.apply_table_action(
+        &base,
+        TableAction::Row(RowAction::Reorder(rows[2].clone(), Shift::Up)),
+    )?;
+    assert_eq!(shown_titles(&app), ["A", "C", "B", "D"]);
+    // At the edge, nothing.
+    app.apply_table_action(
+        &base,
+        TableAction::Row(RowAction::Reorder(rows[3].clone(), Shift::Down)),
+    )?;
+    assert_eq!(stored_titles(&app, &base)?, ["A", "C", "B", "D"]);
+    // With B hidden, «Bajar» on C passes D, the next one on show.
+    change_view(&mut app, |c| {
+        c.filters.push(Filter {
+            property: NAME.into(),
+            op: FilterOp::NotContains,
+            value: "B".into(),
+        });
+    });
+    app.apply_table_action(
+        &base,
+        TableAction::Row(RowAction::Reorder(rows[2].clone(), Shift::Down)),
+    )?;
+    assert_eq!(shown_titles(&app), ["A", "D", "C"]);
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "D", "C"]);
+    app.undo_table();
+    assert_eq!(stored_titles(&app, &base)?, ["A", "C", "B", "D"]);
+    app.undo_table();
+    assert_eq!(stored_titles(&app, &base)?, ["A", "B", "C", "D"]);
+    Ok(())
+}
+
+#[test]
+fn a_card_dropped_within_its_column_changes_place() -> anyhow::Result<()> {
+    let (mut app, ctx, rows, [estado, leyendo, _]) = board_app()?;
+    let base = app.selected.clone().unwrap_or_default();
+    // Bestiario, also Leyendo: under Rayuela.
+    let bestiario = app.db.create_row(&base, "Bestiario")?;
+    app.db.set_value(
+        &bestiario,
+        &estado,
+        Some(&CellValue::Select(leyendo.clone())),
+    )?;
+    app.open_page(base.clone())?;
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    let (rayuela, card) = (card_rect(&ctx, &rows[0]), card_rect(&ctx, &bestiario));
+    assert!(card.top() > rayuela.bottom());
+    // Above Rayuela.
+    drag(
+        &mut app,
+        &ctx,
+        card.center(),
+        rayuela.center_top() + egui::vec2(0.0, 4.0),
+    );
+    assert_eq!(
+        stored_titles(&app, &base)?,
+        ["Bestiario", "Rayuela", "Ficciones", "Aleph"]
+    );
+    // Still Leyendo.
+    assert_eq!(
+        stored(&app, &bestiario, &estado)?,
+        Some(CellValue::Select(leyendo.clone()))
+    );
+    sized_frame(&mut app, &ctx, vec![]);
+    assert!(card_rect(&ctx, &bestiario).top() < card_rect(&ctx, &rows[0]).top());
+    app.undo_table();
+    assert_eq!(
+        stored_titles(&app, &base)?,
+        ["Rayuela", "Ficciones", "Aleph", "Bestiario"]
+    );
+    // Sorted by name: it stays, and the notice says why.
+    change_view(&mut app, |c| {
+        c.sorts.push(silex_desktop::view::Sort {
+            property: silex_desktop::view::NAME.into(),
+            direction: silex_desktop::view::Direction::Descending,
+        });
+    });
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    let (rayuela, card) = (card_rect(&ctx, &rows[0]), card_rect(&ctx, &bestiario));
+    assert!(card.top() > rayuela.bottom(), "R before B, descending");
+    drag(
+        &mut app,
+        &ctx,
+        card.center(),
+        rayuela.center_top() + egui::vec2(0.0, 4.0),
+    );
+    assert_eq!(
+        stored_titles(&app, &base)?,
+        ["Rayuela", "Ficciones", "Aleph", "Bestiario"]
+    );
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("ordenada por"))
+    );
+    Ok(())
+}
+
+#[test]
+fn graph_draws_subpages_shelves_loose_pages_and_opens_local_view() -> Result<()> {
+    let db = Database::open_in_memory()?;
+    let tipo = db.create_page("Tipografía", None)?;
+    db.create_page("Familia", Some(&tipo))?;
+    let mapa = db.create_page("Mapa", Some(&tipo))?;
+    db.create_page("Suelta", None)?;
+    let mut app = SilexApp::new(db)?;
+    app.reload_pages()?;
+    app.open_page(tipo.clone())?;
+    app.open_graph(&egui::Context::default())?;
+    let graph = app.graph.as_ref().unwrap();
+    // No links, but the two subpages are lines; «Suelta» goes on the shelf.
+    assert_eq!(graph.edge_counts(), (0, 2));
+    assert_eq!(graph.shelf_titles(), ["Suelta"]);
+    assert!(!graph.is_local());
+    // From a page: the local graph, centred on it, with its neighbours.
+    app.open_local_graph(&mapa)?;
+    assert!(app.graph_active());
+    let graph = app.graph.as_mut().unwrap();
+    assert!(graph.is_local());
+    assert_eq!(graph.local_titles(), ["Mapa", "Tipografía"]);
+    graph.depth_for_test(2);
+    assert_eq!(graph.local_titles(), ["Mapa", "Tipografía", "Familia"]);
+    Ok(())
+}
+
+#[test]
+fn graph_tab_preserves_page_and_opens_links_in_another_tab() -> Result<()> {
+    let db = Database::open_in_memory()?;
+    let first = db.create_page("Primera", None)?;
+    let second = db.create_page("Segunda", None)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(first.clone())?;
+    app.title = "Editada antes del grafo".into();
+    app.mark_dirty();
+    app.open_graph(&egui::Context::default())?;
+    assert!(app.graph_active());
+    assert!(app.selected.is_none());
+    assert_eq!(
+        app.db.get_page(&first)?.unwrap().title,
+        "Editada antes del grafo"
+    );
+    app.open_page(second.clone())?;
+    assert_eq!(app.selected.as_deref(), Some(second.as_str()));
+    assert!(app.tabs.position(graph::TAB_ID).is_some());
+    app.select_tab(app.tabs.position(graph::TAB_ID).unwrap())?;
+    app.reload_pages()?;
+    assert!(app.graph_active());
+    app.close_tab(app.tabs.active())?;
+    assert!(!app.graph_active());
+    app.open_page(first)?;
+    assert_eq!(app.title, "Editada antes del grafo");
+    Ok(())
+}
+
+// ---- H13.4b, ADR 0019: change a property's type ----
+
+#[test]
+fn changing_type_takes_its_filters_out_and_undo_puts_them_back() -> anyhow::Result<()> {
+    use silex_desktop::view::{Filter, FilterOp};
+    let (mut app, ctx, rayuela, ids) = table_app(&[(PropertyKind::Number, "Páginas")])?;
+    let paginas = &ids[0];
+    let base = app.selected.clone().unwrap_or_default();
+    let ficciones = app.db.create_row(&base, "Ficciones")?;
+    app.reload_pages()?;
+    app.set_cell(&rayuela, paginas, Some(CellValue::Number(736.0)))?;
+    app.set_cell(&ficciones, paginas, Some(CellValue::Number(10.0)))?;
+    change_view(&mut app, |c| {
+        c.filters.push(Filter {
+            property: paginas.clone(),
+            op: FilterOp::Greater,
+            value: "150".into(),
+        });
+    });
+    app_frame(&mut app, &ctx, vec![]);
+    assert_eq!(shown_titles(&app), ["Rayuela"]);
+
+    app.change_kind(paginas, PropertyKind::Text)?;
+    let filters = |app: &SilexApp| {
+        app.database
+            .as_ref()
+            .and_then(|d| d.config())
+            .map_or(0, |c| c.filters.len())
+    };
+    assert_eq!(filters(&app), 0, "the filter left the view on show");
+    assert_eq!(shown_titles(&app).len(), 2);
+    assert_eq!(
+        stored(&app, &rayuela, paginas)?,
+        Some(CellValue::Text("736".into()))
+    );
+
+    app.undo_table();
+    assert_eq!(filters(&app), 1, "and came back with Cmd+Z");
+    assert_eq!(shown_titles(&app), ["Rayuela"]);
+    assert_eq!(
+        stored(&app, &rayuela, paginas)?,
+        Some(CellValue::Number(736.0))
+    );
+    Ok(())
+}
+
+#[test]
+fn changing_type_saves_what_is_being_typed_first() -> anyhow::Result<()> {
+    let (mut app, ctx, row, ids) = table_app(&[(PropertyKind::Text, "Autor")])?;
+    let autor = &ids[0];
+    if let Some(state) = app.database.as_mut() {
+        state.editing = Some(CellEdit {
+            row: row.clone(),
+            property: autor.clone(),
+            text: "Cortázar".into(),
+            focus: false,
+        });
+    }
+    app.change_kind(autor, PropertyKind::Select)?;
+    app_frame(&mut app, &ctx, vec![]);
+    let options = app
+        .database
+        .as_ref()
+        .and_then(|d| d.properties.iter().find(|p| p.id == *autor))
+        .map(|p| p.options.clone())
+        .unwrap_or_default();
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].name, "Cortázar");
+    assert_eq!(
+        stored(&app, &row, autor)?,
+        Some(CellValue::Select(options[0].id.clone()))
+    );
+    assert!(
+        app.database.as_ref().is_some_and(|d| d.editing.is_none()),
+        "the text field of the old type closed"
+    );
+    Ok(())
+}
+
+// ---- H13.5: the calendar view ----
+
+/// A database with «Terminado» (a date) and a calendar view showing
+/// September 2026: Rayuela and Ficciones on the 14th, Aleph without a date.
+fn calendar_app() -> anyhow::Result<(SilexApp, egui::Context, Vec<String>, String)> {
+    let (mut app, ctx, base) = database_app()?;
+    let rows = ["Rayuela", "Ficciones", "Aleph"]
+        .into_iter()
+        .map(|title| app.db.create_row(&base, title))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let fin = app.add_property(PropertyKind::Date, "Terminado")?;
+    for row in &rows[..2] {
+        app.db
+            .set_value(row, &fin, Some(&CellValue::Date(day("2026-09-14"))))?;
+    }
+    app.reload_pages()?;
+    app.open_page(base)?;
+    app.add_view(silex_desktop::model::ViewKind::Calendar)?;
+    if let Some(state) = app.database.as_mut() {
+        state.month = Some(silex_desktop::property::CalendarMonth::of(day(
+            "2026-09-01",
+        )));
+    }
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, rows, fin))
+}
+
+fn day(text: &str) -> Date {
+    Date::parse(text).unwrap_or_else(|| panic!("date {text}"))
+}
+
+fn chip_rect(ctx: &egui::Context, row: &str) -> egui::Rect {
+    ctx.read_response(calendar::chip_id(row))
+        .map(|r| r.rect)
+        .unwrap_or_else(|| panic!("label {row} drawn"))
+}
+
+/// A point inside the day `date`, under its «+».
+fn inside_day(ctx: &egui::Context, date: Date) -> egui::Pos2 {
+    ctx.read_response(calendar::add_on_day_id(date))
+        .map(|r| r.rect.left_bottom() + egui::vec2(-30.0, 30.0))
+        .unwrap_or_else(|| panic!("day {date:?} drawn"))
+}
+
+#[test]
+fn a_calendar_puts_rows_on_their_day_and_a_drag_changes_the_date() -> anyhow::Result<()> {
+    let (mut app, ctx, rows, fin) = calendar_app()?;
+    let state = app.database.as_ref().expect("database open");
+    assert_eq!(state.kind(), silex_desktop::model::ViewKind::Calendar);
+    assert_eq!(
+        state.config().and_then(|c| c.date_by.clone()),
+        Some(fin.clone()),
+        "a new calendar goes by the first date"
+    );
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 760.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+    output.textures_delta.clear();
+    let painted = painted_text(&output.shapes);
+    for text in [
+        "Septiembre de 2026",
+        "lun",
+        "Rayuela",
+        "Ficciones",
+        "Sin fecha · 1",
+        "Aleph",
+    ] {
+        assert!(painted.iter().any(|t| t == text), "{text}: {painted:?}");
+    }
+    // The two on the 14th, one under the other.
+    let (rayuela, ficciones) = (chip_rect(&ctx, &rows[0]), chip_rect(&ctx, &rows[1]));
+    assert!(rayuela.bottom() <= ficciones.top());
+
+    // Dragging Rayuela to the 20th gives it that date; Cmd+Z takes it back.
+    drag(
+        &mut app,
+        &ctx,
+        rayuela.center(),
+        inside_day(&ctx, day("2026-09-20")),
+    );
+    let date =
+        |app: &SilexApp, row: &str| -> anyhow::Result<Option<CellValue>> { stored(app, row, &fin) };
+    assert_eq!(
+        date(&app, &rows[0])?,
+        Some(CellValue::Date(day("2026-09-20")))
+    );
+    app.undo_table();
+    // Two frames: the labels' places are read from the last one.
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        date(&app, &rows[0])?,
+        Some(CellValue::Date(day("2026-09-14")))
+    );
+
+    // Onto «Sin fecha» (where Aleph is), Ficciones loses its date.
+    let aleph = chip_rect(&ctx, &rows[2]);
+    drag(
+        &mut app,
+        &ctx,
+        chip_rect(&ctx, &rows[1]).center(),
+        aleph.center(),
+    );
+    assert_eq!(date(&app, &rows[1])?, None);
+    // And Aleph, dragged to a day, gets one.
+    sized_frame(&mut app, &ctx, vec![]);
+    let aleph = chip_rect(&ctx, &rows[2]);
+    drag(
+        &mut app,
+        &ctx,
+        aleph.center(),
+        inside_day(&ctx, day("2026-09-03")),
+    );
+    assert_eq!(
+        date(&app, &rows[2])?,
+        Some(CellValue::Date(day("2026-09-03")))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_calendar_without_a_date_property_offers_to_add_one() -> anyhow::Result<()> {
+    let (mut app, ctx, base) = database_app()?;
+    app.add_view(silex_desktop::model::ViewKind::Calendar)?;
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 760.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+    output.textures_delta.clear();
+    let painted = painted_text(&output.shapes);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.contains("Añadir la propiedad «Fecha»")),
+        "{painted:?}"
+    );
+    app.apply_table_action(
+        &base,
+        TableAction::AddProperty(PropertyKind::Date, "Fecha".into()),
+    )?;
+    sized_frame(&mut app, &ctx, vec![]);
+    let state = app.database.as_ref().expect("database open");
+    let fecha = state
+        .properties
+        .iter()
+        .find(|p| p.kind == PropertyKind::Date);
+    assert!(fecha.is_some_and(|p| p.name == "Fecha"));
+    assert!(state.month.is_some(), "the month is on show");
+    Ok(())
+}
+
+// ---- H13.6: list and gallery views ----
+
+#[test]
+fn a_gallery_shows_the_first_image_of_a_row_as_its_cover() -> anyhow::Result<()> {
+    use silex_desktop::attachment::{NewAttachment, encode_png};
+    let (mut app, ctx, base) = database_app()?;
+    let sopa = app.db.create_row(&base, "Sopa")?;
+    let pan = app.db.create_row(&base, "Pan")?;
+    let rgba = vec![200u8; 40 * 20 * 4];
+    let png = NewAttachment::from_bytes("sopa.png", encode_png(40, 20, rgba)?)?;
+    let image = app.db.add_attachment(&png)?;
+    let file = Block {
+        page_id: sopa.clone(),
+        kind: BlockKind::File,
+        content: image.name.clone(),
+        attachment: Some(image.id.clone()),
+        ..block("foto")
+    };
+    app.db.save_document(&sopa, "Sopa", &[file])?;
+    app.reload_pages()?;
+    app.open_page(base)?;
+    app.add_view(silex_desktop::model::ViewKind::Gallery)?;
+    for _ in 0..4 {
+        sized_frame(&mut app, &ctx, vec![]);
+    }
+    let state = app.database.as_ref().expect("database open");
+    assert_eq!(
+        state.covers.as_ref().and_then(|c| c.get(&sopa)),
+        Some(&image.id)
+    );
+    assert!(
+        matches!(
+            app.files.previews.get(&image.id),
+            Some(PreviewState::Ready(_))
+        ),
+        "its preview is decoded once in sight"
+    );
+    // Every card leaves room for a cover, so they line up.
+    let card = |row: &str| {
+        ctx.read_response(collection::gallery_card_id(row))
+            .map(|r| r.rect)
+            .unwrap_or_else(|| panic!("card {row} drawn"))
+    };
+    assert_eq!(card(&sopa).height(), card(&pan).height());
+    assert!(card(&sopa).height() > 130.0);
+    assert_eq!(card(&sopa).top(), card(&pan).top(), "side by side");
+
+    // Without any image, cards have no cover.
+    app.db.save_document(&sopa, "Sopa", &[])?;
+    app.refresh_database()?;
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    assert!(card(&sopa).height() < 100.0);
     Ok(())
 }

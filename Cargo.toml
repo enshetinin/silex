@@ -1,6 +1,6 @@
 [package]
 name = "silex-desktop"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.95"
 authors = []
@@ -14,7 +14,7 @@ anyhow = "1"
 directories = "6"
 # Default features: wgpu, clipboard, accesskit, x11/wayland (with client-side decorations and dlopen).
 eframe = "0.37"
-rusqlite = { version = "0.40", features = ["bundled", "backup"] }
+rusqlite = { version = "0.41", features = ["bundled", "backup"] }
 uuid = { version = "1", features = ["v4"] }
 # Markdown import (H4.2): CommonMark parser, MIT, pure Rust.
 pulldown-cmark = { version = "0.13", default-features = false }
@@ -43,6 +43,10 @@ winresource = { version = "0.1.34", default-features = false }
 # UI snapshots (H5.2): renders the app headless to PNG for review and to
 # catch unintended visual changes. MIT OR Apache-2.0, same version as egui.
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
+# Page icons (H12.8): the app finds emoji in the system's fonts (eframe's
+# `system_fonts`); tests install the same provider to draw them. Already in
+# the tree through eframe, same version. MIT OR Apache-2.0.
+egui_system_font_provider = "0.37"
 
 # Installers (H5.9, ADR 0005): `cargo packager --release`, after
 # `cargo install cargo-packager --locked`. Output in dist/ (ignored by Git).

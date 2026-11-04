@@ -77,6 +77,7 @@ CREATE TABLE db_views (
 - **Borrar una propiedad es lógico** (`deleted_at`): sus valores se conservan y se puede restaurar desde el menú de la base de datos. Las páginas nunca se borran físicamente, así que los `ON DELETE CASCADE` son solo una red de seguridad.
 - **Configuración de las vistas**: un JSON con orden, filtros, propiedades ocultas, anchos de columna y, en Kanban, la propiedad de agrupación. Se valida al leer como los ajustes (`settings`): claves desconocidas o valores inválidos se ignoran y se usa el valor por defecto; una vista dañada nunca impide abrir la base.
 - **Cambiar el tipo de una propiedad** queda fuera de la primera versión: se crea una propiedad nueva. Si se añade, será con conversión explícita en una transacción y conservando el valor original.
+  - *Actualización (ADR 0019, H13.4):* se añade así. Los valores que no encajan se guardan ocultos en su columna y vuelven al volver al tipo anterior, y Cmd+Z deshace exacto.
 
 ### Encaje con lo que ya existe
 - **Árbol:** la base de datos aparece en la barra lateral con su icono; sus filas no (como en Notion), y se abren desde la tabla, la búsqueda o los favoritos. Las subpáginas de una fila son subpáginas normales de esa fila.
@@ -112,12 +113,18 @@ CREATE TABLE db_views (
 5. **H6.5 — Vista Kanban** agrupada por una propiedad de selección; arrastrar tarjetas entre columnas cambia el valor.
    - *Actualización (2026-10-19):* la propiedad de agrupación es `group_by` en el JSON de la vista; si falta o ya no es una selección viva, se usa la primera. El orden de las tarjetas dentro de una columna es el de la vista (orden manual o «Ordenar»); arrastrar solo cambia de columna, no reordena. Para teclado y lectores de pantalla, el menú de la tarjeta ofrece «Mover a…». Mover una tarjeta es un cambio de celda, así que se deshace con el historial de H6.4.
 
+- *Actualización (2026-11-04, H13.5):* vista **calendario** (`db_views.kind = 'calendar'`, migración 0015, que también admite `list` y `gallery` para H13.6). Pone las filas en los días de un mes según una propiedad de **fecha** (`date_by` en el JSON de la vista; si falta o ya no es una fecha viva, la primera). «Creado» y «Editado» no se ofrecen. Los filtros y el orden de la vista se aplican; dentro de un día, el orden de la vista. Arrastrar una fila a otro día cambia su fecha, y a «Sin fecha» la quita (un paso de Cmd+Z); «+» en un día crea una fila con esa fecha y la abre. El calendario solo muestra el nombre de cada fila: no tiene menú de columnas.
+
+- *Actualización (2026-11-04, H13.6):* vistas **lista** y **galería** (`list` y `gallery`, ya admitidas por la migración 0015; sin migración nueva). La lista es una línea por fila con su nombre y las propiedades visibles; la galería, una tarjeta por fila con la primera imagen de la página de la fila como portada (se lee de los bloques y adjuntos, no se guarda aparte). Las dos usan los filtros, el orden y las propiedades ocultas de la vista; no se reordenan arrastrando.
+
 ## Consecuencias
 - **Una columna y cuatro tablas más.** `Page` gana un `kind`, que hay que propagar a sus 14 construcciones.
 - **El esquema queda fijado al publicarse.** La migración 0005 lleva el esquema completo de este ADR desde H6.1, y si una historia posterior necesita otra columna, será una migración 0006 aditiva.
 - **Valores en filas separadas (EAV).** Cargar una base son cuatro consultas (filas, propiedades, opciones y valores), no una por celda.
 - **Números como `REAL`.** Sumas tipo moneda pueden mostrar errores de redondeo; si hace falta, un tipo «moneda» guardado en céntimos.
 - **Fuera de alcance**, cada uno con su ADR si llega: bases de datos dentro de una página (como bloque), relaciones, fórmulas y rollups, selección múltiple, personas, adjuntos, plantillas de filas, importar CSV.
+  - *Actualización (ADR 0018):* la selección múltiple llega con una tabla de unión `db_multi_values` y la migración 0014, que reconstruye `db_properties` con los tipos nuevos.
+  - *Actualización (H13.3):* los tipos `url`, `created` y `edited` de esa migración ya se usan. La URL es texto. «Creado» y «Editado» se calculan a partir de las fechas de la página y no se guardan.
 
 ## Decisiones del propietario (2026-10-18)
 1. Las filas no aparecen en la barra lateral, como en Notion.

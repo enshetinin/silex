@@ -53,6 +53,7 @@ pub fn examples() -> Vec<(&'static str, Vec<NewBlock>)> {
         indent: 0,
         checked: false,
         content: content.to_owned(),
+        marks: Vec::new(),
     };
     use BlockKind::*;
     vec![

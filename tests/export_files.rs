@@ -120,8 +120,8 @@ mod writing {
     fn export_writes_markdown_named_after_the_title_and_never_overwrites() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let dir = tmp.0.join("Exportaciones"); // created on demand
-        let first = export_page(&dir, "Mi: página", &blocks())?;
-        let second = export_page(&dir, "Mi: página", &blocks())?;
+        let first = export_page(&dir, "Mi: página", None, &blocks())?;
+        let second = export_page(&dir, "Mi: página", None, &blocks())?;
         assert_eq!(names(&dir)?, ["Mi_ página (2).md", "Mi_ página.md"]);
         assert_eq!(
             fs::read_to_string(&first)?,

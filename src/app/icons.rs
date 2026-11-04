@@ -142,6 +142,24 @@ pub fn decoration(ui: &mut egui::Ui, icon: &str, size: f32, color: Color32) -> e
     response
 }
 
+/// A page's icon (H12.8): its emoji if it has one (from the system's emoji
+/// font, in color where there is one), else `icon` from the icon font.
+/// Returns where it was drawn.
+pub fn paint_page_icon(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    align: egui::Align2,
+    emoji: Option<&str>,
+    icon: &str,
+    size: f32,
+    color: Color32,
+) -> egui::Rect {
+    match emoji {
+        Some(emoji) => painter.text(pos, align, emoji, FontId::proportional(size - 1.0), color),
+        None => painter.text(pos, align, icon, font(size), color),
+    }
+}
+
 pub fn font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(FAMILY.into()))
 }
@@ -193,6 +211,11 @@ pub const HOME: &str = "\u{e0f5}"; // house
 pub const SAVE: &str = "\u{e14d}"; // save
 pub const WARNING: &str = "\u{e193}"; // triangle-alert
 pub const INFO: &str = "\u{e0f9}"; // info
+pub const MINUS: &str = "\u{e11c}"; // minus
+pub const LIGHTBULB: &str = "\u{e1c2}"; // lightbulb
+pub const LIST_COLLAPSE: &str = "\u{e59b}"; // list-collapse
+pub const SMILE_PLUS: &str = "\u{e301}"; // face-slightly-smiling-plus
+pub const TABLE_OF_CONTENTS: &str = "\u{e61e}"; // table-of-contents
 pub const OPEN_EXTERNAL: &str = "\u{e0b9}"; // external-link
 pub const KEYBOARD: &str = "\u{e284}"; // keyboard
 pub const TABLE: &str = "\u{e17d}"; // table
@@ -212,6 +235,8 @@ pub const TEXT_ALIGN_LEFT: &str = "\u{e185}"; // text-align-start
 pub const HASH: &str = "\u{e0ef}"; // hash
 pub const CALENDAR: &str = "\u{e063}"; // calendar
 pub const CARET_CIRCLE_DOWN: &str = "\u{e4dd}"; // circle-chevron-down
+/// Multi-select (H13.2).
+pub const TAGS: &str = "\u{e35c}"; // tags
 pub const ARROW_LEFT: &str = "\u{e048}"; // arrow-left
 pub const ARROW_RIGHT: &str = "\u{e049}"; // arrow-right
 /// View menus (H6.3a): filter, sort, columns shown or hidden.
@@ -219,11 +244,20 @@ pub const FUNNEL: &str = "\u{e0dc}"; // funnel
 pub const ARROWS_DOWN_UP: &str = "\u{e046}"; // arrow-down-up
 pub const EYE: &str = "\u{e0ba}"; // eye
 pub const EYE_SLASH: &str = "\u{e0bb}"; // eye-off
+pub const WAYPOINTS: &str = "\u{e542}"; // waypoints
+pub const SCAN: &str = "\u{e257}"; // scan
+pub const ROTATE_CCW: &str = "\u{e148}"; // rotate-ccw
+pub const LAYOUT_LIST: &str = "\u{e1d9}"; // layout-list
+pub const LAYOUT_GRID: &str = "\u{e0ff}"; // layout-grid
+pub const PANEL_RIGHT: &str = "\u{e431}"; // panel-right
+pub const CLOCK_PLUS: &str = "\u{e667}"; // clock-plus
+pub const PENCIL_LINE: &str = "\u{e4f0}"; // pencil-line
 
 /// Every icon above, for tests.
 #[cfg(test)]
 pub const ALL: &[(&str, &str)] = &[
     ("PLUS", PLUS),
+    ("TAGS", TAGS),
     ("DOTS_THREE", DOTS_THREE),
     ("DOTS_THREE_VERTICAL", DOTS_THREE_VERTICAL),
     ("DRAG_HANDLE", DRAG_HANDLE),
@@ -265,6 +299,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("SAVE", SAVE),
     ("WARNING", WARNING),
     ("INFO", INFO),
+    ("MINUS", MINUS),
+    ("LIGHTBULB", LIGHTBULB),
+    ("LIST_COLLAPSE", LIST_COLLAPSE),
+    ("SMILE_PLUS", SMILE_PLUS),
+    ("TABLE_OF_CONTENTS", TABLE_OF_CONTENTS),
     ("OPEN_EXTERNAL", OPEN_EXTERNAL),
     ("KEYBOARD", KEYBOARD),
     ("TABLE", TABLE),
@@ -288,4 +327,12 @@ pub const ALL: &[(&str, &str)] = &[
     ("ARROWS_DOWN_UP", ARROWS_DOWN_UP),
     ("EYE", EYE),
     ("EYE_SLASH", EYE_SLASH),
+    ("WAYPOINTS", WAYPOINTS),
+    ("SCAN", SCAN),
+    ("ROTATE_CCW", ROTATE_CCW),
+    ("LAYOUT_LIST", LAYOUT_LIST),
+    ("LAYOUT_GRID", LAYOUT_GRID),
+    ("PANEL_RIGHT", PANEL_RIGHT),
+    ("CLOCK_PLUS", CLOCK_PLUS),
+    ("PENCIL_LINE", PENCIL_LINE),
 ];

@@ -13,7 +13,7 @@ use eframe::egui::{self, TextEdit};
 use silex_desktop::db::Shift;
 use silex_desktop::model::{DatabaseView, Page, ViewKind};
 use silex_desktop::property::{
-    CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues,
+    CalendarMonth, CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues,
 };
 use silex_desktop::view::{ViewConfig, board_property, visible_rows};
 
@@ -89,6 +89,20 @@ pub(super) struct DatabaseState {
     pub(super) select_anchor: Option<String>,
     /// What «Poner valor…» shows.
     pub(super) bulk: BulkValue,
+    /// The open «Cambiar tipo» dialog (H13.4b).
+    pub(super) kind_change: Option<KindDialog>,
+    /// The month a calendar view shows (H13.5); `None` until one is shown:
+    /// then this month.
+    pub(super) month: Option<CalendarMonth>,
+    /// Today, as the calendar marks it: read when it is first shown and
+    /// with «Hoy».
+    pub(super) today: Option<silex_desktop::property::Date>,
+    /// The cover of each row that has one, for a gallery (H13.6): read
+    /// when a gallery is first drawn, and again after the rows change.
+    pub(super) covers: Option<HashMap<String, String>>,
+    /// Covers drawn in sight this frame, whose previews are asked for
+    /// after it (`files.rs`).
+    pub(super) covers_seen: Vec<String>,
 }
 
 impl DatabaseState {
@@ -97,11 +111,22 @@ impl DatabaseState {
         self.views.get(self.view).map(|v| &v.config)
     }
 
-    /// Whether the view on show is a board (H6.5).
-    pub(super) fn is_board(&self) -> bool {
+    /// The kind of the view on show (a table if there is none).
+    pub(super) fn kind(&self) -> ViewKind {
         self.views
             .get(self.view)
-            .is_some_and(|v| v.kind == ViewKind::Board)
+            .map_or(ViewKind::Table, |v| v.kind)
+    }
+
+    /// Whether the view on show is a board (H6.5).
+    pub(super) fn is_board(&self) -> bool {
+        self.kind() == ViewKind::Board
+    }
+
+    /// Whether the view on show is a table: the only one with row
+    /// selection and arrow keys between cells.
+    pub(super) fn is_table(&self) -> bool {
+        self.kind() == ViewKind::Table
     }
 
     /// Works out which rows and columns are in sight, and in what order.
@@ -174,6 +199,9 @@ fn column_width(kind: PropertyKind) -> f32 {
         PropertyKind::Checkbox => 96.0,
         PropertyKind::Date => 124.0,
         PropertyKind::Select => 150.0,
+        PropertyKind::MultiSelect => 200.0,
+        PropertyKind::Url => 200.0,
+        PropertyKind::Created | PropertyKind::Edited => 140.0,
     }
 }
 
@@ -214,6 +242,13 @@ pub(super) enum TableAction {
     RenameProperty(String, String),
     MoveProperty(String, Shift),
     DeleteProperty(String),
+    /// Open «Cambiar tipo» for a property (H13.4b).
+    ChangeKind(String),
+    /// «+» on a calendar's day: a new row with that date (H13.5).
+    AddOnDate(silex_desktop::property::Date),
+    /// «Nueva» in a list or a gallery: a new row, opened to be named
+    /// (H13.6).
+    AddAndOpen,
     RenameOption(String, String),
     SetOptionColor(String, OptionColor),
     DeleteOption(String),
@@ -240,6 +275,15 @@ pub(super) enum TableAction {
     RenameView(String, String),
     MoveView(String, Shift),
     DeleteView(String),
+    /// Rows dropped in the gap `gap` of `shown`, the rows of the table or
+    /// of a board column in the view's order (H13.1).
+    DropRows {
+        moving: Vec<String>,
+        shown: Vec<String>,
+        gap: usize,
+    },
+    /// Rows cannot be moved by hand in a sorted view: say why.
+    ExplainSorted,
 }
 
 impl SilexApp {
@@ -278,6 +322,11 @@ impl SilexApp {
             selection: HashSet::new(),
             select_anchor: None,
             bulk: BulkValue::default(),
+            kind_change: None,
+            month: None,
+            today: None,
+            covers: None,
+            covers_seen: Vec::new(),
         });
         // The view last open (also in an earlier session, H11.6), else the
         // first. If it cannot be read, the first: not worth an error.
@@ -312,6 +361,7 @@ impl SilexApp {
                 .collect();
             let known: HashSet<String> = state.rows.iter().map(|r| r.id.clone()).collect();
             state.rows = self.db.database_rows(&state.id)?;
+            state.covers = None;
             state.keep_view(&before, &known);
         }
         Ok(())
@@ -388,13 +438,21 @@ impl SilexApp {
             }
         }
         state.dirty.clear();
+        let rows: Vec<String> = renamed
+            .iter()
+            .filter_map(|op| match op {
+                TableOp::Name { row, .. } => Some(row.clone()),
+                _ => None,
+            })
+            .collect();
         for op in renamed {
             state.history.record(op);
         }
         // The sidebar, the search and the breadcrumbs use these titles.
         self.pages = self.db.list_pages()?;
         self.rebuild_tree();
-        Ok(())
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        self.refresh_row_times(&rows)
     }
 
     /// Adds a property as the last column of the open database. An empty
@@ -460,13 +518,14 @@ impl SilexApp {
     }
 
     /// [`Self::add_row`], returning the new row's id.
-    fn insert_row(&mut self, database: &str) -> Result<String> {
+    pub(super) fn insert_row(&mut self, database: &str) -> Result<String> {
         self.save_now()?;
         let row = self.db.create_row(database, "")?;
         self.reload_pages()?;
         if self.selected.as_deref() != Some(database) {
             self.open_page(database.to_owned())?;
         }
+        self.refresh_row_times(&[&row])?;
         if let Some(state) = self.database.as_mut() {
             // In sight even if the view's filters would hide an empty row.
             if state.pinned.insert(row.clone())
@@ -486,7 +545,7 @@ impl SilexApp {
         let Some(mut state) = self.database.take() else {
             return;
         };
-        if !state.is_board() {
+        if state.is_table() {
             table_keys(ui.ctx(), &mut state);
             selection_keys(ui.ctx(), &mut state);
         }
@@ -516,6 +575,20 @@ impl SilexApp {
             let result = self.apply_table_action(&database, action);
             self.report(result);
         }
+        self.kind_dialog(ui.ctx());
+        // The gallery's covers in sight: their previews, as the editor's
+        // images (decoded by the attach worker, H7.2).
+        let seen = self
+            .database
+            .as_mut()
+            .map(|d| std::mem::take(&mut d.covers_seen))
+            .unwrap_or_default();
+        for cover in seen {
+            if !self.files.previews.contains_key(&cover) && !self.files.wanted.contains(&cover) {
+                self.files.wanted.push(cover.clone());
+            }
+            self.files.seen.insert(cover);
+        }
     }
 
     pub(super) fn apply_table_action(&mut self, database: &str, action: TableAction) -> Result<()> {
@@ -543,6 +616,8 @@ impl SilexApp {
                     text: format!("Fila «{title}» enviada a la papelera."),
                 });
             }
+            // In the view's order, and undoable here (H13.1).
+            TableAction::Row(RowAction::Reorder(id, shift)) => self.shift_row(&id, shift)?,
             TableAction::Row(other) => self.apply(other)?,
             TableAction::AddProperty(kind, name) => {
                 self.add_property(kind, &name)?;
@@ -564,6 +639,12 @@ impl SilexApp {
                 self.reload_properties()?;
             }
             TableAction::DeleteProperty(id) => self.delete_property(&id)?,
+            TableAction::ChangeKind(id) => self.open_kind_dialog(&id)?,
+            TableAction::AddOnDate(date) => self.add_on_date(database, date)?,
+            TableAction::AddAndOpen => {
+                let row = self.insert_row(database)?;
+                self.open_page(row)?;
+            }
             TableAction::RenameOption(id, name) => {
                 let unchanged = self
                     .database
@@ -613,6 +694,12 @@ impl SilexApp {
                         OptionColor::for_new_option(existing),
                     )?;
                     self.reload_properties()?;
+                }
+            }
+            TableAction::DropRows { moving, shown, gap } => self.drop_rows(&moving, &shown, gap)?,
+            TableAction::ExplainSorted => {
+                if let Some(by) = self.database.as_ref().and_then(DatabaseState::sorted_by) {
+                    self.notice = Some(sorted_explanation(&by));
                 }
             }
             TableAction::HideProperty(id) => {
@@ -679,7 +766,7 @@ impl SilexApp {
             selected_tab = view_tabs(ui, state, &mut actions);
             compact = ui.available_width() - theme::space::LG < full_width;
             // While rows are chosen, the bar to act on them (H11.2).
-            if !state.selection.is_empty() && !state.is_board() {
+            if !state.selection.is_empty() && state.is_table() {
                 selection_bar(ui, state, &mut actions);
             } else {
                 let used = toolbar_menus(ui, state, &mut actions, compact);
@@ -688,9 +775,24 @@ impl SilexApp {
                 }
             }
         });
-        if state.is_board() {
-            self.draw_board(ui, state, selected_tab, &mut actions, &mut cells);
-            return (actions, cells);
+        match state.kind() {
+            ViewKind::Board => {
+                self.draw_board(ui, state, selected_tab, &mut actions, &mut cells);
+                return (actions, cells);
+            }
+            ViewKind::Calendar => {
+                self.draw_calendar(ui, state, selected_tab, &mut actions, &mut cells);
+                return (actions, cells);
+            }
+            ViewKind::List => {
+                self.draw_list(ui, state, selected_tab, &mut actions, &mut cells);
+                return (actions, cells);
+            }
+            ViewKind::Gallery => {
+                self.draw_gallery(ui, state, selected_tab, &mut actions, &mut cells);
+                return (actions, cells);
+            }
+            ViewKind::Table => {}
         }
 
         let columns: f32 = state
@@ -773,7 +875,26 @@ impl SilexApp {
                         width,
                         overflow,
                     };
-                    self.table_rows(ui, state, range.clone(), columns, &mut actions, &mut cells);
+                    let top = self.table_rows(
+                        ui,
+                        state,
+                        range.clone(),
+                        columns,
+                        &mut actions,
+                        &mut cells,
+                    );
+                    // Rows dragged by their handle (H13.1).
+                    if let Some(drag) = egui::DragAndDrop::payload::<RowDrag>(ui.ctx())
+                        && let Some(top) = top
+                    {
+                        let at = TableDrop {
+                            top,
+                            clip: ui.clip_rect(),
+                            gutter_left: ui.clip_rect().left() - gutter_width(ui),
+                            row_height: ROW_HEIGHT,
+                        };
+                        drag_rows(ui, state, &drag, &at, &mut actions);
+                    }
                     range
                 })
             })
@@ -878,7 +999,7 @@ impl SilexApp {
                 *option_colors = None;
                 *option_delete = None;
             }
-            let width = if property.kind == PropertyKind::Select {
+            let width = if property.kind.has_options() {
                 280.0
             } else {
                 220.0
@@ -946,8 +1067,10 @@ impl SilexApp {
         );
     }
 
-    /// The rows in `range` (the ones in sight): name and «Abrir», then a
-    /// cell per property. Notes which cell has the keyboard focus.
+    /// The rows in `range` (the ones in sight): their handle, name and
+    /// «Abrir», then a cell per property. Notes which cell has the keyboard
+    /// focus. Returns where the view's first row would be (none drawn:
+    /// `None`), for a row being dragged.
     fn table_rows(
         &self,
         ui: &mut egui::Ui,
@@ -956,8 +1079,18 @@ impl SilexApp {
         columns: Columns,
         actions: &mut Vec<TableAction>,
         cells: &mut Vec<CellAction>,
-    ) {
+    ) -> Option<f32> {
         let p = theme::current(ui.ctx());
+        // Rows moved by hand (H13.1): only without a sort.
+        let sorted = state.sorted_by();
+        let dragging = egui::DragAndDrop::payload::<RowDrag>(ui.ctx());
+        let clip = ui.clip_rect();
+        let gutter = egui::Rect::from_x_y_ranges(
+            clip.left() - gutter_width(ui)..=clip.left(),
+            clip.y_range(),
+        );
+        let pointer = ui.ctx().pointer_hover_pos();
+        let mut top = None;
         let DatabaseState {
             rows,
             order,
@@ -981,13 +1114,14 @@ impl SilexApp {
         for (offset, &row_index) in order[range].iter().enumerate() {
             // `index` is the row's place in the view; `row_index` in `rows`.
             let index = first + offset;
-            let Some(row) = rows.get_mut(row_index) else {
+            let Some(row_id) = rows.get(row_index).map(|r| r.id.clone()) else {
                 continue;
             };
-            let name_id = row_name_id(&row.id);
+            let name_id = row_name_id(&row_id);
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(columns.width, ROW_HEIGHT), egui::Sense::hover());
-            let menu_id = row_menu_id(&row.id);
+            top.get_or_insert(rect.top() - index as f32 * ROW_HEIGHT);
+            let menu_id = row_menu_id(&row_id);
             let focused = ui.memory(|m| m.has_focus(name_id));
             let menu_focused = ui.memory(|m| m.has_focus(menu_id));
             if focused {
@@ -996,15 +1130,61 @@ impl SilexApp {
             let wanted = |column: usize| {
                 focus
                     .as_ref()
-                    .is_some_and(|(id, c)| *id == row.id && *c == column)
+                    .is_some_and(|(id, c)| *id == row_id && *c == column)
             };
-            let hot = ui.rect_contains_pointer(rect) || focused || menu_focused;
-            let chosen = selection.contains(&row.id);
+            // The row's handle sits in the gutter at its left, out of the
+            // rows' clip: the row is under the pointer there too.
+            let strip = egui::Rect::from_x_y_ranges(gutter.x_range(), rect.y_range());
+            let in_gutter = pointer.is_some_and(|at| {
+                strip.contains(at) && clip.y_range().contains(at.y) && dragging.is_none()
+            });
+            // While rows are dragged, the one under the pointer is only
+            // where the line goes.
+            let pointed = dragging.is_none() && ui.rect_contains_pointer(rect);
+            let hot = pointed || in_gutter || focused || menu_focused;
+            let chosen = selection.contains(&row_id);
+            let held = dragging.as_ref().is_some_and(|d| d.0.contains(&row_id));
             if chosen {
                 ui.painter().rect_filled(rect, 0.0, p.accent_soft);
             } else if hot {
                 ui.painter().rect_filled(rect, 0.0, p.subtle);
             }
+            // The rows being moved stay marked in their place.
+            if held {
+                ui.painter()
+                    .rect_filled(rect, 0.0, p.accent_soft.gamma_multiply(0.5));
+            }
+            // Made on every row, shown or not: a child `Ui` takes an
+            // automatic id, and the widgets after it must keep theirs (the
+            // keyboard focus is kept by id).
+            let mut gutter_ui = ui.new_child(egui::UiBuilder::new().max_rect(strip));
+            gutter_ui.set_clip_rect(gutter.intersect(ui.ctx().content_rect()));
+            if (hot && dragging.is_none()) || held {
+                let moving = || {
+                    if chosen {
+                        order
+                            .iter()
+                            .filter_map(|&i| rows.get(i))
+                            .filter(|r| selection.contains(&r.id))
+                            .map(|r| r.id.clone())
+                            .collect()
+                    } else {
+                        vec![row_id.clone()]
+                    }
+                };
+                let row = &rows[row_index];
+                row_handle(
+                    &mut gutter_ui,
+                    strip,
+                    row,
+                    moving,
+                    sorted.as_deref(),
+                    actions,
+                );
+            }
+            let Some(row) = rows.get_mut(row_index) else {
+                continue;
+            };
             ui.painter()
                 .hline(rect.x_range(), rect.bottom() - 0.5, (1.0, p.border));
 
@@ -1165,6 +1345,7 @@ impl SilexApp {
         if let Some((index, shift)) = clicked_box {
             click_box(rows, order, selection, select_anchor, index, shift);
         }
+        top
     }
 }
 
@@ -1317,7 +1498,14 @@ impl PropertyMenu<'_> {
         }
         ui.add_space(theme::space::XS);
         menu_caption(ui, &format!("Tipo: {}", property.kind.label()));
-        if property.kind == PropertyKind::Select {
+        if ui
+            .button((icons::icon(icons::ARROWS_DOWN_UP), " Cambiar tipo…"))
+            .clicked()
+        {
+            actions.push(TableAction::ChangeKind(property.id.clone()));
+            ui.close();
+        }
+        if property.kind.has_options() {
             ui.separator();
             self.options(ui, property, actions);
         }
@@ -1375,7 +1563,7 @@ impl PropertyMenu<'_> {
         }
         for (number, option) in (1..).zip(property.options.iter()) {
             if self.option_delete.as_deref() == Some(option.id.as_str()) {
-                self.confirm_delete(ui, option, actions);
+                self.confirm_delete(ui, property.kind, option, actions);
                 continue;
             }
             ui.horizontal(|ui| {
@@ -1444,6 +1632,7 @@ impl PropertyMenu<'_> {
     fn confirm_delete(
         &mut self,
         ui: &mut egui::Ui,
+        kind: PropertyKind,
         option: &SelectOption,
         actions: &mut Vec<TableAction>,
     ) {
@@ -1452,12 +1641,22 @@ impl PropertyMenu<'_> {
             .values
             .values()
             .flat_map(|cells| cells.values())
-            .filter(|v| matches!(v, CellValue::Select(id) if *id == option.id))
+            .filter(|v| match v {
+                CellValue::Select(id) => *id == option.id,
+                CellValue::MultiSelect(ids) => ids.contains(&option.id),
+                _ => false,
+            })
             .count();
+        // A select is emptied; a multi-select keeps its other options.
+        let verb = if kind == PropertyKind::MultiSelect {
+            "Se quitará de"
+        } else {
+            "Se vaciará en"
+        };
         let effect = match uses {
             0 => "Ninguna fila la usa.".to_owned(),
-            1 => "Se vaciará en 1 fila.".to_owned(),
-            n => format!("Se vaciará en {n} filas."),
+            1 => format!("{verb} 1 fila."),
+            n => format!("{verb} {n} filas."),
         };
         menu_caption(ui, &format!("¿Borrar «{}»? {effect}", option.name));
         // The buttons' padding lines their text up with the question.

@@ -243,7 +243,7 @@ impl SilexApp {
             .parent
             .as_deref()
             .and_then(|id| self.find_page(id))
-            .map(|parent| format!("Se creará dentro de «{}».", display_title(&parent.title)));
+            .map(|parent| format!("Se creará dentro de «{}».", short_title(&parent.title)));
         let response =
             egui::Modal::new(egui::Id::unique("silex_template_picker")).show(ctx, |ui| {
                 ui.set_width(460.0);

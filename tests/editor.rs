@@ -585,16 +585,32 @@ fn a_duplicated_file_block_shares_its_attachment() {
 fn the_slash_menu_offers_attaching_files() {
     use silex_desktop::editor::{SlashItem, slash_items};
     let all = slash_items("");
-    assert_eq!(all.len(), BlockKind::ALL.len() + 2);
+    assert_eq!(all.len(), BlockKind::ALL.len() + 4);
     assert_eq!(
         all[BlockKind::ALL.len()..],
-        [SlashItem::LinkPage, SlashItem::AttachFiles]
+        [
+            SlashItem::Divider,
+            SlashItem::Database,
+            SlashItem::LinkPage,
+            SlashItem::AttachFiles
+        ]
     );
     for query in ["enlace", "pag", "LINK", "vinc"] {
         assert_eq!(slash_items(query), [SlashItem::LinkPage], "{query}");
     }
     for query in ["arch", "ARCHIVO", "adj", "imagen", "pdf", "foto"] {
         assert_eq!(slash_items(query), [SlashItem::AttachFiles], "{query}");
+    }
+    // H12.11: a database inside the page.
+    for query in [
+        "base",
+        "base de datos",
+        "BBDD",
+        "tabla",
+        "database",
+        "colección",
+    ] {
+        assert_eq!(slash_items(query), [SlashItem::Database], "{query}");
     }
     // «Título 1» and the like are not drowned by it.
     assert_eq!(slash_items("h1"), [SlashItem::Kind(BlockKind::Heading1)]);
@@ -745,5 +761,532 @@ mod formatting {
         );
         assert_eq!(blocks[0].marks, vec![bold(0, 2)]);
         assert_eq!(blocks[1].marks, vec![bold(3, 5)]);
+    }
+}
+
+/// H12.1e: copying keeps the formatting with the text, and pasting that
+/// same text gives it back (ADR 0015).
+mod clipboard {
+    use super::*;
+    use silex_desktop::editor::{Clip, paste_lines_marked, selection_clip, selection_text};
+    use silex_desktop::marks::{Mark, MarkKind};
+
+    fn bold(start: usize, end: usize) -> Mark {
+        Mark::new(start, end, MarkKind::Bold)
+    }
+
+    fn italic(start: usize, end: usize) -> Mark {
+        Mark::new(start, end, MarkKind::Italic)
+    }
+
+    fn marked(mut block: Block, marks: Vec<Mark>) -> Block {
+        block.marks = marks;
+        block
+    }
+
+    fn ids() -> impl FnMut() -> String {
+        let mut n = 0;
+        move || {
+            n += 1;
+            format!("n{n}")
+        }
+    }
+
+    fn copied_blocks() -> Vec<Block> {
+        vec![
+            marked(b("a", Bulleted, 0, "pan negro"), vec![bold(0, 3)]),
+            marked(b("b", Numbered, 1, "dos ñu"), vec![italic(4, 6)]),
+            marked(b("c", Paragraph, 0, "🌾 fin"), vec![bold(2, 5)]),
+        ]
+    }
+
+    #[test]
+    fn a_selection_of_blocks_copies_its_formatting_after_the_markers() {
+        let clip = selection_clip(&copied_blocks(), 0, 2);
+        assert_eq!(clip.text, selection_text(&copied_blocks(), 0, 2));
+        assert_eq!(clip.text, "• pan negro\n  1. dos ñu\n🌾 fin");
+        let words: Vec<String> = clip
+            .marks
+            .iter()
+            .map(|m| {
+                clip.text
+                    .chars()
+                    .skip(m.start)
+                    .take(m.end - m.start)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(words, ["pan", "ñu", "fin"]);
+    }
+
+    #[test]
+    fn pasting_copied_blocks_brings_back_their_formatting() {
+        let original = copied_blocks();
+        let clip = selection_clip(&original, 0, 2);
+        let mut blocks = vec![marked(b("x", Paragraph, 0, ""), vec![])];
+        let marks = clip.marks_for(&clip.text).expect("same text");
+        paste_lines_marked(&mut blocks, 0, 0, &clip.text, marks, ids());
+        let got: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.content.as_str(), b.marks.clone()))
+            .collect();
+        let want: Vec<_> = original
+            .iter()
+            .map(|b| (b.kind, b.content.as_str(), b.marks.clone()))
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn pasting_in_the_middle_keeps_the_text_around_and_its_formatting() {
+        let clip = Clip {
+            text: "uno\ndos".into(),
+            marks: vec![bold(1, 6)],
+        };
+        let mut blocks = vec![marked(b("a", Paragraph, 0, "ab"), vec![italic(0, 2)])];
+        // Windows line endings are the same text.
+        let marks = clip.marks_for("uno\r\ndos").expect("same text");
+        let caret = paste_lines_marked(&mut blocks, 0, 1, "uno\r\ndos", marks, ids());
+        assert_eq!(caret, Some(Caret { block: 1, char: 3 }));
+        assert_eq!(blocks[0].content, "auno");
+        assert_eq!(blocks[0].marks, vec![italic(0, 1), bold(2, 4)]);
+        assert_eq!(blocks[1].content, "dosb");
+        assert_eq!(blocks[1].marks, vec![bold(0, 2), italic(3, 4)]);
+        assert!(clip.marks_for("otro texto").is_none());
+    }
+
+    #[test]
+    fn a_code_block_or_a_control_character_takes_no_formatting() {
+        let clip = Clip {
+            text: "uno\ndos".into(),
+            marks: vec![bold(0, 7)],
+        };
+        let mut blocks = vec![b("a", Code, 0, "")];
+        paste_lines_marked(&mut blocks, 0, 0, &clip.text, &clip.marks, ids());
+        assert!(blocks[0].marks.is_empty());
+        let block = b("a", Paragraph, 0, "a\u{7}b");
+        assert!(Clip::of_text(&block, 0, 3).is_none());
+        let block = marked(b("a", Paragraph, 0, "pan negro"), vec![bold(0, 3)]);
+        assert_eq!(
+            Clip::of_text(&block, 2, 6),
+            Some(Clip {
+                text: "n ne".into(),
+                marks: vec![bold(0, 1)]
+            })
+        );
+    }
+}
+
+/// H12.2 and H12.3: dividers and callouts.
+mod divider_and_callout {
+    use super::*;
+    use BlockKind::{Callout, Divider};
+    use silex_desktop::editor::{insert_divider, is_divider_text, paste_lines, selection_text};
+
+    fn ids() -> impl FnMut() -> String {
+        let mut n = 0;
+        move || {
+            n += 1;
+            format!("n{n}")
+        }
+    }
+
+    #[test]
+    fn an_empty_block_becomes_a_divider_with_a_paragraph_below() {
+        // `---` typed: all of it goes.
+        let mut blocks = vec![b("a", Paragraph, 1, "---"), b("z", Paragraph, 0, "fin")];
+        assert!(is_divider_text(Paragraph, "---"));
+        assert!(!is_divider_text(Paragraph, "----") && !is_divider_text(Quote, "---"));
+        let caret = insert_divider(&mut blocks, 0, 3, new_id);
+        assert_eq!(caret, Some(Caret { block: 1, char: 0 }));
+        assert_eq!(
+            summary(&blocks),
+            [
+                ("a", Divider, 1, ""),
+                ("nuevo", Paragraph, 1, ""),
+                ("z", Paragraph, 0, "fin")
+            ]
+        );
+    }
+
+    #[test]
+    fn with_text_after_the_slash_query_the_divider_goes_above() {
+        let mut blocks = vec![b("a", Bulleted, 0, "/sepaTexto")];
+        let caret = insert_divider(&mut blocks, 0, 5, new_id);
+        assert_eq!(caret, Some(Caret { block: 1, char: 0 }));
+        assert_eq!(
+            summary(&blocks),
+            [("nuevo", Divider, 0, ""), ("a", Bulleted, 0, "Texto")]
+        );
+        // Not on a file or another divider.
+        assert_eq!(insert_divider(&mut blocks, 0, 0, new_id), None);
+    }
+
+    #[test]
+    fn backspace_after_a_divider_or_delete_before_it_removes_it() {
+        let mut blocks = vec![
+            b("a", Paragraph, 0, "uno"),
+            b("d", Divider, 0, ""),
+            b("c", Paragraph, 0, "dos"),
+        ];
+        assert_eq!(
+            backspace_at_start(&mut blocks, 2),
+            Some(Caret { block: 1, char: 0 })
+        );
+        assert_eq!(
+            summary(&blocks),
+            [("a", Paragraph, 0, "uno"), ("c", Paragraph, 0, "dos")]
+        );
+        blocks.insert(1, b("d", Divider, 0, ""));
+        assert_eq!(
+            delete_at_end(&mut blocks, 0),
+            Some(Caret { block: 0, char: 3 })
+        );
+        assert_eq!(blocks.len(), 2);
+        // On the divider itself, nothing (the card deletes it as a block).
+        let mut blocks = vec![b("d", Divider, 0, ""), b("c", Paragraph, 0, "x")];
+        assert_eq!(backspace_at_start(&mut blocks, 0), None);
+        assert_eq!(enter(&mut blocks, 0, 0, new_id), None);
+    }
+
+    #[test]
+    fn enter_in_a_callout_goes_on_as_text_and_an_empty_one_leaves() {
+        let mut blocks = vec![b("a", Callout, 0, "aviso")];
+        enter(&mut blocks, 0, 5, new_id);
+        assert_eq!(blocks[1].kind, Paragraph);
+        let mut blocks = vec![b("a", Callout, 0, "")];
+        enter(&mut blocks, 0, 0, new_id);
+        assert_eq!(summary(&blocks), [("a", Paragraph, 0, "")]);
+        // Backspace at the start turns it into text, like a quote.
+        let mut blocks = vec![b("a", Callout, 0, "x")];
+        backspace_at_start(&mut blocks, 0);
+        assert_eq!(blocks[0].kind, Paragraph);
+    }
+
+    #[test]
+    fn dividers_are_copied_and_pasted_as_three_dashes() {
+        let original = vec![
+            b("a", Paragraph, 0, "antes"),
+            b("d", Divider, 1, ""),
+            b("c", Callout, 0, "después"),
+        ];
+        let copied = selection_text(&original, 0, 2);
+        assert_eq!(copied, "antes\n  ---\ndespués");
+        let mut blocks = vec![b("x", Paragraph, 0, "")];
+        paste_lines(&mut blocks, 0, 0, &copied, ids());
+        let kinds: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.content.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [(Paragraph, "antes"), (Divider, ""), (Paragraph, "después")]
+        );
+        assert_eq!(blocks[1].indent, 1);
+    }
+
+    #[test]
+    fn text_around_a_pasted_divider_never_ends_up_in_it() {
+        // Pasted in the middle of «abcd»: «ab», the divider, then «cd».
+        let mut blocks = vec![b("x", Paragraph, 0, "abcd")];
+        let caret = paste_lines(&mut blocks, 0, 2, "---\n---", ids());
+        let kinds: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.content.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (Paragraph, "ab"),
+                (Divider, ""),
+                (Divider, ""),
+                (Paragraph, "cd")
+            ]
+        );
+        assert_eq!(caret, Some(Caret { block: 3, char: 0 }));
+    }
+}
+
+/// H12.4a: toggles, their content and what folding hides (ADR 0016).
+mod toggles {
+    use super::*;
+    use BlockKind::Toggle;
+    use silex_desktop::editor::{ancestors, enter_with_fold, hidden_blocks, subtree_end};
+
+    /// t1 (folded) > [a, t2 (open) > [b], c] , d ; t3 (folded, empty)
+    fn doc() -> Vec<Block> {
+        vec![
+            b("t1", Toggle, 0, "uno"),
+            b("a", Paragraph, 1, "a"),
+            b("t2", Toggle, 1, "dos"),
+            b("b", Bulleted, 2, "b"),
+            b("c", Paragraph, 1, "c"),
+            b("d", Paragraph, 0, "d"),
+            b("t3", Toggle, 0, "tres"),
+        ]
+    }
+
+    #[test]
+    fn the_content_of_a_block_is_what_follows_with_more_indent() {
+        let blocks = doc();
+        assert_eq!(subtree_end(&blocks, 0), 5);
+        assert_eq!(subtree_end(&blocks, 2), 4);
+        assert_eq!(subtree_end(&blocks, 3), 4);
+        assert_eq!(subtree_end(&blocks, 6), 7);
+        assert_eq!(subtree_end(&blocks, 9), 9, "past the end");
+        assert_eq!(ancestors(&blocks, 3), [2, 0]);
+        assert_eq!(ancestors(&blocks, 4), [0]);
+        assert!(ancestors(&blocks, 5).is_empty());
+    }
+
+    #[test]
+    fn folded_toggles_hide_their_content_also_nested() {
+        let blocks = doc();
+        let folded = |ids: &'static [&'static str]| move |b: &Block| ids.contains(&b.id.as_str());
+        assert_eq!(
+            hidden_blocks(&blocks, folded(&["t1", "t3"])),
+            [false, true, true, true, true, false, false]
+        );
+        assert_eq!(
+            hidden_blocks(&blocks, folded(&["t2"])),
+            [false, false, false, true, false, false, false]
+        );
+        // Only toggles fold: a paragraph's id in the set changes nothing.
+        assert_eq!(hidden_blocks(&blocks, folded(&["a", "d"])), [false; 7]);
+    }
+
+    #[test]
+    fn enter_goes_inside_an_open_toggle_and_after_a_folded_one() {
+        let mut blocks = doc();
+        // Open: the text after the cursor goes inside, first.
+        let caret = enter_with_fold(&mut blocks, 2, 1, false, new_id);
+        assert_eq!(caret, Some(Caret { block: 3, char: 0 }));
+        assert_eq!(
+            summary(&blocks)[2..4],
+            [("t2", Toggle, 1, "d"), ("nuevo", Paragraph, 2, "os")]
+        );
+        // Folded: after everything it holds.
+        let mut blocks = doc();
+        let caret = enter_with_fold(&mut blocks, 0, 3, true, new_id);
+        assert_eq!(caret, Some(Caret { block: 5, char: 0 }));
+        assert_eq!(summary(&blocks)[5], ("nuevo", Paragraph, 0, ""));
+        // At the start: an empty block above, as usual.
+        let mut blocks = doc();
+        enter_with_fold(&mut blocks, 0, 0, true, new_id);
+        assert_eq!(summary(&blocks)[0], ("nuevo", Paragraph, 0, ""));
+        // An empty toggle becomes text.
+        let mut blocks = vec![b("t", Toggle, 0, "")];
+        enter_with_fold(&mut blocks, 0, 0, false, new_id);
+        assert_eq!(summary(&blocks), [("t", Paragraph, 0, "")]);
+        // Other blocks: plain Enter.
+        let mut blocks = vec![b("a", Bulleted, 0, "ab")];
+        enter_with_fold(&mut blocks, 0, 1, true, new_id);
+        assert_eq!(summary(&blocks)[1], ("nuevo", Bulleted, 0, "b"));
+    }
+}
+
+/// H12.4b: a toggle moves, copies, indents and goes with its content
+/// (ADR 0016).
+mod toggle_content {
+    use super::*;
+    use BlockKind::Toggle;
+    use silex_desktop::editor::{
+        change_indent_with_content, move_with_content, paste_lines, paste_lines_marked,
+        selection_text, with_content,
+    };
+
+    /// x ; T (0) > [a, U (1) > [b]] ; y
+    fn doc() -> Vec<Block> {
+        vec![
+            b("x", Paragraph, 0, "x"),
+            b("T", Toggle, 0, "T"),
+            b("a", Paragraph, 1, "a"),
+            b("U", Toggle, 1, "U"),
+            b("b", Paragraph, 2, "b"),
+            b("y", Paragraph, 0, "y"),
+        ]
+    }
+
+    fn ids(blocks: &[Block]) -> Vec<&str> {
+        blocks.iter().map(|b| b.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_range_with_toggles_takes_their_content() {
+        let blocks = doc();
+        assert_eq!(with_content(&blocks, 0, 0), 0);
+        assert_eq!(with_content(&blocks, 1, 1), 4);
+        assert_eq!(with_content(&blocks, 3, 3), 4);
+        assert_eq!(with_content(&blocks, 0, 2), 4, "a toggle in the range");
+        assert_eq!(with_content(&blocks, 2, 2), 2, "no toggle in the range");
+        assert_eq!(with_content(&blocks, 5, 9), 9, "past the end is kept");
+    }
+
+    #[test]
+    fn moving_takes_the_content_and_passes_toggles_whole() {
+        // The toggle down: past «y», with everything inside.
+        let mut blocks = doc();
+        assert_eq!(move_with_content(&mut blocks, 1, 1, false), Some((2, 5)));
+        assert_eq!(ids(&blocks), ["x", "y", "T", "a", "U", "b"]);
+        // «x» down: past the whole toggle, not into it.
+        let mut blocks = doc();
+        assert_eq!(move_with_content(&mut blocks, 0, 0, false), Some((4, 4)));
+        assert_eq!(ids(&blocks), ["T", "a", "U", "b", "x", "y"]);
+        // «y» up: the same, above the toggle.
+        let mut blocks = doc();
+        assert_eq!(move_with_content(&mut blocks, 5, 5, true), Some((1, 1)));
+        assert_eq!(ids(&blocks), ["x", "y", "T", "a", "U", "b"]);
+        // Inside: «a» down passes the inner toggle whole, and stays inside.
+        let mut blocks = doc();
+        assert_eq!(move_with_content(&mut blocks, 2, 2, false), Some((4, 4)));
+        assert_eq!(ids(&blocks), ["x", "T", "U", "b", "a", "y"]);
+        // Edges.
+        let mut blocks = doc();
+        assert_eq!(move_with_content(&mut blocks, 0, 0, true), None);
+        assert_eq!(
+            move_with_content(&mut blocks, 1, 1, false).map(|_| ()),
+            Some(())
+        );
+        assert_eq!(
+            move_with_content(&mut blocks, 2, 2, false),
+            None,
+            "already last"
+        );
+    }
+
+    #[test]
+    fn indenting_a_toggle_takes_its_content() {
+        let mut blocks = doc();
+        assert!(change_indent_with_content(&mut blocks, 1, 1));
+        let indents: Vec<u8> = blocks.iter().map(|b| b.indent).collect();
+        assert_eq!(indents, [0, 1, 2, 2, 3, 0]);
+        assert!(change_indent_with_content(&mut blocks, 1, -1));
+        assert_eq!(blocks, doc());
+        // Not past the deepest level.
+        let mut deep = vec![
+            b("p", Paragraph, 0, "p"),
+            b("T", Toggle, 0, "T"),
+            b("c", Paragraph, MAX_INDENT, "c"),
+        ];
+        assert!(!change_indent_with_content(&mut deep, 1, 1));
+        assert_eq!(deep[1].indent, 0);
+        // Other blocks: as before, alone.
+        let mut blocks = doc();
+        assert!(change_indent_with_content(&mut blocks, 5, 1));
+        assert_eq!(blocks[5].indent, 1);
+    }
+
+    #[test]
+    fn a_copied_toggle_is_pasted_back_with_its_content() {
+        let original = doc();
+        let copied = selection_text(&original, 1, with_content(&original, 1, 1));
+        assert_eq!(copied, "▸ T\n  a\n  ▸ U\n    b");
+        // Copied in Silex: indented lines keep their indent.
+        let mut blocks = vec![b("n", Paragraph, 0, "")];
+        paste_lines_marked(&mut blocks, 0, 0, &copied, &[], || "p".into());
+        let got: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.indent, b.content.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (Toggle, 0, "T"),
+                (Paragraph, 1, "a"),
+                (Toggle, 1, "U"),
+                (Paragraph, 2, "b"),
+            ]
+        );
+        // From another app, leading spaces are text, as before.
+        let mut blocks = vec![b("n", Paragraph, 0, "")];
+        paste_lines(&mut blocks, 0, 0, "uno\n  dos", || "p".into());
+        assert_eq!(blocks[1].indent, 0);
+        assert_eq!(blocks[1].content, "  dos");
+    }
+}
+
+/// H12.5: the page's outline.
+mod outline {
+    use super::*;
+    use BlockKind::{Heading2, Heading3};
+    use silex_desktop::editor::{OutlineEntry, outline};
+
+    #[test]
+    fn headings_with_text_in_order_from_the_largest_used() {
+        let blocks = vec![
+            b("a", Paragraph, 0, "texto"),
+            b("b", Heading2, 0, "Uno"),
+            b("c", Heading3, 0, "Uno.uno\nsegunda línea"),
+            b("d", Heading2, 1, "   "),
+            b("e", Heading2, 0, " Dos 🌾 "),
+        ];
+        let entry = |index, level, text: &str| OutlineEntry {
+            index,
+            level,
+            text: text.into(),
+        };
+        assert_eq!(
+            outline(&blocks),
+            [
+                entry(1, 0, "Uno"),
+                entry(2, 1, "Uno.uno segunda línea"),
+                entry(4, 0, "Dos 🌾"),
+            ]
+        );
+        let mut with_h1 = blocks.clone();
+        with_h1.insert(0, b("t", Heading1, 0, "Título"));
+        assert_eq!(outline(&with_h1)[1], entry(2, 1, "Uno"));
+        assert!(outline(&[b("p", Paragraph, 0, "nada")]).is_empty());
+    }
+}
+
+/// H12.7: pasting the blocks of some Markdown.
+mod paste_markdown {
+    use super::*;
+    use silex_desktop::editor::paste_blocks;
+    use silex_desktop::markdown::markdown_to_blocks;
+
+    fn ids() -> impl FnMut() -> String {
+        let mut n = 0;
+        move || {
+            n += 1;
+            format!("n{n}")
+        }
+    }
+
+    #[test]
+    fn into_an_empty_block_the_first_one_gives_its_kind() {
+        let mut blocks = vec![b("a", Paragraph, 0, "")];
+        let pasted = markdown_to_blocks("## Lista\n\n- **uno**\n  - dos\n\nfin");
+        let caret = paste_blocks(&mut blocks, 0, 0, pasted, ids());
+        let got: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.indent, b.content.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (BlockKind::Heading2, 0, "Lista"),
+                (Bulleted, 0, "uno"),
+                (Bulleted, 1, "dos"),
+                (Paragraph, 0, "fin"),
+            ]
+        );
+        assert_eq!(blocks[1].marks.len(), 1, "bold kept");
+        assert_eq!(caret, Some(Caret { block: 3, char: 3 }));
+    }
+
+    #[test]
+    fn in_the_middle_of_text_the_text_around_stays() {
+        let mut blocks = vec![b("a", Paragraph, 1, "antes|después")];
+        paste_blocks(&mut blocks, 0, 6, markdown_to_blocks("uno\n\n- dos"), ids());
+        let got: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.kind, b.indent, b.content.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [(Paragraph, 1, "antes|uno"), (Bulleted, 1, "dosdespués")]
+        );
     }
 }

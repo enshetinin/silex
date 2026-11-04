@@ -15,11 +15,14 @@ use crate::marks;
 use crate::model::{
     Block, BlockKind, DatabaseView, MAX_INDENT, NewBlock, Page, PageKind, TrashItem, ViewKind,
 };
-use crate::property::{CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues};
+use crate::property::{
+    self as property_conv, CellValue, Converted, Moment, OptionColor, OptionRef, Property,
+    PropertyKind, SelectOption, TableValues,
+};
 use crate::search::{self, BlockMatch, Candidate, SearchHit};
 use crate::settings::Settings;
 use crate::versions::{self, VersionBlocks, VersionInfo};
-use crate::view::ViewConfig;
+use crate::view::{TablePreview, ViewConfig, table_preview};
 
 pub mod backup;
 
@@ -35,6 +38,11 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (8, include_str!("db/migrations/0008_page_versions.sql")),
     (9, include_str!("db/migrations/0009_templates.sql")),
     (10, include_str!("db/migrations/0010_inline_marks.sql")),
+    (11, include_str!("db/migrations/0011_divider_callout.sql")),
+    (12, include_str!("db/migrations/0012_toggle.sql")),
+    (13, include_str!("db/migrations/0013_page_icon.sql")),
+    (14, include_str!("db/migrations/0014_property_kinds.sql")),
+    (15, include_str!("db/migrations/0015_view_kinds.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -204,6 +212,12 @@ impl Database {
     /// Applies all pending migrations in ONE transaction: the database ends
     /// either fully upgraded or exactly as it was. An existing file database
     /// is backed up (verified copy) before an upgrade.
+    ///
+    /// Foreign keys are off while migrating (ADR 0018, SQLite's procedure for
+    /// changing a table): rebuilding a table that others point at with
+    /// `ON DELETE CASCADE` would otherwise empty them. Before committing, no
+    /// more foreign keys may be broken than before; they are on again after,
+    /// also if something failed.
     fn migrate(&mut self, pre_backup: PreMigrationBackup) -> Result<()> {
         let version: i64 = self
             .conn
@@ -222,12 +236,30 @@ impl Database {
                 "No se pudo crear la copia previa a la actualización; la base no se ha modificado",
             )?;
         }
+        // Has no effect inside a transaction.
+        self.conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let migrated = self.apply_migrations(version);
+        let on = self.conn.pragma_update(None, "foreign_keys", "ON");
+        migrated?;
+        on?;
+        Ok(())
+    }
+
+    /// The migrations after `version`, in one transaction.
+    fn apply_migrations(&mut self, version: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
+        let broken_before = broken_foreign_keys(&tx)?;
         for (target, sql) in MIGRATIONS.iter().filter(|(v, _)| *v > version) {
             tx.execute_batch(sql)
                 .with_context(|| format!("La migración al esquema {target} falló"))?;
             tx.pragma_update(None, "user_version", target)?;
         }
+        let broken = broken_foreign_keys(&tx)?;
+        ensure!(
+            broken <= broken_before,
+            "La actualización del esquema dejaría {} referencias rotas; la base no se ha modificado",
+            broken - broken_before
+        );
         tx.commit()?;
         Ok(())
     }
@@ -271,6 +303,215 @@ impl Database {
             params![OPEN_TABS, json],
         )?;
         Ok(())
+    }
+
+    /// The icon of every page that has one (H12.8), by page id: live, in
+    /// the trash and templates.
+    pub fn page_icons(&self) -> Result<HashMap<String, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, icon FROM pages WHERE icon IS NOT NULL")?;
+        let icons = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<HashMap<String, String>>>()?;
+        Ok(icons)
+    }
+
+    /// Sets the icon of page `id` (one emoji, see [`crate::emoji::is_icon`])
+    /// or removes it with `None`.
+    pub fn set_page_icon(&mut self, id: &str, icon: Option<&str>) -> Result<()> {
+        if let Some(icon) = icon {
+            ensure!(
+                crate::emoji::is_icon(icon),
+                "El icono de una página es un emoji"
+            );
+        }
+        let now = now(&self.conn, self.clock.as_deref())?;
+        // «Editado» (H13.3) moves only if the icon changes.
+        let changed = self.conn.execute(
+            "UPDATE pages SET icon = ?2,
+                 updated_at = CASE WHEN icon IS ?2 THEN updated_at ELSE ?3 END
+             WHERE id = ?1",
+            params![id, icon, now],
+        )?;
+        ensure!(changed == 1, "La página no existe");
+        Ok(())
+    }
+
+    /// The journal's settings (H12.9): the «Diario» page, and the template
+    /// a new day is made from, if any. Kept in `settings`.
+    pub fn journal_settings(&self) -> Result<(Option<String>, Option<String>)> {
+        let get = |key: &str| -> Result<Option<String>> {
+            Ok(self
+                .conn
+                .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                    r.get(0)
+                })
+                .optional()?)
+        };
+        Ok((get(JOURNAL_PAGE)?, get(JOURNAL_TEMPLATE)?))
+    }
+
+    /// Remembers the journal's page (H12.9).
+    pub fn set_journal_page(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![JOURNAL_PAGE, id],
+        )?;
+        Ok(())
+    }
+
+    /// The template new days are made from, or none (H12.9).
+    pub fn set_journal_template(&self, template: Option<&str>) -> Result<()> {
+        match template {
+            Some(id) => {
+                ensure!(
+                    is_template(&self.conn, id)?,
+                    "Esa página no es una plantilla"
+                );
+                self.conn.execute(
+                    "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    params![JOURNAL_TEMPLATE, id],
+                )?;
+            }
+            None => {
+                self.conn
+                    .execute("DELETE FROM settings WHERE key = ?1", [JOURNAL_TEMPLATE])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The note of day `date` (`YYYY-MM-DD`, local) in the journal (H12.9),
+    /// in one transaction: «Diario» (`root`, if it is still a live page;
+    /// else a new one at the root, with 📓), the month inside it
+    /// (`YYYY-MM`) and the day inside that, each made if missing, first
+    /// among its siblings (the latest on top). A new day is made from
+    /// `template` if it is a live template (its blocks, with `{{fecha}}`
+    /// filled in, and its icon), else empty.
+    pub fn journal_day(
+        &mut self,
+        root: Option<&str>,
+        date: &str,
+        template: Option<&str>,
+    ) -> Result<JournalDay> {
+        let valid = date.len() == 10
+            && date.char_indices().all(|(i, c)| {
+                if i == 4 || i == 7 {
+                    c == '-'
+                } else {
+                    c.is_ascii_digit()
+                }
+            });
+        ensure!(valid, "Fecha no válida: {date}");
+        let tx = self.conn.transaction()?;
+        let live_page = |id: &str| -> rusqlite::Result<bool> {
+            tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND kind = 'page'
+                     AND deleted_at IS NULL AND template_at IS NULL)",
+                [id],
+                |r| r.get(0),
+            )
+        };
+        let root = match root {
+            Some(id) if live_page(id)? => id.to_owned(),
+            _ => {
+                let id = Uuid::new_v4().to_string();
+                tx.execute(
+                    "INSERT INTO pages (id, title, parent_id, sort_order, icon)
+                     VALUES (?1, 'Diario', NULL, (SELECT COALESCE(MAX(sort_order), -1) + 1
+                         FROM pages WHERE parent_id IS NULL AND template_at IS NULL), ?2)",
+                    params![id, JOURNAL_ICON],
+                )?;
+                id
+            }
+        };
+        let child = |parent: &str, title: &str| -> rusqlite::Result<Option<String>> {
+            tx.query_row(
+                "SELECT id FROM pages WHERE parent_id = ?1 AND title = ?2 AND kind = 'page'
+                     AND deleted_at IS NULL ORDER BY sort_order LIMIT 1",
+                params![parent, title],
+                |r| r.get(0),
+            )
+            .optional()
+        };
+        // First among its siblings: the latest on top.
+        let insert_first = |parent: &str, title: &str| -> rusqlite::Result<String> {
+            let id = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO pages (id, title, parent_id, sort_order)
+                 VALUES (?1, ?2, ?3, (SELECT COALESCE(MIN(sort_order), 1) - 1
+                     FROM pages WHERE parent_id = ?3))",
+                params![id, title, parent],
+            )?;
+            Ok(id)
+        };
+        let month_title = &date[..7];
+        let month = match child(&root, month_title)? {
+            Some(id) => id,
+            None => insert_first(&root, month_title)?,
+        };
+        let (page, created) = match child(&month, date)? {
+            Some(id) => (id, false),
+            None => {
+                let id = insert_first(&month, date)?;
+                let live_template = |id: &str| -> rusqlite::Result<bool> {
+                    tx.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1
+                             AND template_at IS NOT NULL AND deleted_at IS NULL)",
+                        [id],
+                        |r| r.get(0),
+                    )
+                };
+                if let Some(template) = template
+                    && live_template(template)?
+                {
+                    copy_icon(&tx, template, &id)?;
+                    copy_blocks(&tx, template, &id, Some(date))?;
+                }
+                (id, true)
+            }
+        };
+        tx.commit()?;
+        Ok(JournalDay {
+            root,
+            page,
+            created,
+        })
+    }
+
+    /// The folded toggles as last stored ([`crate::folds::Folds::to_json`]),
+    /// if any (ADR 0016). Kept in `settings`, which ignores the key.
+    pub fn folded_blocks(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [FOLDED_BLOCKS],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Remembers the folded toggles, for the next start.
+    pub fn save_folded_blocks(&self, json: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![FOLDED_BLOCKS, json],
+        )?;
+        Ok(())
+    }
+
+    /// The ids of every toggle block, to forget folds of deleted ones.
+    pub fn toggle_block_ids(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT id FROM blocks WHERE kind = ?1")?;
+        let ids = stmt
+            .query_map([BlockKind::Toggle.as_str()], |r| r.get(0))?
+            .collect::<rusqlite::Result<HashSet<String>>>()?;
+        Ok(ids)
     }
 
     /// The pages opened recently as last stored
@@ -491,10 +732,13 @@ impl Database {
     /// their text is its title, for search and export), in one transaction.
     pub fn rename_page(&self, id: &str, title: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        let now = now(&tx, self.clock.as_deref())?;
+        // «Editado» (H13.3) moves only if the title changes.
         let affected = tx.execute(
-            "UPDATE pages SET title = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            "UPDATE pages SET title = ?2,
+                 updated_at = CASE WHEN title IS ?2 THEN updated_at ELSE ?3 END
              WHERE id = ?1 AND deleted_at IS NULL",
-            params![id, title],
+            params![id, title, now],
         )?;
         ensure!(affected == 1, "La página no existe o está en la papelera");
         retitle_links(&tx, id, title)?;
@@ -551,6 +795,7 @@ impl Database {
             ),
             params![id, title],
         )?;
+        copy_icon(&tx, page_id, &id)?;
         copy_blocks(&tx, page_id, &id, None)?;
         tx.commit()?;
         Ok(id)
@@ -596,6 +841,7 @@ impl Database {
                                   WHERE parent_id IS ?3 AND template_at IS NULL))",
             params![id, crate::templates::fill_date(&title, today), parent],
         )?;
+        copy_icon(&tx, template_id, &id)?;
         copy_blocks(&tx, template_id, &id, Some(today))?;
         tx.commit()?;
         Ok(id)
@@ -736,6 +982,109 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Puts the live rows of `wanted` in that order, in the places they take
+    /// in the database's manual order; the other rows keep theirs (H13.1:
+    /// a row dragged in the table or the board, or that move undone).
+    /// A row in the trash goes along with the live row before it, so once
+    /// restored it is back next to it. Ids that are not live rows of the
+    /// database are left out. Every row is renumbered 0..n in one
+    /// transaction, which also repairs duplicate `sort_order`s. Returns
+    /// whether the order changed.
+    pub fn arrange_rows(&mut self, database_id: &str, wanted: &[String]) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        ensure!(
+            page_kind(&tx, database_id)? == Some(PageKind::Database),
+            "La base de datos no existe o está en la papelera"
+        );
+        // Every row, also the trashed ones, in the order of `database_rows`.
+        let rows: Vec<(String, i64, bool)> = tx
+            .prepare(
+                "SELECT id, sort_order, deleted_at IS NULL FROM pages WHERE parent_id = ?1
+                 ORDER BY sort_order, created_at, id",
+            )?
+            .query_map([database_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        // The live rows, and the trashed ones after each (or at the start).
+        let mut live = Vec::new();
+        let mut trailing: HashMap<Option<&str>, Vec<&str>> = HashMap::new();
+        let mut last_live = None;
+        for (id, _, is_live) in &rows {
+            if *is_live {
+                live.push(id.clone());
+                last_live = Some(id.as_str());
+            } else {
+                trailing.entry(last_live).or_default().push(id);
+            }
+        }
+        let known: HashSet<&str> = live.iter().map(String::as_str).collect();
+        let wanted: Vec<String> = wanted
+            .iter()
+            .filter(|id| known.contains(id.as_str()))
+            .cloned()
+            .collect();
+        let arranged = crate::view::arrange(&live, &wanted);
+        if arranged == live {
+            return Ok(false);
+        }
+        let mut order: Vec<&str> = trailing.get(&None).cloned().unwrap_or_default();
+        for id in &arranged {
+            order.push(id);
+            order.extend(trailing.get(&Some(id.as_str())).into_iter().flatten());
+        }
+        let numbers: HashMap<&str, i64> = rows
+            .iter()
+            .map(|(id, number, _)| (id.as_str(), *number))
+            .collect();
+        {
+            let mut update = tx.prepare("UPDATE pages SET sort_order = ?2 WHERE id = ?1")?;
+            for (position, id) in order.iter().enumerate() {
+                if numbers.get(id) != Some(&(position as i64)) {
+                    update.execute(params![id, position as i64])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// What the card of database `id` shows in a page (H12.11): the first
+    /// `max` rows of the view last open in it (or its first), with their
+    /// values. `None` if `id` is not a live database. Without filters or
+    /// sorts, only those rows' values are read.
+    pub fn database_preview(&self, id: &str, max: usize) -> Result<Option<TablePreview>> {
+        if page_kind(&self.conn, id)? != Some(PageKind::Database) {
+            return Ok(None);
+        }
+        let views = self.database_views(id)?;
+        let last = self.last_view(id)?;
+        let view = last
+            .and_then(|last| views.iter().find(|v| v.id == last))
+            .or_else(|| views.first());
+        let (name, config) = view.map_or_else(
+            || ("Tabla".to_owned(), ViewConfig::default()),
+            |v| (v.name.clone(), v.config.clone()),
+        );
+        let properties = self.database_properties(id)?;
+        let rows = self.database_rows(id)?;
+        let values = if config.sorts.is_empty() && config.filters.is_empty() {
+            let mut values = TableValues::new();
+            for row in rows.iter().take(max) {
+                values.insert(row.id.clone(), self.row_values(&row.id)?);
+            }
+            values
+        } else {
+            self.database_values(id)?
+        };
+        Ok(Some(table_preview(
+            &name,
+            &rows,
+            &values,
+            &properties,
+            &config,
+            max,
+        )))
+    }
+
     /// Views of a database, in their order. An unknown view kind is skipped
     /// (a newer Silex may add kinds), never an error that hides the data.
     pub fn database_views(&self, database_id: &str) -> Result<Vec<DatabaseView>> {
@@ -765,6 +1114,32 @@ impl Database {
             }
         }
         Ok(views)
+    }
+
+    /// The cover of each live row of a database that has one, for a
+    /// gallery (H13.6): the first image block of the row's page (an
+    /// attachment shown as an image), by row id.
+    pub fn database_covers(&self, database_id: &str) -> Result<HashMap<String, String>> {
+        let [png, jpeg] = crate::attachment::PREVIEW_TYPES;
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id,
+                    (SELECT b.attachment_id FROM blocks b
+                     JOIN attachments a ON a.id = b.attachment_id
+                     WHERE b.page_id = p.id AND b.kind = 'file' AND a.mime IN (?2, ?3)
+                     ORDER BY b.position, b.rowid LIMIT 1)
+             FROM pages p
+             WHERE p.parent_id = ?1 AND p.deleted_at IS NULL",
+        )?;
+        let rows = stmt.query_map(params![database_id, png, jpeg], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        let mut covers = HashMap::new();
+        for row in rows {
+            if let (row, Some(cover)) = row? {
+                covers.insert(row, cover);
+            }
+        }
+        Ok(covers)
     }
 
     /// Adds a view of `kind` (a table or a board, H6.5) at the end of a
@@ -998,7 +1373,7 @@ impl Database {
         Ok(())
     }
 
-    /// Adds an option at the end of a live select property.
+    /// Adds an option at the end of a live select or multi-select property.
     pub fn add_select_option(
         &mut self,
         property_id: &str,
@@ -1015,7 +1390,7 @@ impl Database {
             .optional()?
             .context("La propiedad no existe o está borrada")?;
         ensure!(
-            PropertyKind::parse(&kind) == Some(PropertyKind::Select),
+            PropertyKind::parse(&kind).is_some_and(PropertyKind::has_options),
             "Solo las propiedades de selección tienen opciones"
         );
         let id = Uuid::new_v4().to_string();
@@ -1053,7 +1428,212 @@ impl Database {
                     .insert(r.get(1)?, value);
             }
         }
+        // Multi-selects (ADR 0018), in the order of their options.
+        let multi = read_multi_values(
+            &self.conn,
+            "SELECT m.page_id, m.property_id, m.option_id
+             FROM db_multi_values m
+             JOIN db_properties p ON p.id = m.property_id
+             JOIN db_select_options o ON o.id = m.option_id
+             JOIN pages r ON r.id = m.page_id
+             WHERE p.database_id = ?1 AND p.deleted_at IS NULL AND p.kind = 'multi_select'
+               AND r.parent_id = ?1 AND r.deleted_at IS NULL
+             ORDER BY m.page_id, m.property_id, o.position, o.id",
+            database_id,
+        )?;
+        for ((row, property), ids) in multi {
+            values
+                .entry(row)
+                .or_default()
+                .insert(property, CellValue::MultiSelect(ids));
+        }
+        // «Creado» and «Editado» (H13.3), from the rows' pages.
+        let times = read_times(
+            &self.conn,
+            &format!(
+                "SELECT r.id, p.id, p.kind, {ROW_TIME}
+                 FROM db_properties p
+                 JOIN pages r ON r.parent_id = p.database_id AND r.deleted_at IS NULL
+                 WHERE p.database_id = ?1 AND p.deleted_at IS NULL
+                   AND p.kind IN ('created', 'edited')"
+            ),
+            database_id,
+        )?;
+        for (row, property, value) in times {
+            values.entry(row).or_default().insert(property, value);
+        }
         Ok(values)
+    }
+
+    /// What changing the type of the live property `id` to `to` would do
+    /// (H13.4, ADR 0019), without changing anything.
+    pub fn preview_kind_change(&self, id: &str, to: PropertyKind) -> Result<KindChange> {
+        Ok(plan_kind_change(&self.conn, id, to)?.change)
+    }
+
+    /// Changes the type of the live property `id` to `to` in one
+    /// transaction (ADR 0019): each cell gets back the value it had with
+    /// that type before, else its value converted (`property::convert`),
+    /// else it is left empty. Only the column of the new type is written:
+    /// nothing is deleted. New options are created, and the filters on the
+    /// property leave every view. Returns what undoes it exactly.
+    pub fn change_property_kind(&mut self, id: &str, to: PropertyKind) -> Result<KindSnapshot> {
+        let now = now(&self.conn, self.clock.as_deref())?;
+        let tx = self.conn.transaction()?;
+        let plan = plan_kind_change(&tx, id, to)?;
+        let mut snapshot = KindSnapshot {
+            property: id.to_owned(),
+            kind: plan.property.kind,
+            updated_at: tx.query_row(
+                "SELECT updated_at FROM db_properties WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )?,
+            values: read_stored_values(&tx, id)?,
+            multi: tx
+                .prepare(
+                    "SELECT page_id, option_id FROM db_multi_values WHERE property_id = ?1
+                     ORDER BY page_id, option_id",
+                )?
+                .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?,
+            created: Vec::new(),
+            views: plan
+                .views
+                .iter()
+                .map(|(view, old, _)| (view.clone(), old.clone()))
+                .collect(),
+        };
+        // New options, after the property's, with the colors in turn.
+        let mut options: Vec<SelectOption> = plan.property.options.clone();
+        for name in &plan.change.new_options {
+            let option = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO db_select_options (id, property_id, name, color, position)
+                 VALUES (?1, ?2, ?3, ?4,
+                         (SELECT COALESCE(MAX(position), -1) + 1 FROM db_select_options
+                          WHERE property_id = ?2))",
+                params![
+                    option,
+                    id,
+                    name,
+                    OptionColor::for_new_option(options.len()).as_str()
+                ],
+            )?;
+            options.push(SelectOption {
+                id: option.clone(),
+                name: name.clone(),
+                color: OptionColor::Gray,
+            });
+            snapshot.created.push(option);
+        }
+        let options = OptionIndex::new(&options);
+        for (row, value) in &plan.writes {
+            write_converted(&tx, id, row, value, plan.to, &options)?;
+        }
+        tx.execute(
+            "UPDATE db_properties SET kind = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, plan.to.as_str(), now],
+        )?;
+        for (view, _, config) in &plan.views {
+            tx.execute(
+                "UPDATE db_views SET config = ?2 WHERE id = ?1",
+                params![view, config],
+            )?;
+        }
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
+    /// Puts a property back as it was before [`Self::change_property_kind`]
+    /// (Cmd+Z): its type, its cells as stored and the views' filters; the
+    /// options that change created are deleted. Cells of pages deleted for
+    /// good, and options deleted since, are left out.
+    pub fn restore_property_kind(&mut self, snapshot: &KindSnapshot) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let affected = tx.execute(
+            "UPDATE db_properties SET kind = ?2, updated_at = ?3 WHERE id = ?1",
+            params![
+                snapshot.property,
+                snapshot.kind.as_str(),
+                snapshot.updated_at
+            ],
+        )?;
+        ensure!(affected == 1, "La propiedad ya no existe");
+        tx.execute(
+            "DELETE FROM db_values WHERE property_id = ?1",
+            [&snapshot.property],
+        )?;
+        tx.execute(
+            "DELETE FROM db_multi_values WHERE property_id = ?1",
+            [&snapshot.property],
+        )?;
+        for option in &snapshot.created {
+            tx.execute(
+                "DELETE FROM db_select_options WHERE id = ?1 AND property_id = ?2",
+                params![option, snapshot.property],
+            )?;
+        }
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO db_values (page_id, property_id, text_value, number_value, bool_value,
+                                        date_value, option_id, updated_at)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6,
+                        (SELECT id FROM db_select_options WHERE id = ?7 AND property_id = ?2), ?8
+                 WHERE EXISTS (SELECT 1 FROM pages WHERE id = ?1)",
+            )?;
+            for v in &snapshot.values {
+                insert.execute(params![
+                    v.page,
+                    snapshot.property,
+                    v.text,
+                    v.number,
+                    v.flag,
+                    v.date,
+                    v.option,
+                    v.updated_at
+                ])?;
+            }
+        }
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO db_multi_values (page_id, property_id, option_id)
+                 SELECT ?1, ?2, ?3
+                 WHERE EXISTS (SELECT 1 FROM pages WHERE id = ?1)
+                   AND EXISTS (SELECT 1 FROM db_select_options WHERE id = ?3 AND property_id = ?2)",
+            )?;
+            for (page, option) in &snapshot.multi {
+                insert.execute(params![page, snapshot.property, option])?;
+            }
+        }
+        for (view, config) in &snapshot.views {
+            tx.execute(
+                "UPDATE db_views SET config = ?2 WHERE id = ?1",
+                params![view, config],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The «Creado» and «Editado» values of one live row (property id →
+    /// value): read again after the row changes (H13.3).
+    pub fn row_times(&self, row_id: &str) -> Result<HashMap<String, CellValue>> {
+        let times = read_times(
+            &self.conn,
+            &format!(
+                "SELECT r.id, p.id, p.kind, {ROW_TIME}
+                 FROM pages r
+                 JOIN db_properties p ON p.database_id = r.parent_id AND p.deleted_at IS NULL
+                                      AND p.kind IN ('created', 'edited')
+                 WHERE r.id = ?1 AND r.deleted_at IS NULL"
+            ),
+            row_id,
+        )?;
+        Ok(times
+            .into_iter()
+            .map(|(_, property, value)| (property, value))
+            .collect())
     }
 
     /// The values of one live row (property id → value) for the live
@@ -1076,6 +1656,22 @@ impl Database {
                 values.insert(r.get(0)?, value);
             }
         }
+        let multi = read_multi_values(
+            &self.conn,
+            "SELECT m.page_id, m.property_id, m.option_id
+             FROM pages r
+             JOIN db_properties p ON p.database_id = r.parent_id AND p.deleted_at IS NULL
+                                  AND p.kind = 'multi_select'
+             JOIN db_multi_values m ON m.page_id = r.id AND m.property_id = p.id
+             JOIN db_select_options o ON o.id = m.option_id
+             WHERE r.id = ?1 AND r.deleted_at IS NULL
+             ORDER BY m.property_id, o.position, o.id",
+            row_id,
+        )?;
+        for ((_, property), ids) in multi {
+            values.insert(property, CellValue::MultiSelect(ids));
+        }
+        values.extend(self.row_times(row_id)?);
         Ok(values)
     }
 
@@ -1152,7 +1748,9 @@ impl Database {
     /// Sets the value of one cell; `None` or an empty value (empty text, an
     /// unticked box) clears it. The row must be a live row of the property's
     /// database, the property live, and the value of its kind (a finite
-    /// number, an option of that property). Rejected values change nothing.
+    /// number, an option of that property). «Creado» and «Editado» cannot
+    /// be written. The row's «Editado» moves to now. Rejected values change
+    /// nothing.
     pub fn set_value(
         &mut self,
         row_id: &str,
@@ -1160,7 +1758,7 @@ impl Database {
         value: Option<&CellValue>,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        write_value(&tx, row_id, property_id, value)?;
+        write_value(&tx, self.clock.as_deref(), row_id, property_id, value)?;
         tx.commit()?;
         Ok(())
     }
@@ -1171,7 +1769,7 @@ impl Database {
     pub fn set_values(&mut self, cells: &[(&str, &str, Option<&CellValue>)]) -> Result<()> {
         let tx = self.conn.transaction()?;
         for (row_id, property_id, value) in cells {
-            write_value(&tx, row_id, property_id, *value)?;
+            write_value(&tx, self.clock.as_deref(), row_id, property_id, *value)?;
         }
         tx.commit()?;
         Ok(())
@@ -1186,8 +1784,10 @@ impl Database {
         blocks: &[NewBlock],
     ) -> Result<String> {
         ensure!(
-            blocks.iter().all(|b| b.kind.is_text()),
-            "Una página nueva no puede crearse con archivos adjuntos"
+            blocks
+                .iter()
+                .all(|b| !matches!(b.kind, BlockKind::File | BlockKind::PageLink)),
+            "Una página nueva no puede crearse con archivos adjuntos ni enlaces"
         );
         let tx = self.conn.transaction()?;
         if let Some(parent) = parent_id {
@@ -1201,10 +1801,16 @@ impl Database {
         )?;
         {
             let mut insert = tx.prepare(
-                "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO blocks (id, page_id, kind, content, checked, position, indent, marks)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for (position, block) in blocks.iter().enumerate() {
+                // Formatting is stored as on every save (ADR 0015).
+                let marks = if block.kind.takes_marks() {
+                    marks::sanitize(&block.marks, &block.content)
+                } else {
+                    Vec::new()
+                };
                 insert.execute(params![
                     Uuid::new_v4().to_string(),
                     page_id,
@@ -1213,6 +1819,7 @@ impl Database {
                     block.checked && block.kind == BlockKind::Todo,
                     position as i64,
                     block.indent.min(MAX_INDENT),
+                    marks::to_json(&marks),
                 ])?;
             }
         }
@@ -1241,8 +1848,83 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Moves blocks to the end of page `to`, in the order given, in one
+    /// transaction (ADR 0017). Their ids stay, and with them their search
+    /// index, attachments and links. The shallowest of them goes to the
+    /// left edge, and the others keep their indent relative to it. Ids not
+    /// found are skipped. Returns the pages they were in, other than `to`.
+    /// `to` must be a page (not a database), also one in the trash
+    /// (undoing and redoing a move).
+    pub fn move_blocks(&mut self, ids: &[String], to: &str) -> Result<Vec<String>> {
+        let tx = self.conn.transaction()?;
+        let kind: Option<String> = tx
+            .query_row("SELECT kind FROM pages WHERE id = ?1", [to], |r| r.get(0))
+            .optional()?;
+        ensure!(
+            kind.as_deref() == Some(PageKind::Page.as_str()),
+            "Los bloques solo se pueden mover a una página"
+        );
+        let mut position: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM blocks WHERE page_id = ?1",
+            [to],
+            |r| r.get(0),
+        )?;
+        let mut found = Vec::with_capacity(ids.len());
+        for id in ids {
+            let row: Option<(String, u8)> = tx
+                .query_row(
+                    "SELECT page_id, indent FROM blocks WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((page, indent)) = row {
+                found.push((id, page, indent));
+            }
+        }
+        let left = found
+            .iter()
+            .map(|(_, _, indent)| *indent)
+            .min()
+            .unwrap_or(0);
+        let mut from = Vec::new();
+        for (id, page, indent) in found {
+            tx.execute(
+                "UPDATE blocks SET page_id = ?2, position = ?3, indent = ?4,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1",
+                params![id, to, position, indent - left],
+            )?;
+            position += 1;
+            if page != to && !from.contains(&page) {
+                from.push(page);
+            }
+        }
+        tx.commit()?;
+        Ok(from)
+    }
+
+    /// The blocks with these ids as stored now, in whatever page they are.
+    pub fn blocks_by_ids(&self, ids: &[String]) -> Result<Vec<Block>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, page_id, kind, content, checked, position, indent, attachment_id,
+                    link_page_id, marks
+             FROM blocks WHERE id = ?1",
+        )?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(block) = stmt.query_row([id], read_block).optional()? {
+                out.push(block);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn add_block(&self, page_id: &str, kind: BlockKind) -> Result<String> {
-        ensure!(kind.is_text(), "Un archivo se añade con su adjunto");
+        ensure!(
+            !matches!(kind, BlockKind::File | BlockKind::PageLink),
+            "Un archivo o un enlace se añade con su archivo o su página"
+        );
         let id = Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO blocks (id, page_id, kind, position)
@@ -1301,8 +1983,7 @@ impl Database {
         };
         let mut changed = old_title != title;
         tx.execute(
-            "UPDATE pages SET title = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1 AND deleted_at IS NULL",
+            "UPDATE pages SET title = ?2 WHERE id = ?1 AND deleted_at IS NULL",
             params![page_id, title],
         )?;
         retitle_links(&tx, page_id, title)?;
@@ -1348,6 +2029,18 @@ impl Database {
                     &linked
                 }
                 None => block,
+            };
+            // A divider has no text (H12.2, and a CHECK in 0011): whatever
+            // the document holds, none is stored.
+            let cleared;
+            let block = if block.kind == BlockKind::Divider && !block.content.is_empty() {
+                cleared = Block {
+                    content: String::new(),
+                    ..block.clone()
+                };
+                &cleared
+            } else {
+                block
             };
             // Formatting is stored clean (ADR 0015): in normal form, inside
             // the text, and only on kinds that take it.
@@ -1413,8 +2106,10 @@ impl Database {
             }
         }
         // The page as it was before this save, if its last version is old
-        // enough (ADR 0009).
+        // enough (ADR 0009). «Editado» (H13.3) moves only if something
+        // changed: saving an untouched page leaves it.
         if changed {
+            touch_page(&tx, self.clock.as_deref(), page_id)?;
             let mut before: Vec<Block> = stored.into_values().collect();
             before.sort_by(|a, b| (a.position, &a.id).cmp(&(b.position, &b.id)));
             save_version(
@@ -1695,6 +2390,20 @@ impl Database {
         tx.execute("DELETE FROM settings WHERE key = ?1", [COMPACTING])?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Directed links between live, non-template pages, without duplicates.
+    pub fn graph_edges(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT b.page_id, b.link_page_id FROM blocks b
+             JOIN pages s ON s.id = b.page_id JOIN pages t ON t.id = b.link_page_id
+             WHERE s.deleted_at IS NULL AND t.deleted_at IS NULL
+             AND s.template_at IS NULL AND t.template_at IS NULL
+             AND s.id <> t.id ORDER BY b.page_id, b.link_page_id",
+        )?;
+        Ok(stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// The pages the links of `page_id` point at, live or in the trash
@@ -2068,6 +2777,74 @@ impl Database {
     }
 }
 
+/// What changing a property's type does (H13.4, ADR 0019): shown before
+/// it is done, and computed by the same plan that does it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KindChange {
+    /// Cells whose value is converted to the new type.
+    pub converted: usize,
+    /// Cells that show again the value they had with the new type before
+    /// (stored and never edited since).
+    pub restored: usize,
+    /// Cells whose value does not fit: left empty, the value kept hidden.
+    pub emptied: usize,
+    /// Options that will be created, in order.
+    pub new_options: Vec<String>,
+    /// Filters on the property that are taken out of the views.
+    pub filters: usize,
+}
+
+/// A property as it was before its type changed: what
+/// [`Database::restore_property_kind`] puts back exactly (ADR 0019).
+#[derive(Debug, Clone, PartialEq)]
+pub struct KindSnapshot {
+    property: String,
+    kind: PropertyKind,
+    updated_at: String,
+    values: Vec<ValueRow>,
+    /// `db_multi_values` rows: (page, option).
+    multi: Vec<(String, String)>,
+    /// Options the change created.
+    created: Vec<String>,
+    /// Views whose filters changed: (view, config as it was).
+    views: Vec<(String, String)>,
+}
+
+impl KindSnapshot {
+    /// The property it is of.
+    pub fn property(&self) -> &str {
+        &self.property
+    }
+
+    /// Its type before the change.
+    pub fn kind(&self) -> PropertyKind {
+        self.kind
+    }
+}
+
+/// A `db_values` row of one property, as stored.
+#[derive(Debug, Clone, PartialEq)]
+struct ValueRow {
+    page: String,
+    text: Option<String>,
+    number: Option<f64>,
+    flag: Option<i64>,
+    date: Option<String>,
+    option: Option<String>,
+    updated_at: String,
+}
+
+/// What a type change will do: its preview, the cells to write and the
+/// views to change.
+struct KindPlan {
+    property: Property,
+    to: PropertyKind,
+    change: KindChange,
+    writes: Vec<(String, Converted)>,
+    /// (view, config as it is, config without the property's filters).
+    views: Vec<(String, String, String)>,
+}
+
 /// Which properties [`read_properties`] lists.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Deleted {
@@ -2160,9 +2937,397 @@ fn read_cell(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Option<CellVa
     ))
 }
 
+/// The options of one multi-select cell: (row id, property id) and the
+/// option ids in their order.
+type MultiCell = ((String, String), Vec<String>);
+
+/// The options of multi-select cells read by `sql` (page id, property id,
+/// option id, ordered by cell and then option), by cell.
+fn read_multi_values(conn: &Connection, sql: &str, param: &str) -> Result<Vec<MultiCell>> {
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query([param])?;
+    let mut cells: Vec<MultiCell> = Vec::new();
+    while let Some(r) = rows.next()? {
+        let cell: (String, String) = (r.get(0)?, r.get(1)?);
+        let option: String = r.get(2)?;
+        match cells.last_mut() {
+            Some((last, ids)) if *last == cell => ids.push(option),
+            _ => cells.push((cell, vec![option])),
+        }
+    }
+    Ok(cells)
+}
+
+/// Now (`YYYY-MM-DDTHH:MM:SS.sssZ`, UTC): the clock fixed by
+/// [`Database::set_clock`] in tests, else SQLite's.
+fn now(conn: &Connection, clock: Option<&str>) -> Result<String> {
+    Ok(match clock {
+        Some(now) => now.to_owned(),
+        None => conn.query_row(&format!("SELECT {NOW}"), [], |r| r.get(0))?,
+    })
+}
+
+/// Marks a page as edited now: its «Editado» in a database (H13.3).
+fn touch_page(tx: &Connection, clock: Option<&str>, page_id: &str) -> Result<()> {
+    tx.execute(
+        "UPDATE pages SET updated_at = ?2 WHERE id = ?1",
+        params![page_id, now(tx, clock)?],
+    )?;
+    Ok(())
+}
+
+/// When rows were created and last edited, local time to the minute, as
+/// the values of a database's live «Creado» and «Editado» properties
+/// (H13.3): `(row, property, value)`. `sql` takes one parameter and
+/// selects the row id, the property id, its kind and the page's
+/// `created_at` or `updated_at`. A stamp that cannot be read is left out.
+fn read_times(
+    conn: &Connection,
+    sql: &str,
+    param: &str,
+) -> Result<Vec<(String, String, CellValue)>> {
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query([param])?;
+    let mut times = Vec::new();
+    while let Some(r) = rows.next()? {
+        let kind: String = r.get(2)?;
+        let local: Option<String> = r.get(3)?;
+        let Some(moment) = local.as_deref().and_then(Moment::parse) else {
+            continue;
+        };
+        let value = match PropertyKind::parse(&kind) {
+            Some(PropertyKind::Created) => CellValue::Created(moment),
+            Some(PropertyKind::Edited) => CellValue::Edited(moment),
+            _ => continue,
+        };
+        times.push((r.get(0)?, r.get(1)?, value));
+    }
+    Ok(times)
+}
+
+/// The local time of a page's creation or last edit for a property row
+/// `p` and a page `r`, to the minute: what [`read_times`] reads.
+const ROW_TIME: &str = "strftime('%Y-%m-%d %H:%M',
+                                 CASE p.kind WHEN 'created' THEN r.created_at ELSE r.updated_at END,
+                                 'localtime')";
+
+/// Plans changing the type of the live property `id` to `to` (ADR 0019):
+/// what each cell becomes, the options to create and the views to change.
+fn plan_kind_change(conn: &Connection, id: &str, to: PropertyKind) -> Result<KindPlan> {
+    let database: String = conn
+        .query_row(
+            "SELECT database_id FROM db_properties WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .context("La propiedad no existe o está borrada")?;
+    let property = read_properties(conn, &database, Deleted::No)?
+        .into_iter()
+        .find(|p| p.id == id)
+        .context("La propiedad es de un tipo que esta versión no conoce")?;
+    let from = property.kind;
+    ensure!(from != to, "La propiedad ya es de tipo «{}»", to.label());
+    // The cells as they read now, and what the column of the new type
+    // already holds.
+    let current = cells_as(conn, &database, &property, from)?;
+    let before = if to.is_computed() {
+        HashMap::new()
+    } else {
+        cells_as(conn, &database, &property, to)?
+    };
+    // Rows in their manual order (new options are named in that order),
+    // then pages that left the database, which keep their values.
+    let mut order: Vec<String> = conn
+        .prepare("SELECT id FROM pages WHERE parent_id = ?1 ORDER BY sort_order, created_at, id")?
+        .query_map([&database], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let known: std::collections::HashSet<String> = order.iter().cloned().collect();
+    let mut others: Vec<String> = current
+        .keys()
+        .chain(before.keys())
+        .filter(|row| !known.contains(*row))
+        .cloned()
+        .collect();
+    others.sort();
+    others.dedup();
+    order.extend(others);
+
+    let same_column = matches!(
+        (from, to),
+        (
+            PropertyKind::Text | PropertyKind::Url,
+            PropertyKind::Text | PropertyKind::Url
+        )
+    );
+    let mut change = KindChange::default();
+    let mut writes = Vec::new();
+    let mut new_names: Vec<String> = Vec::new();
+    // Options by name, ignoring case and accents: those of the property
+    // and the new ones.
+    let mut named: std::collections::HashSet<String> = property
+        .options
+        .iter()
+        .map(|o| crate::editor::fold(o.name.trim()))
+        .collect();
+    for row in &order {
+        let value = current.get(row);
+        if to.is_computed() {
+            change.emptied += usize::from(value.is_some());
+            continue;
+        }
+        if same_column {
+            change.converted += usize::from(value.is_some());
+            continue;
+        }
+        if before.contains_key(row) {
+            change.restored += 1;
+            continue;
+        }
+        let Some(value) = value else {
+            continue;
+        };
+        let Some(converted) = property_conv::convert(value, &property, to) else {
+            change.emptied += 1;
+            continue;
+        };
+        if let Converted::Options(refs) = &converted {
+            for name in refs.iter().filter_map(|r| match r {
+                OptionRef::Name(name) => Some(name),
+                OptionRef::Id(_) => None,
+            }) {
+                if named.insert(crate::editor::fold(name.trim())) {
+                    new_names.push(name.clone());
+                }
+            }
+        }
+        change.converted += 1;
+        writes.push((row.clone(), converted));
+    }
+    change.new_options = new_names;
+
+    let mut views = Vec::new();
+    let mut stmt =
+        conn.prepare("SELECT id, config FROM db_views WHERE database_id = ?1 ORDER BY id")?;
+    let mut rows = stmt.query([&database])?;
+    while let Some(r) = rows.next()? {
+        let (view, json): (String, String) = (r.get(0)?, r.get(1)?);
+        let mut config = ViewConfig::from_json(&json);
+        let before = config.filters.len();
+        config.filters.retain(|f| f.property != id);
+        let taken = before - config.filters.len();
+        if taken > 0 {
+            change.filters += taken;
+            views.push((view, json, config.to_json()));
+        }
+    }
+    Ok(KindPlan {
+        property,
+        to,
+        change,
+        writes,
+        views,
+    })
+}
+
+/// The cells of `property` read as if it were of type `kind`: page id →
+/// value, for every page that has one (also rows in the trash, and pages
+/// that left the database). «Creado» and «Editado» come from the rows of
+/// `database`.
+fn cells_as(
+    conn: &Connection,
+    database: &str,
+    property: &Property,
+    kind: PropertyKind,
+) -> Result<HashMap<String, CellValue>> {
+    let mut cells = HashMap::new();
+    match kind {
+        PropertyKind::Created | PropertyKind::Edited => {
+            let column = if kind == PropertyKind::Created {
+                "SELECT id, strftime('%Y-%m-%d %H:%M', created_at, 'localtime') FROM pages WHERE parent_id = ?1"
+            } else {
+                "SELECT id, strftime('%Y-%m-%d %H:%M', updated_at, 'localtime') FROM pages WHERE parent_id = ?1"
+            };
+            let mut stmt = conn.prepare(column)?;
+            let mut rows = stmt.query([database])?;
+            while let Some(r) = rows.next()? {
+                let local: Option<String> = r.get(1)?;
+                if let Some(moment) = local.as_deref().and_then(Moment::parse) {
+                    let value = if kind == PropertyKind::Created {
+                        CellValue::Created(moment)
+                    } else {
+                        CellValue::Edited(moment)
+                    };
+                    cells.insert(r.get(0)?, value);
+                }
+            }
+        }
+        PropertyKind::MultiSelect => {
+            let multi = read_multi_values(
+                conn,
+                "SELECT m.page_id, m.property_id, m.option_id
+                 FROM db_multi_values m
+                 JOIN db_select_options o ON o.id = m.option_id
+                 WHERE m.property_id = ?1
+                 ORDER BY m.page_id, o.position, o.id",
+                &property.id,
+            )?;
+            for ((page, _), ids) in multi {
+                cells.insert(page, CellValue::MultiSelect(ids));
+            }
+        }
+        _ => {
+            let mut stmt = conn.prepare(
+                "SELECT v.page_id, v.text_value, v.number_value, v.bool_value, v.date_value, o.id
+                 FROM db_values v
+                 LEFT JOIN db_select_options o ON o.id = v.option_id AND o.property_id = v.property_id
+                 WHERE v.property_id = ?1",
+            )?;
+            let mut rows = stmt.query([&property.id])?;
+            while let Some(r) = rows.next()? {
+                let value = CellValue::from_columns(
+                    kind,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                );
+                if let Some(value) = value {
+                    cells.insert(r.get(0)?, value);
+                }
+            }
+        }
+    }
+    Ok(cells)
+}
+
+/// Every `db_values` row of a property, as stored (for undo).
+fn read_stored_values(conn: &Connection, property: &str) -> Result<Vec<ValueRow>> {
+    Ok(conn
+        .prepare(
+            "SELECT page_id, text_value, number_value, bool_value, date_value, option_id, updated_at
+             FROM db_values WHERE property_id = ?1 ORDER BY page_id",
+        )?
+        .query_map([property], |r| {
+            Ok(ValueRow {
+                page: r.get(0)?,
+                text: r.get(1)?,
+                number: r.get(2)?,
+                flag: r.get(3)?,
+                date: r.get(4)?,
+                option: r.get(5)?,
+                updated_at: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// A property's options by id and by name (ignoring case and accents; the
+/// first of the same name), to find those of converted cells at once.
+struct OptionIndex {
+    ids: std::collections::HashSet<String>,
+    names: HashMap<String, String>,
+}
+
+impl OptionIndex {
+    fn new(options: &[SelectOption]) -> Self {
+        let mut names = HashMap::new();
+        for option in options {
+            names
+                .entry(crate::editor::fold(option.name.trim()))
+                .or_insert_with(|| option.id.clone());
+        }
+        Self {
+            ids: options.iter().map(|o| o.id.clone()).collect(),
+            names,
+        }
+    }
+
+    fn find(&self, option: &OptionRef) -> Option<String> {
+        match option {
+            OptionRef::Id(id) => self.ids.contains(id).then(|| id.clone()),
+            OptionRef::Name(name) => self.names.get(&crate::editor::fold(name.trim())).cloned(),
+        }
+    }
+}
+
+/// Writes a converted cell: only the column of type `to` (for a
+/// multi-select, the cell's `db_multi_values` rows).
+fn write_converted(
+    tx: &Connection,
+    property_id: &str,
+    row: &str,
+    value: &Converted,
+    to: PropertyKind,
+    options: &OptionIndex,
+) -> Result<()> {
+    let upsert = |sql: &str, value: &dyn rusqlite::ToSql| -> Result<()> {
+        tx.execute(sql, params![row, property_id, value])?;
+        Ok(())
+    };
+    match value {
+        Converted::Text(text) => upsert(
+            "INSERT INTO db_values (page_id, property_id, text_value) VALUES (?1, ?2, ?3)
+             ON CONFLICT (page_id, property_id) DO UPDATE SET text_value = excluded.text_value",
+            text,
+        ),
+        Converted::Number(n) => {
+            ensure!(n.is_finite(), "El número no es válido");
+            upsert(
+                "INSERT INTO db_values (page_id, property_id, number_value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (page_id, property_id) DO UPDATE SET number_value = excluded.number_value",
+                n,
+            )
+        }
+        Converted::Checkbox(on) => upsert(
+            "INSERT INTO db_values (page_id, property_id, bool_value) VALUES (?1, ?2, ?3)
+             ON CONFLICT (page_id, property_id) DO UPDATE SET bool_value = excluded.bool_value",
+            &i64::from(*on),
+        ),
+        Converted::Date(date) => upsert(
+            "INSERT INTO db_values (page_id, property_id, date_value) VALUES (?1, ?2, ?3)
+             ON CONFLICT (page_id, property_id) DO UPDATE SET date_value = excluded.date_value",
+            &date.to_string(),
+        ),
+        Converted::Options(refs) => {
+            let mut ids: Vec<String> = Vec::new();
+            for r in refs {
+                let id = options
+                    .find(r)
+                    .context("Falta una opción de la conversión")?;
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            if to == PropertyKind::Select {
+                let first = ids.first().context("Una selección sin opción")?;
+                upsert(
+                    "INSERT INTO db_values (page_id, property_id, option_id) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (page_id, property_id) DO UPDATE SET option_id = excluded.option_id",
+                    first,
+                )
+            } else {
+                tx.execute(
+                    "DELETE FROM db_multi_values WHERE page_id = ?1 AND property_id = ?2",
+                    params![row, property_id],
+                )?;
+                for id in &ids {
+                    tx.execute(
+                        "INSERT INTO db_multi_values (page_id, property_id, option_id) VALUES (?1, ?2, ?3)",
+                        params![row, property_id, id],
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Writes one cell inside `tx` (see [`Database::set_value`] for the rules).
 fn write_value(
     tx: &Connection,
+    clock: Option<&str>,
     row_id: &str,
     property_id: &str,
     value: Option<&CellValue>,
@@ -2177,6 +3342,11 @@ fn write_value(
         .context("La propiedad no existe o está borrada")?;
     let kind = PropertyKind::parse(&kind)
         .with_context(|| format!("tipo de propiedad desconocido: {kind}"))?;
+    ensure!(
+        !kind.is_computed(),
+        "«{}» lo pone Silex: no se puede cambiar",
+        kind.label()
+    );
     let is_row: bool = tx.query_row(
         "SELECT EXISTS (SELECT 1 FROM pages WHERE id = ?1 AND parent_id = ?2 AND deleted_at IS NULL)",
         params![row_id, database],
@@ -2194,6 +3364,13 @@ fn write_value(
             kind.label()
         );
     }
+    // The row was edited (H13.3).
+    touch_page(tx, clock, row_id)?;
+    // A multi-select's options are rows of their own (ADR 0018).
+    tx.execute(
+        "DELETE FROM db_multi_values WHERE page_id = ?1 AND property_id = ?2",
+        params![row_id, property_id],
+    )?;
     match value.filter(|v| !v.is_empty()) {
         None => {
             tx.execute(
@@ -2201,11 +3378,30 @@ fn write_value(
                 params![row_id, property_id],
             )?;
         }
+        Some(CellValue::MultiSelect(ids)) => {
+            tx.execute(
+                "DELETE FROM db_values WHERE page_id = ?1 AND property_id = ?2",
+                params![row_id, property_id],
+            )?;
+            let mut insert = tx.prepare(
+                "INSERT OR IGNORE INTO db_multi_values (page_id, property_id, option_id)
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for id in ids {
+                let belongs: bool = tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM db_select_options WHERE id = ?1 AND property_id = ?2)",
+                    params![id, property_id],
+                    |r| r.get(0),
+                )?;
+                ensure!(belongs, "La opción no es de esta propiedad");
+                insert.execute(params![row_id, property_id, id])?;
+            }
+        }
         Some(value) => {
             let (mut text, mut number, mut flag, mut date, mut option) =
                 (None, None, None, None, None);
             match value {
-                CellValue::Text(t) => text = Some(t.as_str()),
+                CellValue::Text(t) | CellValue::Url(t) => text = Some(t.as_str()),
                 CellValue::Number(n) => {
                     ensure!(n.is_finite(), "El número no es válido");
                     number = Some(*n);
@@ -2220,6 +3416,11 @@ fn write_value(
                     )?;
                     ensure!(belongs, "La opción no es de esta propiedad");
                     option = Some(id.as_str());
+                }
+                CellValue::MultiSelect(_) => bail!("La selección múltiple se escribe aparte"),
+                // Rejected above with the property's kind.
+                CellValue::Created(_) | CellValue::Edited(_) => {
+                    bail!("La fecha de creación o edición no se escribe")
                 }
             }
             tx.execute(
@@ -2281,6 +3482,14 @@ fn restore_branch(tx: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// How many rows break a foreign key (`PRAGMA foreign_key_check`).
+fn broken_foreign_keys(conn: &Connection) -> Result<usize> {
+    let count: i64 = conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+        r.get(0)
+    })?;
+    Ok(usize::try_from(count).unwrap_or(0))
+}
+
 /// Kind of a live page; `None` if it is missing or in the trash.
 fn page_kind(conn: &Connection, id: &str) -> Result<Option<PageKind>> {
     let kind: Option<String> = conn
@@ -2324,6 +3533,25 @@ const COMPACTING: &str = "compacting";
 const SYNCED_WARNING: &str = "synced_warning_dismissed";
 /// `settings` key of the open tabs (ADR 0011).
 const OPEN_TABS: &str = "open_tabs";
+/// `settings` keys of the journal (H12.9): its page and its template.
+const JOURNAL_PAGE: &str = "journal_page";
+const JOURNAL_TEMPLATE: &str = "journal_template";
+/// The icon a new «Diario» gets.
+const JOURNAL_ICON: &str = "📓";
+
+/// What [`Database::journal_day`] found or made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalDay {
+    /// The «Diario» page (a new one if there was none).
+    pub root: String,
+    /// The day's page.
+    pub page: String,
+    /// The day was made now.
+    pub created: bool,
+}
+
+/// `settings` key of the folded toggles (ADR 0016).
+const FOLDED_BLOCKS: &str = "folded_blocks";
 /// `settings` key of the pages opened recently (H11.8).
 const RECENT_PAGES: &str = "recent_pages";
 /// Start of the `settings` key of a database's last open view (H11.6),
@@ -2441,10 +3669,7 @@ fn save_version(
     if blocks.iter().all(empty) {
         return Ok(false);
     }
-    let now: String = match clock {
-        Some(now) => now.to_owned(),
-        None => tx.query_row(&format!("SELECT {NOW}"), [], |r| r.get(0))?,
-    };
+    let now = now(tx, clock)?;
     let json = versions::blocks_to_json(blocks);
     let new_format = versions::format_of(blocks);
     let last: Option<(String, i64, String, bool)> = tx
@@ -2557,6 +3782,16 @@ type StoredValue = (
 /// `parent`, named `title` (its subpages keep theirs). `ids` maps the ids
 /// of copied properties and options to the new ones, for the views and
 /// values of the pages copied after them. Returns the new page's id.
+/// Gives page `to` the icon of page `from` (H12.8): duplicates and
+/// templates keep it.
+fn copy_icon(tx: &Connection, from: &str, to: &str) -> Result<()> {
+    tx.execute(
+        "UPDATE pages SET icon = (SELECT icon FROM pages WHERE id = ?1) WHERE id = ?2",
+        params![from, to],
+    )?;
+    Ok(())
+}
+
 fn copy_page_tree(
     tx: &Connection,
     from: &str,
@@ -2575,6 +3810,7 @@ fn copy_page_tree(
         "INSERT INTO pages (id, title, parent_id, kind, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![id, title, parent, kind, sort_order],
     )?;
+    copy_icon(tx, from, &id)?;
     copy_blocks(tx, from, &id, None)?;
     if kind == PageKind::Database.as_str() {
         copy_schema(tx, from, &id, ids)?;
@@ -2611,6 +3847,17 @@ fn copy_page_tree(
                 date,
                 option.as_ref().map(mapped)
             ],
+        )?;
+    }
+    // A row's multi-select cells (ADR 0018).
+    let chosen: Vec<(String, String)> = tx
+        .prepare("SELECT property_id, option_id FROM db_multi_values WHERE page_id = ?1")?
+        .query_map([from], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (property, option) in &chosen {
+        tx.execute(
+            "INSERT INTO db_multi_values (page_id, property_id, option_id) VALUES (?1, ?2, ?3)",
+            params![id, mapped(property), mapped(option)],
         )?;
     }
     if children {

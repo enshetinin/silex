@@ -105,7 +105,9 @@ impl SilexApp {
             for (index, id) in self.tabs.ids().iter().enumerate() {
                 let active = index == self.tabs.active();
                 // The open page's title as it is being typed.
-                let (title, kind) = if active {
+                let (title, kind) = if id == graph::TAB_ID {
+                    ("Grafo".to_owned(), None)
+                } else if active {
                     (self.title.clone(), self.find_page(id).map(|p| p.kind))
                 } else {
                     match self.find_page(id) {
@@ -146,11 +148,13 @@ impl SilexApp {
                 } else {
                     icons::PAGE
                 };
-                let at = ui.painter().text(
+                let at = icons::paint_page_icon(
+                    ui.painter(),
                     egui::pos2(rect.left() + 8.0, rect.center().y),
                     egui::Align2::LEFT_CENTER,
+                    self.page_icons.get(id).map(String::as_str),
                     icon,
-                    icons::font(theme::icon::MD),
+                    theme::icon::MD,
                     p.text_muted,
                 );
                 // «×» on the active tab and under the pointer.

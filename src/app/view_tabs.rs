@@ -1,13 +1,13 @@
 //! A database's views as tabs (H6.3b, ADR 0006): a click switches view
-//! (each keeps its own sort, filters and columns), «+» adds a table or a
-//! board (H6.5), and the
+//! (each keeps its own sort, filters and columns), «+» adds a table, a
+//! board (H6.5), a calendar (H13.5), a list or a gallery (H13.6), and the
 //! open tab (or a right click on any) has a menu to rename, duplicate,
 //! move or delete it. Deleting a view loses its settings, never rows.
 use anyhow::Result;
 use eframe::egui::{self};
 use silex_desktop::db::Shift;
 use silex_desktop::model::ViewKind;
-use silex_desktop::view::{ViewConfig, board_property};
+use silex_desktop::view::{ViewConfig, board_property, calendar_property};
 
 use super::*;
 use super::{icons, theme};
@@ -33,6 +33,9 @@ fn kind_label(kind: ViewKind) -> &'static str {
     match kind {
         ViewKind::Table => "Tabla",
         ViewKind::Board => "Tablero",
+        ViewKind::Calendar => "Calendario",
+        ViewKind::List => "Lista",
+        ViewKind::Gallery => "Galería",
     }
 }
 
@@ -40,6 +43,9 @@ pub(super) fn view_icon(kind: ViewKind) -> &'static str {
     match kind {
         ViewKind::Table => icons::TABLE,
         ViewKind::Board => icons::KANBAN,
+        ViewKind::Calendar => icons::CALENDAR,
+        ViewKind::List => icons::LAYOUT_LIST,
+        ViewKind::Gallery => icons::LAYOUT_GRID,
     }
 }
 
@@ -130,7 +136,13 @@ pub(super) fn view_tabs(
         .show(|ui| {
             menu_spacing(ui);
             menu_caption(ui, "Nueva vista");
-            for kind in [ViewKind::Table, ViewKind::Board] {
+            for kind in [
+                ViewKind::Table,
+                ViewKind::Board,
+                ViewKind::Calendar,
+                ViewKind::List,
+                ViewKind::Gallery,
+            ] {
                 if ui
                     .button((
                         icons::icon(view_icon(kind)),
@@ -174,6 +186,9 @@ fn view_menu(
         match view.kind {
             ViewKind::Table => "Vista de tabla",
             ViewKind::Board => "Vista de tablero",
+            ViewKind::Calendar => "Vista de calendario",
+            ViewKind::List => "Vista de lista",
+            ViewKind::Gallery => "Vista de galería",
         },
     );
     ui.separator();
@@ -250,7 +265,7 @@ impl SilexApp {
     /// Reads the views again (after adding, moving or deleting one) and
     /// shows `select` (a view id), or the one that was open, or the first.
     /// The open view's pending settings are saved first.
-    fn reload_views(&mut self, select: Option<&str>) -> Result<()> {
+    pub(super) fn reload_views(&mut self, select: Option<&str>) -> Result<()> {
         self.save_view()?;
         let Some(state) = self.database.as_mut() else {
             return Ok(());
@@ -304,7 +319,8 @@ impl SilexApp {
     }
 
     /// A new, empty view at the end, shown at once. A board groups by the
-    /// first select property, if there is one.
+    /// first select property, and a calendar by the first date property,
+    /// if there is one.
     pub(super) fn add_view(&mut self, kind: ViewKind) -> Result<()> {
         let Some(state) = self.database.as_ref() else {
             return Ok(());
@@ -314,6 +330,9 @@ impl SilexApp {
         let mut config = ViewConfig::default();
         if kind == ViewKind::Board {
             config.group_by = board_property(&state.properties, &config).map(|p| p.id.clone());
+        }
+        if kind == ViewKind::Calendar {
+            config.date_by = calendar_property(&state.properties, &config).map(|p| p.id.clone());
         }
         let id = self
             .db
@@ -379,7 +398,7 @@ impl SilexApp {
 #[cfg(test)]
 mod tests {
     use super::new_view_name;
-    use silex_desktop::model::ViewKind::{Board, Table};
+    use silex_desktop::model::ViewKind::{Board, Calendar, Gallery, List, Table};
 
     #[test]
     fn new_views_take_the_first_free_name() {
@@ -393,5 +412,8 @@ mod tests {
         assert_eq!(new_view_name(Table, &names(&["Pendientes"])), "Tabla");
         assert_eq!(new_view_name(Board, &names(&["Tabla"])), "Tablero");
         assert_eq!(new_view_name(Board, &names(&["Tablero"])), "Tablero 2");
+        assert_eq!(new_view_name(Calendar, &names(&["Tabla"])), "Calendario");
+        assert_eq!(new_view_name(List, &names(&["Lista"])), "Lista 2");
+        assert_eq!(new_view_name(Gallery, &names(&[])), "Galería");
     }
 }

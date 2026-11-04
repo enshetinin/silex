@@ -285,8 +285,11 @@ const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 pub const PREVIEW_SIDE: u32 = 1600;
 
 /// The types shown as images in the page.
+pub const PREVIEW_TYPES: [&str; 2] = ["image/png", "image/jpeg"];
+
+/// The types shown as images in the page.
 pub fn has_preview(mime: &str) -> bool {
-    matches!(mime, "image/png" | "image/jpeg")
+    PREVIEW_TYPES.contains(&mime)
 }
 
 /// An image ready to show: RGBA pixels, row by row.

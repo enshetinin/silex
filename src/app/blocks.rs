@@ -8,6 +8,7 @@ use silex_desktop::{
     model::{Block, BlockKind, list_numbers},
 };
 
+use super::database_card::database_card;
 use super::*;
 use super::{icons, inline, theme};
 
@@ -46,6 +47,8 @@ pub(super) enum EditorKey {
     /// The same from the block's «…» menu: the selection, or the whole
     /// block when nothing is selected.
     FormatBlock(Format),
+    /// «Enlace…» from the block's «…» menu (H12.1d).
+    LinkBlock,
 }
 
 /// Slash menu shown under the focused block while "/word" is being typed.
@@ -89,6 +92,15 @@ pub(super) enum BlockAction {
     OpenLink,
     /// Bold, italic… on the selection, or on the whole block (ADR 0015).
     Format(Format),
+    /// A web link on the selection, the link at the cursor or the whole
+    /// block (H12.1d).
+    Link,
+    /// The arrow of a toggle: fold or open it (ADR 0016).
+    ToggleFold,
+    /// «Mover a…» (ADR 0017): the block, or the selection it is in.
+    MoveTo,
+    /// «Convertir en subpágina» (ADR 0017): the same blocks.
+    ToSubpage,
 }
 
 /// What a block reported while being drawn.
@@ -98,6 +110,10 @@ pub(super) struct BlockOutput {
     /// With `text_changed` on the focused block: what changed, as
     /// `(start, old_end, new_end)` in characters (`marks::edit_range`).
     pub(super) edit: Option<(usize, usize, usize)>,
+    /// Where the text of the link field is (H12.1d), when it is open here.
+    pub(super) link_rect: Option<egui::Rect>,
+    /// A link Cmd+clicked: its URL, to open.
+    pub(super) open_url: Option<String>,
     /// Checkbox changed.
     pub(super) other_changed: bool,
     pub(super) action: Option<BlockAction>,
@@ -131,7 +147,12 @@ pub(super) fn heading_space(kind: BlockKind) -> f32 {
 
 /// Indents a row (title, menus, buttons) to where block text starts.
 pub(super) fn gutter_space(ui: &mut egui::Ui) {
-    ui.add_space(GUTTER + ui.spacing().item_spacing.x);
+    ui.add_space(gutter_width(ui));
+}
+
+/// How far [`gutter_space`] indents: the handles' gutter and its spacing.
+pub(super) fn gutter_width(ui: &egui::Ui) -> f32 {
+    GUTTER + ui.spacing().item_spacing.x
 }
 
 /// Reserves the marker slot, as tall as the first line of text. Returns its
@@ -203,6 +224,67 @@ pub(super) fn handle_menu_id(block_id: &str) -> egui::Id {
     egui::Id::unique(("silex-block-handle", block_id))
 }
 
+/// Under an open toggle with nothing inside (ADR 0016): a hint, which
+/// also adds a block inside it. Returns whether it was clicked.
+fn empty_toggle_hint(ui: &mut egui::Ui, indent: u8) -> bool {
+    let p = theme::current(ui.ctx());
+    ui.horizontal(|ui| {
+        gutter_space(ui);
+        // In line with the text inside: the button's padding left out.
+        ui.add_space(
+            f32::from(indent.saturating_add(1)) * INDENT_WIDTH - ui.spacing().button_padding.x,
+        );
+        ui.add(
+            egui::Button::new(
+                egui::RichText::new("Desplegable vacío: haz clic para escribir dentro")
+                    .color(p.text_muted),
+            )
+            .frame_when_inactive(false),
+        )
+        .clicked()
+    })
+    .inner
+}
+
+/// Height of «Añadir icono», above the title of a page without an icon.
+const ADD_ICON_HEIGHT: f32 = 22.0;
+
+/// Height of a divider's row.
+const DIVIDER_HEIGHT: f32 = 24.0;
+/// Room for a callout's icon, left of its text.
+const CALLOUT_ICON_ROOM: i8 = 40;
+
+/// A divider (H12.2): a 1 px line in the middle of its row. It takes the
+/// block's focus id, so the arrow keys reach it like a file card;
+/// Backspace or Delete remove it and Intro adds a paragraph below
+/// (`run_editor_key`).
+fn divider(ui: &mut egui::Ui, id: egui::Id) -> egui::Response {
+    let p = theme::current(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), DIVIDER_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let response = ui.interact(rect, id, egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Splitter, true, "Separador"));
+    if response.clicked() {
+        response.request_focus();
+    }
+    if response.has_focus() {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(theme::radius::MD),
+            p.accent_soft,
+        );
+    }
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1.0, p.border),
+    );
+    super::cells::focus_ring(ui, rect, &response);
+    response
+}
+
 /// Icon for each block type (menus).
 pub(super) fn kind_icon(kind: BlockKind) -> &'static str {
     match kind {
@@ -217,6 +299,9 @@ pub(super) fn kind_icon(kind: BlockKind) -> &'static str {
         BlockKind::Code => icons::CODE,
         BlockKind::File => icons::PAPERCLIP,
         BlockKind::PageLink => icons::LINK,
+        BlockKind::Divider => icons::MINUS,
+        BlockKind::Callout => icons::LIGHTBULB,
+        BlockKind::Toggle => icons::LIST_COLLAPSE,
     }
 }
 
@@ -234,11 +319,18 @@ pub(super) struct BlockView<'a> {
     pub(super) preview: Option<&'a PreviewState>,
     /// A link's page, as its card shows it (H7.5).
     pub(super) link: Option<LinkState>,
+    /// A linked database's first rows (H12.11): a table in its card.
+    pub(super) table: Option<&'a silex_desktop::view::TablePreview>,
     /// Matches of the find bar in its text (H11.7): character ranges, and
     /// whether each is the one shown.
     pub(super) found: Vec<(usize, usize, bool)>,
     /// Scroll the page to the match shown in this block.
     pub(super) reveal: bool,
+    /// The characters the link field is open over (H12.1d): highlighted,
+    /// as the field took the focus (and the selection) away.
+    pub(super) link_edit: Option<(usize, usize)>,
+    /// A toggle that is folded (ADR 0016).
+    pub(super) folded: bool,
 }
 
 /// One block, borderless: a hover handle in the left gutter (type and
@@ -267,7 +359,7 @@ pub(super) fn block_field(
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
             let (gutter, _) =
                 ui.allocate_exact_size(egui::vec2(GUTTER, 24.0), egui::Sense::hover());
-            let action = if view.show_handle {
+            let mut action = if view.show_handle {
                 block_handle(ui, gutter, block)
             } else {
                 None
@@ -277,7 +369,18 @@ pub(super) fn block_field(
             // block's focus id, so the arrow keys reach it.
             if !block.kind.is_text() {
                 let (card, file_action) = match &view.link {
+                    Some(
+                        state @ LinkState::Live {
+                            kind: PageKind::Database,
+                            ..
+                        },
+                    ) if block.kind == BlockKind::PageLink
+                        && let Some(table) = view.table =>
+                    {
+                        database_card(ui, id, state, table)
+                    }
                     Some(state) if block.kind == BlockKind::PageLink => link_card(ui, id, state),
+                    _ if block.kind == BlockKind::Divider => (divider(ui, id), None),
                     _ => file_card(ui, id, block, view.attachment, view.preview),
                 };
                 if view.scroll_into_view {
@@ -290,7 +393,10 @@ pub(super) fn block_field(
                     first_row: true,
                     last_row: true,
                 });
-                return (false, None, false, action.or(file_action), caret);
+                return (
+                    (false, None, false, action.or(file_action), caret),
+                    (None, None),
+                );
             }
             // Height of the first line of body text (text margin included):
             // markers center on it, and it is the minimum height of a block
@@ -321,6 +427,40 @@ pub(super) fn block_field(
                         p.text_muted,
                     );
                 }
+                BlockKind::Toggle => {
+                    // The arrow folds and opens it (ADR 0016).
+                    let (slot, arrow) = marker_slot(ui, line, egui::Sense::click());
+                    let name = if view.folded {
+                        format!("Desplegar «{}»", block.content)
+                    } else {
+                        format!("Plegar «{}»", block.content)
+                    };
+                    arrow
+                        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
+                    let color = if arrow.hovered() {
+                        p.text
+                    } else {
+                        p.text_muted
+                    };
+                    let icon = if view.folded {
+                        icons::CARET_RIGHT
+                    } else {
+                        icons::CARET_DOWN
+                    };
+                    ui.painter().text(
+                        slot.center(),
+                        egui::Align2::CENTER_CENTER,
+                        icon,
+                        icons::font(theme::icon::MD),
+                        color,
+                    );
+                    if arrow
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        action = Some(BlockAction::ToggleFold);
+                    }
+                }
                 BlockKind::Quote => {
                     // The bar is painted once the text's height is known.
                     quote_slot = Some(marker_slot(ui, line, egui::Sense::hover()).0);
@@ -329,7 +469,7 @@ pub(super) fn block_field(
             }
             let placeholder = match block.kind {
                 BlockKind::Paragraph if view.focused => Some("Escribe / para comandos"),
-                kind if kind.is_heading() => Some(kind.label()),
+                kind if kind.is_heading() || kind == BlockKind::Callout => Some(kind.label()),
                 _ => None,
             };
             let style = match block.kind {
@@ -401,6 +541,21 @@ pub(super) fn block_field(
                         .inner_margin(egui::Margin::same(10)),
                 );
             }
+            // A callout (H12.3): its text on a background, with room for
+            // its icon.
+            if block.kind == BlockKind::Callout {
+                edit = edit.frame(
+                    egui::Frame::new()
+                        .fill(p.subtle)
+                        .corner_radius(theme::radius::MD)
+                        .inner_margin(egui::Margin {
+                            left: CALLOUT_ICON_ROOM,
+                            right: 12,
+                            top: 10,
+                            bottom: 10,
+                        }),
+                );
+            }
             if done || before.is_some() {
                 edit = edit.text_color(base.color).layouter(&mut formatted);
             }
@@ -411,14 +566,24 @@ pub(super) fn block_field(
             // text, in a slot taken before the field paints. A code block
             // fills its own frame over that slot, so there they are
             // painted over it and the text inside them again.
-            let framed = block.kind == BlockKind::Code;
-            let behind =
-                (!view.found.is_empty() && !framed).then(|| ui.painter().add(egui::Shape::Noop));
+            let framed = matches!(block.kind, BlockKind::Code | BlockKind::Callout);
+            let highlight = !view.found.is_empty() || view.link_edit.is_some();
+            let behind = (highlight && !framed).then(|| ui.painter().add(egui::Shape::Noop));
             let output = edit.show(ui);
-            if !view.found.is_empty() {
+            let mut link_rect = None;
+            if highlight {
                 let mut shapes = Vec::new();
                 let mut covered = Vec::new();
                 let mut shown = None;
+                // The text the link field is open over, like a selection.
+                if let Some((start, end)) = view.link_edit {
+                    let rects = match_rects(&output.galley, output.galley_pos, start, end);
+                    link_rect = rects.iter().copied().reduce(egui::Rect::union);
+                    for rect in rects {
+                        shapes.push(egui::Shape::rect_filled(rect, 2.0, p.accent_soft));
+                        covered.push(rect);
+                    }
+                }
                 for &(start, end, current) in &view.found {
                     let fill = if current {
                         p.find_current
@@ -453,6 +618,23 @@ pub(super) fn block_field(
                     ui.scroll_to_rect(rect.expand(8.0), Some(egui::Align::Center));
                 }
             }
+            if block.kind == BlockKind::Callout {
+                // Centered on the first line of text.
+                let y = output
+                    .galley
+                    .rows
+                    .first()
+                    .map_or(0.0, |row| (row.min_y() + row.max_y()) / 2.0)
+                    + output.galley_pos.y;
+                let x = output.response.rect.left() + f32::from(CALLOUT_ICON_ROOM) / 2.0;
+                ui.painter().text(
+                    egui::pos2(x, y),
+                    egui::Align2::CENTER_CENTER,
+                    icons::LIGHTBULB,
+                    icons::font(theme::icon::MD),
+                    p.accent_strong,
+                );
+            }
             if let Some(slot) = quote_slot {
                 let bar = egui::Rect::from_min_max(
                     slot.left_top() + egui::vec2(2.0, 2.0),
@@ -470,6 +652,30 @@ pub(super) fn block_field(
             let edit = old_text
                 .filter(|_| text_changed)
                 .map(|old| silex_desktop::marks::edit_range(&old, &block.content));
+            // Web links (H12.1d): the URL on hover, opened with Cmd+clic,
+            // and named for screen readers after the text.
+            let mut open_url = None;
+            if let Some(pos) = output.response.hover_pos()
+                && let Some(link) =
+                    web_links::link_under(&output.galley, output.galley_pos, &block.marks, pos)
+                && let Some(url) = link.url()
+            {
+                let command = ui.input(|i| i.modifiers.command);
+                if command {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if command && output.response.clicked() {
+                    open_url = Some(url.to_owned());
+                } else {
+                    let hint = format!("{url}\n{}+clic para abrir", super::cmd_label(ui.ctx()));
+                    egui::Response::clone(&output.response).on_hover_text_at_pointer(hint);
+                }
+            }
+            if let Some(description) = web_links::links_description(&block.content, &block.marks) {
+                ui.ctx().accesskit_node_builder(output.response.id, |node| {
+                    node.set_description(description);
+                });
+            }
             if view.scroll_into_view {
                 output.response.scroll_to_me(None);
             }
@@ -486,14 +692,19 @@ pub(super) fn block_field(
                         last_row: row + 1 >= output.galley.rows.len(),
                     }
                 });
-            (text_changed, edit, other_changed, action, caret)
+            (
+                (text_changed, edit, other_changed, action, caret),
+                (link_rect, open_url),
+            )
         })
         .inner
     });
-    let (text_changed, edit, other_changed, action, caret) = inner.inner;
+    let ((text_changed, edit, other_changed, action, caret), (link_rect, open_url)) = inner.inner;
     BlockOutput {
         text_changed,
         edit,
+        link_rect,
+        open_url,
         other_changed,
         action,
         caret,
@@ -575,6 +786,12 @@ fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<
                                 ui.close();
                             }
                         }
+                        let link = egui::Button::new((icons::icon(icons::LINK), " Enlace…"))
+                            .shortcut_text(format!("{}+K", super::cmd_label(ui.ctx())));
+                        if ui.add(link).clicked() {
+                            action = Some(BlockAction::Link);
+                            ui.close();
+                        }
                     });
                 }
                 ui.separator();
@@ -608,6 +825,12 @@ fn block_handle(ui: &mut egui::Ui, gutter: egui::Rect, block: &Block) -> Option<
                 (icons::ARROW_UP, " Mover arriba", BlockAction::MoveUp),
                 (icons::ARROW_DOWN, " Mover abajo", BlockAction::MoveDown),
                 (icons::COPY, " Duplicar", BlockAction::Duplicate),
+                (icons::ARROW_RIGHT, " Mover a…", BlockAction::MoveTo),
+                (
+                    icons::PAGE,
+                    " Convertir en subpágina",
+                    BlockAction::ToSubpage,
+                ),
             ] {
                 if ui.button((icons::icon(icon), label)).clicked() {
                     action = Some(chosen);
@@ -677,6 +900,8 @@ pub(super) fn slash_menu_ui(
                                 (icons::PAPERCLIP, "Adjuntar archivos…")
                             }
                             editor::SlashItem::LinkPage => (icons::LINK, "Enlazar a una página…"),
+                            editor::SlashItem::Divider => (icons::MINUS, "Separador"),
+                            editor::SlashItem::Database => (icons::TABLE, "Base de datos"),
                         };
                         let option = ui.add(egui::Button::selectable(
                             i == menu.selected,
@@ -748,6 +973,19 @@ pub(super) fn ime_composing_after(ctx: &egui::Context, mut composing: bool) -> b
     composing
 }
 
+/// One pasted line written in Markdown with inline formatting (H12.7): its
+/// text without the syntax, and the formatting. `None` if it has none (or
+/// is a heading, a list item… on one line: those stay as typed).
+fn inline_markdown(text: &str) -> Option<(String, Vec<silex_desktop::marks::Mark>)> {
+    let blocks = silex_desktop::markdown::markdown_to_blocks(text);
+    match blocks.as_slice() {
+        [block] if block.kind == BlockKind::Paragraph && !block.marks.is_empty() => {
+            Some((block.content.clone(), block.marks.clone()))
+        }
+        _ => None,
+    }
+}
+
 /// Takes Cmd/Ctrl+B, I, E or Shift+X from this frame's input, if pressed.
 fn take_format_shortcut(ctx: &egui::Context) -> Option<Format> {
     use egui::{Key, KeyboardShortcut, Modifiers as M};
@@ -763,6 +1001,9 @@ fn take_format_shortcut(ctx: &egui::Context) -> Option<Format> {
     })
     .map(|(format, _, _)| format)
 }
+
+/// Why a code block gets no formatting (ADR 0015).
+pub(super) const CODE_NOTICE: &str = "Un bloque de código no tiene formato: conviértelo en texto.";
 
 /// Removes the character at `char_index` (if any), and its formatting.
 pub(super) fn delete_char(block: &mut Block, char_index: usize) {
@@ -815,6 +1056,91 @@ impl SilexApp {
             self.pending_key = Some((EditorKey::Format(format), block.id.clone()));
             return;
         }
+        // Cmd+Mayús+V (H12.7): asks the system for the clipboard; that
+        // paste comes next frame and is plain text.
+        if focused
+            && block.kind.is_text()
+            && ctx.input_mut(|i| {
+                i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::V,
+                ))
+            })
+        {
+            self.plain_paste = Some(3);
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            return;
+        }
+        // A paste on one line: the field inserts it, the editor gives it
+        // its formatting. Plain (Cmd+Mayús+V): none. Copied in Silex: its
+        // own (ADR 0015). Markdown with inline formatting (H12.7): the
+        // text without the syntax, with that formatting.
+        if focused
+            && block.kind.takes_marks()
+            && let Some(text) = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Paste(text) if !text.contains(['\n', '\r']) => Some(text.clone()),
+                    _ => None,
+                })
+            })
+        {
+            let plain = self.plain_paste.take().is_some();
+            let pasted = if plain {
+                Some((text.clone(), Vec::new()))
+            } else if let Some(marks) = self.clip.as_ref().and_then(|c| c.marks_for(&text)) {
+                Some((text.clone(), marks.to_vec()))
+            } else {
+                inline_markdown(&text)
+            };
+            if let Some((plain_text, marks)) = pasted {
+                if plain_text != text {
+                    // The field inserts the text without the Markdown.
+                    ctx.input_mut(|i| {
+                        for event in &mut i.events {
+                            if let egui::Event::Paste(t) = event
+                                && *t == text
+                            {
+                                *t = plain_text.clone();
+                            }
+                        }
+                    });
+                }
+                let start =
+                    egui::text_edit::TextEditState::load(ctx, self.block_field_id(&block.id))
+                        .and_then(|s| s.cursor.char_range())
+                        .map_or(caret.char, |r| r.primary.index.0.min(r.secondary.index.0));
+                self.paste_marks =
+                    Some((block.id.clone(), start, plain_text.chars().count(), marks));
+            }
+        }
+        // Cmd+Intro opens the link the cursor is in (H12.1d).
+        if focused
+            && let Some(url) = marks::link_at(&block.marks, caret.char).and_then(|l| l.url())
+            && ctx.input_mut(|i| {
+                i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::COMMAND,
+                    egui::Key::Enter,
+                ))
+            })
+        {
+            web_links::open_web_link(ctx, url);
+            return;
+        }
+        // Cmd+Intro folds or opens a toggle (ADR 0016).
+        if focused
+            && block.kind == BlockKind::Toggle
+            && ctx.input_mut(|i| {
+                i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::COMMAND,
+                    egui::Key::Enter,
+                ))
+            })
+        {
+            let id = block.id.clone();
+            let folded = self.folds.is_folded(&id);
+            self.set_folded(&id, !folded);
+            return;
+        }
         if (!focused && !escape) || caret.selection {
             return;
         }
@@ -831,7 +1157,8 @@ impl SilexApp {
                 _ => false,
             });
             if let Some(text) = pasted {
-                self.pending_paste = Some((block.id.clone(), text));
+                let plain = self.plain_paste.take().is_some();
+                self.pending_paste = Some((block.id.clone(), text, plain));
                 self.slash = None;
                 return;
             }
@@ -899,7 +1226,7 @@ impl SilexApp {
     /// typed earlier in the same frame (so the cursor position is current).
     /// Runs a multi-line paste taken this frame, at the current cursor.
     pub(super) fn run_paste(&mut self, ctx: &egui::Context) {
-        let Some((block_id, text)) = self.pending_paste.take() else {
+        let Some((block_id, text, plain)) = self.pending_paste.take() else {
             return;
         };
         let Some(index) = self.blocks.iter().position(|b| b.id == block_id) else {
@@ -908,9 +1235,26 @@ impl SilexApp {
         let cursor = egui::text_edit::TextEditState::load(ctx, self.block_field_id(&block_id))
             .and_then(|s| s.cursor.char_range())
             .map_or(0, |r| r.primary.index.0);
-        let caret = editor::paste_lines(&mut self.blocks, index, cursor, &text, || {
-            uuid::Uuid::new_v4().to_string()
-        });
+        // Plain (Cmd+Mayús+V): line by line, as typed. Copied in Silex: its
+        // formatting (ADR 0015) and the indent of plain lines (ADR 0016).
+        // Markdown: its blocks (H12.7). Otherwise line by line.
+        let copied = self
+            .clip
+            .as_ref()
+            .and_then(|clip| clip.marks_for(&text))
+            .map(<[_]>::to_vec)
+            .filter(|_| !plain);
+        let new_id = || uuid::Uuid::new_v4().to_string();
+        let caret = match copied {
+            Some(marks) => {
+                editor::paste_lines_marked(&mut self.blocks, index, cursor, &text, &marks, new_id)
+            }
+            None if !plain && silex_desktop::markdown::looks_like_markdown(&text) => {
+                let pasted = silex_desktop::markdown::markdown_to_blocks(&text);
+                editor::paste_blocks(&mut self.blocks, index, cursor, pasted, new_id)
+            }
+            None => editor::paste_lines(&mut self.blocks, index, cursor, &text, new_id),
+        };
         self.mark_dirty();
         if let Some(caret) = caret
             && let Some(target) = self.blocks.get(caret.block)
@@ -932,6 +1276,23 @@ impl SilexApp {
         // (Cmd+Z brings it back); the other keys work as on text.
         if !self.blocks[index].kind.is_text() {
             match command {
+                // Intro on a divider: a new paragraph below it (H12.2).
+                EditorKey::Enter if self.blocks[index].kind == BlockKind::Divider => {
+                    let below = Block {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        kind: BlockKind::Paragraph,
+                        content: String::new(),
+                        checked: false,
+                        attachment: None,
+                        link: None,
+                        marks: Vec::new(),
+                        ..self.blocks[index].clone()
+                    };
+                    self.pending_focus = Some((below.id.clone(), 0));
+                    self.blocks.insert(index + 1, below);
+                    self.mark_dirty();
+                    return;
+                }
                 EditorKey::Enter => {
                     let open = if self.blocks[index].kind == BlockKind::PageLink {
                         BlockAction::OpenLink
@@ -958,10 +1319,37 @@ impl SilexApp {
             self.format_block(ctx, &block_id, format, whole);
             return;
         }
+        if command == EditorKey::LinkBlock {
+            self.open_link_edit(ctx, &block_id, true);
+            return;
+        }
+        // What is inside folded toggles is never edited unseen (ADR 0016).
+        let hidden = self.hidden();
         let caret = match command {
-            EditorKey::Enter => editor::enter(&mut self.blocks, index, cursor, || {
-                uuid::Uuid::new_v4().to_string()
-            }),
+            EditorKey::Enter => {
+                let folded = self.folds.is_folded(&block_id);
+                editor::enter_with_fold(&mut self.blocks, index, cursor, folded, || {
+                    uuid::Uuid::new_v4().to_string()
+                })
+            }
+            // Merging into a hidden block would change text out of sight:
+            // its toggle opens instead.
+            EditorKey::Backspace
+                if index > 0
+                    && hidden[index - 1]
+                    && self.blocks[index].kind == BlockKind::Paragraph
+                    && self.blocks[index].indent == 0 =>
+            {
+                self.reveal_block(index - 1);
+                return;
+            }
+            EditorKey::Delete
+                if cursor >= editor::block_char_len(&self.blocks[index])
+                    && hidden.get(index + 1) == Some(&true) =>
+            {
+                self.reveal_block(index + 1);
+                return;
+            }
             EditorKey::Backspace if cursor > 0 => {
                 // Text was typed before Backspace in the same frame: plain delete.
                 delete_char(&mut self.blocks[index], cursor - 1);
@@ -981,20 +1369,20 @@ impl SilexApp {
             EditorKey::Delete => editor::delete_at_end(&mut self.blocks, index),
             EditorKey::Indent | EditorKey::Outdent => {
                 let delta = if command == EditorKey::Indent { 1 } else { -1 };
-                editor::change_indent(&mut self.blocks, index, delta);
+                // A toggle takes its content along (ADR 0016).
+                editor::change_indent_with_content(&mut self.blocks, index, delta);
                 Some(editor::Caret {
                     block: index,
                     char: cursor,
                 })
             }
-            EditorKey::Up => index.checked_sub(1).map(|i| editor::Caret {
+            EditorKey::Up => self.previous_visible(index).map(|i| editor::Caret {
                 block: i,
                 char: editor::block_char_len(&self.blocks[i]),
             }),
-            EditorKey::Down => (index + 1 < self.blocks.len()).then(|| editor::Caret {
-                block: index + 1,
-                char: 0,
-            }),
+            EditorKey::Down => self
+                .next_visible(index)
+                .map(|i| editor::Caret { block: i, char: 0 }),
             EditorKey::Select => {
                 self.selection = Some(BlockSelection {
                     anchor: block_id.clone(),
@@ -1024,6 +1412,23 @@ impl SilexApp {
                 self.open_link_picker(Some(block_id.clone()), empty.then(|| block_id.clone()));
                 caret
             }
+            // «/separador», or `---` typed in a paragraph (H12.2).
+            EditorKey::Slash(editor::SlashItem::Divider) => {
+                self.slash = None;
+                editor::insert_divider(&mut self.blocks, index, cursor, || {
+                    uuid::Uuid::new_v4().to_string()
+                })
+            }
+            // «/base de datos» (H12.11): the text goes, and after this
+            // frame a database is made inside the page, with a card to it
+            // (in the block's place if it was left empty).
+            EditorKey::Slash(editor::SlashItem::Database) => {
+                self.slash = None;
+                let kind = self.blocks[index].kind;
+                let caret = editor::apply_slash(&mut self.blocks, index, cursor, kind);
+                self.new_database_at = Some(block_id.clone());
+                caret
+            }
             EditorKey::Slash(editor::SlashItem::AttachFiles) => {
                 self.slash = None;
                 let kind = self.blocks[index].kind;
@@ -1033,20 +1438,25 @@ impl SilexApp {
             }
             EditorKey::MoveUp | EditorKey::MoveDown => {
                 let up = command == EditorKey::MoveUp;
-                editor::move_range(&mut self.blocks, index, index, up).then(|| editor::Caret {
-                    block: if up { index - 1 } else { index + 1 },
-                    char: cursor,
+                editor::move_with_content(&mut self.blocks, index, index, up).map(|(first, _)| {
+                    editor::Caret {
+                        block: first,
+                        char: cursor,
+                    }
                 })
             }
             // Run above, before the cursor logic.
-            EditorKey::Format(_) | EditorKey::FormatBlock(_) => None,
-            EditorKey::Duplicate => editor::duplicate_range(&mut self.blocks, index, index, || {
-                uuid::Uuid::new_v4().to_string()
-            })
-            .map(|(copy, _)| editor::Caret {
-                block: copy,
-                char: cursor,
-            }),
+            EditorKey::Format(_) | EditorKey::FormatBlock(_) | EditorKey::LinkBlock => None,
+            EditorKey::Duplicate => {
+                let last = editor::with_content(&self.blocks, index, index);
+                editor::duplicate_range(&mut self.blocks, index, last, || {
+                    uuid::Uuid::new_v4().to_string()
+                })
+                .map(|(copy, _)| editor::Caret {
+                    block: copy,
+                    char: cursor,
+                })
+            }
         };
         if !matches!(command, EditorKey::Up | EditorKey::Down) {
             // One undo step per command (egui's per-field undo is not used, ADR 0004).
@@ -1082,7 +1492,7 @@ impl SilexApp {
         let (first, last) = self
             .selection_range()
             .filter(|(a, b)| (*a..=*b).contains(&index))
-            .unwrap_or((index, index));
+            .unwrap_or((index, editor::with_content(&self.blocks, index, index)));
         let pointer = ctx.pointer_interact_pos()?;
         let page = ui.clip_rect();
         // Scroll when near the top or bottom of the page.
@@ -1134,10 +1544,15 @@ impl SilexApp {
             );
         }
         // The gap: before the first block whose middle is below the pointer.
-        let to = rects
+        let mut to = rects
             .iter()
             .position(|r| pointer.y < r.center().y)
             .unwrap_or(rects.len());
+        // Never between a folded toggle and what it hides (ADR 0016).
+        let hidden = self.hidden();
+        while hidden.get(to) == Some(&true) {
+            to += 1;
+        }
         let moves = !(first..=last + 1).contains(&to);
         if moves {
             let y = match (to.checked_sub(1).and_then(|i| rects.get(i)), rects.get(to)) {
@@ -1170,7 +1585,9 @@ impl SilexApp {
         let sel = self.selection.as_ref()?;
         let a = self.blocks.iter().position(|b| b.id == sel.anchor)?;
         let h = self.blocks.iter().position(|b| b.id == sel.head)?;
-        Some((a.min(h), a.max(h)))
+        // A selected toggle includes its content (ADR 0016).
+        let (first, last) = (a.min(h), a.max(h));
+        Some((first, editor::with_content(&self.blocks, first, last)))
     }
 
     /// Keys while blocks are selected (no text field has focus):
@@ -1191,38 +1608,37 @@ impl SilexApp {
         use egui::{Key, Modifiers as M};
         let id_at = |i: usize| self.blocks.get(i).map(|b| b.id.clone());
         let step = |key: Key, modifiers: M| take_exact_key(ctx, key, modifiers);
+        // Hidden blocks are skipped (ADR 0016).
+        let previous = |i: usize| self.previous_visible(i);
+        let next = |i: usize| self.next_visible(i);
         if step(Key::ArrowUp, M::SHIFT) {
-            if let Some(id) = head.checked_sub(1).and_then(id_at) {
+            if let Some(id) = previous(head).and_then(id_at) {
                 self.selection = Some(BlockSelection { head: id, ..sel });
             }
         } else if step(Key::ArrowDown, M::SHIFT) {
-            if let Some(id) = id_at(head + 1) {
+            if let Some(id) = next(head).and_then(id_at) {
                 self.selection = Some(BlockSelection { head: id, ..sel });
             }
         } else if step(Key::ArrowUp, M::NONE) {
-            if let Some(id) = first
-                .checked_sub(1)
-                .and_then(id_at)
-                .or_else(|| id_at(first))
-            {
+            if let Some(id) = previous(first).and_then(id_at).or_else(|| id_at(first)) {
                 self.selection = Some(BlockSelection {
                     anchor: id.clone(),
                     head: id,
                 });
             }
         } else if step(Key::ArrowDown, M::NONE) {
-            if let Some(id) = id_at(last + 1).or_else(|| id_at(last)) {
+            if let Some(id) = next(last).and_then(id_at).or_else(|| id_at(last)) {
                 self.selection = Some(BlockSelection {
                     anchor: id.clone(),
                     head: id,
                 });
             }
         } else if step(Key::ArrowUp, M::ALT | M::SHIFT) {
-            if editor::move_range(&mut self.blocks, first, last, true) {
+            if editor::move_with_content(&mut self.blocks, first, last, true).is_some() {
                 self.mark_dirty();
             }
         } else if step(Key::ArrowDown, M::ALT | M::SHIFT) {
-            if editor::move_range(&mut self.blocks, first, last, false) {
+            if editor::move_with_content(&mut self.blocks, first, last, false).is_some() {
                 self.mark_dirty();
             }
         } else if ctx
@@ -1248,7 +1664,9 @@ impl SilexApp {
             let copy = take_event(ctx, |e| matches!(e, egui::Event::Copy));
             let cut = take_event(ctx, |e| matches!(e, egui::Event::Cut));
             if copy || cut {
-                ctx.copy_text(editor::selection_text(&self.blocks, first, last));
+                let clip = editor::selection_clip(&self.blocks, first, last);
+                ctx.copy_text(clip.text.clone());
+                self.clip = Some(clip);
             }
             if cut || step(Key::Backspace, M::NONE) || step(Key::Delete, M::NONE) {
                 self.delete_selection(first, last);
@@ -1257,6 +1675,8 @@ impl SilexApp {
     }
 
     pub(super) fn delete_selection(&mut self, first: usize, last: usize) {
+        // A toggle goes with its content (ADR 0016).
+        let last = editor::with_content(&self.blocks, first, last);
         let deleted = editor::delete_range(&mut self.blocks, first, last);
         if deleted.removed.is_empty() {
             return;
@@ -1335,26 +1755,13 @@ impl SilexApp {
         };
         if !self.blocks[index].kind.takes_marks() {
             if self.blocks[index].kind == BlockKind::Code {
-                self.notice =
-                    Some("Un bloque de código no tiene formato: conviértelo en texto.".into());
+                self.notice = Some(CODE_NOTICE.into());
             }
             return;
         }
-        // From the keyboard the field has the focus and its selection; a
-        // menu or the palette took the focus, so the selection it had then.
-        let field = self.block_field_id(id);
-        let live = egui::text_edit::TextEditState::load(ctx, field)
-            .and_then(|s| s.cursor.char_range())
-            .map(|r| (r.secondary.index.0, r.primary.index.0));
-        let remembered = self
-            .format_target
-            .as_ref()
-            .filter(|(target, _, _)| target == id)
-            .map(|(_, anchor, cursor)| (*anchor, *cursor));
-        let (anchor, cursor) = if whole { remembered.or(live) } else { live }.unwrap_or((0, 0));
+        let (anchor, cursor) = self.format_selection(ctx, id, whole);
         let block = &mut self.blocks[index];
         let len = block.content.chars().count();
-        let (anchor, cursor) = (anchor.min(len), cursor.min(len));
         let (start, end) = (anchor.min(cursor), anchor.max(cursor));
         if start == end && !whole {
             let current = self
@@ -1379,6 +1786,156 @@ impl SilexApp {
         self.pending_anchor = Some((id.to_owned(), anchor));
     }
 
+    /// Which blocks are inside a folded toggle (ADR 0016).
+    pub(super) fn hidden(&self) -> Vec<bool> {
+        editor::hidden_blocks(&self.blocks, |b| self.folds.is_folded(&b.id))
+    }
+
+    /// The nearest block above `index` that is not hidden.
+    pub(super) fn previous_visible(&self, index: usize) -> Option<usize> {
+        let hidden = self.hidden();
+        (0..index).rev().find(|&i| !hidden[i])
+    }
+
+    /// The nearest block below `index` that is not hidden.
+    pub(super) fn next_visible(&self, index: usize) -> Option<usize> {
+        let hidden = self.hidden();
+        (index + 1..self.blocks.len()).find(|&i| !hidden[i])
+    }
+
+    /// Folds or opens toggle `id` and remembers it (view state, ADR 0016):
+    /// not an edit of the page. Folding with the cursor inside moves it to
+    /// the toggle's title.
+    pub(super) fn set_folded(&mut self, id: &str, folded: bool) {
+        if !self.folds.set(id, folded) {
+            return;
+        }
+        if folded
+            && let Some(index) = self.blocks.iter().position(|b| b.id == id)
+            && let Some(caret) = &self.caret
+            && let Some(at) = self.blocks.iter().position(|b| b.id == caret.block_id)
+            && (index + 1..editor::subtree_end(&self.blocks, index)).contains(&at)
+        {
+            let end = editor::block_char_len(&self.blocks[index]);
+            self.pending_focus = Some((id.to_owned(), end));
+        }
+        let json = self.folds.to_json();
+        let result = self.db.save_folded_blocks(&json);
+        if result.is_ok() {
+            self.saved_folds = json;
+        }
+        self.report(result);
+    }
+
+    /// Opens every folded toggle that hides block `index`.
+    pub(super) fn reveal_block(&mut self, index: usize) {
+        for at in editor::ancestors(&self.blocks, index) {
+            let block = &self.blocks[at];
+            if block.kind == BlockKind::Toggle && self.folds.is_folded(&block.id) {
+                let id = block.id.clone();
+                self.set_folded(&id, false);
+            }
+        }
+    }
+
+    /// A new paragraph inside toggle `index`, first, with the cursor.
+    pub(super) fn add_inside_toggle(&mut self, index: usize) {
+        let Some(toggle) = self.blocks.get(index) else {
+            return;
+        };
+        let inside = Block {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: BlockKind::Paragraph,
+            content: String::new(),
+            checked: false,
+            indent: toggle
+                .indent
+                .saturating_add(1)
+                .min(silex_desktop::model::MAX_INDENT),
+            attachment: None,
+            link: None,
+            marks: Vec::new(),
+            ..toggle.clone()
+        };
+        self.pending_focus = Some((inside.id.clone(), 0));
+        self.blocks.insert(index + 1, inside);
+        self.mark_dirty();
+    }
+
+    /// «Copiar como Markdown» (H12.7): the open page, title included, as
+    /// its Markdown export writes it (links to pages and files as their
+    /// names), on the clipboard.
+    pub(super) fn copy_page_as_markdown(&mut self, ctx: &egui::Context) {
+        if self.selected.is_none() || self.database.is_some() {
+            return;
+        }
+        let title = silex_desktop::markdown::titled(self.open_icon().as_deref(), &self.title);
+        let markdown = silex_desktop::markdown::page_to_markdown(&title, &self.blocks);
+        ctx.copy_text(markdown);
+        // Pasted back in Silex, it is Markdown, not this page's own copy.
+        self.clip = None;
+        self.notice = Some("Página copiada como Markdown.".into());
+    }
+
+    /// Copying or cutting text selected in a block remembers it with its
+    /// formatting (ADR 0015); copying anything else forgets it. A block
+    /// selection is remembered where it is copied
+    /// (`handle_selection_keys`), after this.
+    pub(super) fn remember_copy(&mut self, ctx: &egui::Context) {
+        let copying = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Copy | egui::Event::Cut))
+        });
+        if !copying {
+            return;
+        }
+        self.clip = self
+            .caret
+            .as_ref()
+            .filter(|caret| caret.selection)
+            .and_then(|caret| {
+                let block = self.blocks.iter().find(|b| b.id == caret.block_id)?;
+                let field = self.block_field_id(&block.id);
+                if !ctx.memory(|m| m.has_focus(field)) {
+                    return None;
+                }
+                let range = egui::text_edit::TextEditState::load(ctx, field)?
+                    .cursor
+                    .char_range()?;
+                let (a, b) = (range.primary.index.0, range.secondary.index.0);
+                editor::Clip::of_text(block, a.min(b), a.max(b))
+            });
+    }
+
+    /// The selection (anchor, cursor) formatting applies to in block `id`,
+    /// within its text. From the keyboard the field has the focus and its
+    /// selection; a menu or the palette (`whole`) took the focus, so the
+    /// selection it had then (egui drops it when the field loses focus).
+    pub(super) fn format_selection(
+        &self,
+        ctx: &egui::Context,
+        id: &str,
+        whole: bool,
+    ) -> (usize, usize) {
+        let field = self.block_field_id(id);
+        let live = egui::text_edit::TextEditState::load(ctx, field)
+            .and_then(|s| s.cursor.char_range())
+            .map(|r| (r.secondary.index.0, r.primary.index.0));
+        let remembered = self
+            .format_target
+            .as_ref()
+            .filter(|(target, _, _)| target == id)
+            .map(|(_, anchor, cursor)| (*anchor, *cursor));
+        let (anchor, cursor) = if whole { remembered.or(live) } else { live }.unwrap_or((0, 0));
+        let len = self
+            .blocks
+            .iter()
+            .find(|b| b.id == id)
+            .map_or(0, |b| b.content.chars().count());
+        (anchor.min(len), cursor.min(len))
+    }
+
     /// Runs an action from a block's "…" menu.
     pub(super) fn block_action(&mut self, action: BlockAction, id: &str) {
         let Some(index) = self.blocks.iter().position(|b| b.id == id) else {
@@ -1388,6 +1945,29 @@ impl SilexApp {
             BlockAction::Format(format) => {
                 // Needs the text field's selection: run with the editor keys.
                 self.pending_key = Some((EditorKey::FormatBlock(format), id.to_owned()));
+                return;
+            }
+            BlockAction::Link => {
+                self.pending_key = Some((EditorKey::LinkBlock, id.to_owned()));
+                return;
+            }
+            BlockAction::ToggleFold => {
+                let folded = self.folds.is_folded(id);
+                self.set_folded(id, !folded);
+                return;
+            }
+            BlockAction::MoveTo | BlockAction::ToSubpage => {
+                // The selection, if this block is in it.
+                let (first, last) = self
+                    .selection_range()
+                    .filter(|(a, b)| (*a..=*b).contains(&index))
+                    .unwrap_or((index, index));
+                if action == BlockAction::MoveTo {
+                    self.open_move_picker(first, last);
+                } else {
+                    let result = self.convert_to_subpage(first, last);
+                    self.report(result);
+                }
                 return;
             }
             BlockAction::OpenFile | BlockAction::SaveFile | BlockAction::RevealFile => {
@@ -1414,10 +1994,15 @@ impl SilexApp {
                 }
                 changed
             }
-            BlockAction::MoveUp => editor::move_range(&mut self.blocks, index, index, true),
-            BlockAction::MoveDown => editor::move_range(&mut self.blocks, index, index, false),
+            BlockAction::MoveUp => {
+                editor::move_with_content(&mut self.blocks, index, index, true).is_some()
+            }
+            BlockAction::MoveDown => {
+                editor::move_with_content(&mut self.blocks, index, index, false).is_some()
+            }
             BlockAction::Duplicate => {
-                editor::duplicate_range(&mut self.blocks, index, index, || {
+                let last = editor::with_content(&self.blocks, index, index);
+                editor::duplicate_range(&mut self.blocks, index, last, || {
                     uuid::Uuid::new_v4().to_string()
                 })
                 .is_some()
@@ -1438,6 +2023,12 @@ impl SilexApp {
         let Some((block_id, char)) = self.pending_focus.clone() else {
             return;
         };
+        // A block about to be edited is never left folded away (ADR 0016).
+        if let Some(index) = self.blocks.iter().position(|b| b.id == block_id)
+            && self.hidden().get(index) == Some(&true)
+        {
+            self.reveal_block(index);
+        }
         let id = self.block_field_id(&block_id);
         let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
         let anchor = self
@@ -1462,6 +2053,11 @@ impl SilexApp {
 
     /// The open page: top bar, notices and the centered document column.
     pub(super) fn editor(&mut self, ui: &mut egui::Ui) {
+        self.tab_bar(ui);
+        if self.graph_active() {
+            self.graph_view(ui);
+            return;
+        }
         let p = theme::current(ui.ctx());
         let Some(page_id) = self.selected.clone() else {
             ui.vertical_centered(|ui| {
@@ -1478,7 +2074,6 @@ impl SilexApp {
             });
             return;
         };
-        self.tab_bar(ui);
         if self.selected.as_deref() != Some(page_id.as_str()) {
             // Another tab was chosen or closed: drawn on the next frame.
             ui.ctx().request_repaint();
@@ -1540,6 +2135,8 @@ impl SilexApp {
             scroll_area = scroll_area.vertical_scroll_offset(offset);
         }
         let scrolled = scroll_area.show(ui, |ui| {
+            // Where the page's content starts (moves with the scroll).
+            let content_top = ui.min_rect().top();
             const COLUMN: f32 = 720.0;
             let width = ui.available_width().min(COLUMN + GUTTER);
             let side = ((ui.available_width() - width) / 2.0).max(0.0);
@@ -1599,12 +2196,47 @@ impl SilexApp {
                             reveal_block = bar.shown().map(|m| m.block);
                         }
                     }
+                    // The match shown is never inside a folded toggle.
+                    if let Some(index) = reveal_block {
+                        self.reveal_block(index);
+                    }
+                    // Folded toggles hide their content (ADR 0016); an
+                    // open one with nothing inside says how to fill it.
+                    let hidden = self.hidden();
+                    let empty_toggles: Vec<bool> = (0..self.blocks.len())
+                        .map(|i| {
+                            self.blocks[i].kind == BlockKind::Toggle
+                                && !self.folds.is_folded(&self.blocks[i].id)
+                                && editor::subtree_end(&self.blocks, i) == i + 1
+                        })
+                        .collect();
+                    let mut fill_toggle = None;
+                    // The heading being read (H12.5): the last one whose
+                    // top has reached the top of the view; before any has,
+                    // the first one in view.
+                    let visible = ui.clip_rect();
+                    let reading_line = visible.top() + outline::READING_MARGIN;
+                    let mut reading = None;
+                    let mut first_in_view = None;
+                    let outline_target = self.outline_target.clone();
                     for (index, (block, number)) in self.blocks.iter_mut().zip(numbers).enumerate()
                     {
+                        if hidden[index] {
+                            // No room, but a place for the drag line.
+                            let at = ui.cursor().min;
+                            rects.push(egui::Rect::from_min_size(
+                                at,
+                                egui::vec2(ui.available_width(), 0.0),
+                            ));
+                            continue;
+                        }
                         let field = field_id(self.doc_generation, "block", &block.id);
                         let view = BlockView {
                             number,
-                            scroll_into_view: scroll_to.as_deref() == Some(block.id.as_str()),
+                            // A heading chosen in the outline goes to the
+                            // top instead (below).
+                            scroll_into_view: scroll_to.as_deref() == Some(block.id.as_str())
+                                && outline_target.as_deref() != Some(block.id.as_str()),
                             selected: selected.is_some_and(|(a, b)| (a..=b).contains(&index)),
                             show_handle: self.hovered_block.as_deref() == Some(block.id.as_str())
                                 || dragging.as_deref() == Some(block.id.as_str())
@@ -1618,16 +2250,55 @@ impl SilexApp {
                                 .attachment
                                 .as_ref()
                                 .and_then(|a| self.files.previews.get(a)),
-                            link: (block.kind == BlockKind::PageLink)
-                                .then(|| link_state(&self.pages, &self.links.targets, block)),
+                            link: (block.kind == BlockKind::PageLink).then(|| {
+                                link_state(
+                                    &self.pages,
+                                    &self.links.targets,
+                                    &self.page_icons,
+                                    block,
+                                )
+                            }),
+                            table: block.link.as_ref().and_then(|id| self.links.tables.get(id)),
                             found: found_by_block.remove(&index).unwrap_or_default(),
                             reveal: reveal_block == Some(index),
+                            link_edit: self
+                                .link_edit
+                                .as_ref()
+                                .filter(|e| e.block_id == block.id)
+                                .map(|e| (e.start, e.end)),
+                            folded: self.folds.is_folded(&block.id),
                         };
                         if index > 0 {
                             ui.add_space(heading_space(block.kind));
                         }
                         let out = block_field(ui, self.doc_generation, block, &view);
                         rects.push(out.rect);
+                        if block.kind.is_heading() {
+                            if out.rect.top() <= reading_line {
+                                reading = Some(block.id.clone());
+                            } else if first_in_view.is_none() && out.rect.top() < visible.bottom() {
+                                first_in_view = Some(block.id.clone());
+                            }
+                        }
+                        // The heading chosen in the outline: at the top of
+                        // the view next frame, at once (no animation that
+                        // another scroll could interrupt).
+                        if outline_target.as_deref() == Some(block.id.as_str()) {
+                            let offset = out.rect.top() - content_top - theme::space::SM;
+                            self.pending_scroll = Some(offset.max(0.0));
+                            self.outline_target = None;
+                        }
+                        if empty_toggles[index] && empty_toggle_hint(ui, block.indent) {
+                            fill_toggle = Some(index);
+                        }
+                        if let Some(edit) =
+                            self.link_edit.as_mut().filter(|e| e.block_id == block.id)
+                        {
+                            edit.anchor = Some(out.link_rect.unwrap_or(out.rect));
+                        }
+                        if let Some(url) = &out.open_url {
+                            web_links::open_web_link(&ctx, url);
+                        }
                         // What is typed with Cmd+B and nothing selected (ADR 0015).
                         if out.text_changed
                             && let Some((target, typing)) = self.typing_format.as_mut()
@@ -1637,6 +2308,23 @@ impl SilexApp {
                                 Some(marks) => block.marks = marks,
                                 None => self.typing_format = None,
                             }
+                        }
+                        // `---` typed in a paragraph becomes a divider (H12.2).
+                        if out.text_changed
+                            && editor::is_divider_text(block.kind, &block.content)
+                            && !self.ime_composing
+                        {
+                            self.pending_key = Some((
+                                EditorKey::Slash(editor::SlashItem::Divider),
+                                block.id.clone(),
+                            ));
+                        }
+                        // Text copied in Silex, pasted on one line (ADR 0015).
+                        if out.text_changed
+                            && let Some((_, start, len, pasted)) =
+                                self.paste_marks.take_if(|(id, ..)| *id == block.id)
+                        {
+                            block.marks = marks::with_pasted(&block.marks, start, len, &pasted);
                         }
                         // An image in sight: kept, or decoded if it has no preview (H7.2).
                         if let Some(id) = &block.attachment
@@ -1683,6 +2371,21 @@ impl SilexApp {
                     if let Some((kind, id)) = clicked_kind {
                         self.pending_key = Some((EditorKey::Slash(kind), id));
                     }
+                    if let Some(index) = fill_toggle {
+                        self.add_inside_toggle(index);
+                    }
+                    // The heading chosen in the outline wins while shown.
+                    let chosen = self
+                        .outline_chosen
+                        .as_ref()
+                        .map(|(id, _)| id.clone())
+                        .filter(|id| {
+                            self.blocks
+                                .iter()
+                                .position(|b| &b.id == id)
+                                .is_some_and(|i| !hidden[i])
+                        });
+                    self.outline_current = chosen.or(reading).or(first_in_view);
                     if let Some(dragged) = &dragging {
                         drop_move = self.drag_blocks(ui, dragged, &rects);
                     }
@@ -1742,6 +2445,17 @@ impl SilexApp {
             });
         });
         self.editor_scroll = scrolled.state.clamped_offset().y;
+        // The heading chosen in the outline stays marked until the page is
+        // scrolled by hand: once it is in place, any other scroll forgets it.
+        if let Some((_, settled)) = &mut self.outline_chosen {
+            match settled {
+                None if self.outline_target.is_none() && self.pending_scroll.is_none() => {
+                    *settled = Some(self.editor_scroll);
+                }
+                Some(at) if (self.editor_scroll - *at).abs() > 1.0 => self.outline_chosen = None,
+                _ => {}
+            }
+        }
         // Where the palette and the «…» menu apply formatting (ADR 0015).
         if let Some(caret) = &self.caret
             && self
@@ -1786,7 +2500,61 @@ impl SilexApp {
     /// edit when it changed.
     fn page_title(&mut self, ui: &mut egui::Ui, page_id: &str) -> Option<EditKind> {
         let p = theme::current(ui.ctx());
-        ui.horizontal(|ui| {
+        // The page's icon above its title (H12.8): a click changes it.
+        // Without one, «Añadir icono» shows while the pointer is over the
+        // title (and Cmd+K «Cambiar el icono de la página…» always works).
+        let top = ui.cursor().top();
+        let icon = self.page_icons.get(page_id).cloned();
+        let mut pick = false;
+        match &icon {
+            Some(emoji) => {
+                ui.horizontal(|ui| {
+                    gutter_space(ui);
+                    pick = ui
+                        .add(
+                            egui::Button::new(egui::RichText::new(emoji).size(44.0))
+                                .frame_when_inactive(false),
+                        )
+                        .on_hover_text("Cambiar el icono")
+                        .accessible_name("Cambiar el icono de la página")
+                        .clicked();
+                });
+            }
+            None => {
+                // In the room above the title, taking none: pages without
+                // an icon keep their layout.
+                let color = if self.title_hovered {
+                    p.text_muted
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+                let left = ui.max_rect().left() + GUTTER + ui.spacing().item_spacing.x;
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(left - ui.spacing().button_padding.x, top - ADD_ICON_HEIGHT),
+                    egui::vec2(140.0, ADD_ICON_HEIGHT),
+                );
+                // A child Ui: `put` would move the title down.
+                let mut room = super::cells::inside(
+                    ui,
+                    rect,
+                    egui::Layout::left_to_right(egui::Align::Center),
+                );
+                pick = room
+                    .add(
+                        egui::Button::new((
+                            icons::icon(icons::SMILE_PLUS).color(color),
+                            egui::RichText::new(" Añadir icono").small().color(color),
+                        ))
+                        .frame_when_inactive(false),
+                    )
+                    .accessible_name("Añadir un icono a la página")
+                    .clicked();
+            }
+        }
+        if pick {
+            self.open_icon_picker(page_id);
+        }
+        let edit = ui.horizontal(|ui| {
             gutter_space(ui);
             let title = ui
                 .add(
@@ -1802,8 +2570,13 @@ impl SilexApp {
                 title.request_focus();
             }
             title.changed().then(|| EditKind::Text("title".into()))
-        })
-        .inner
+        });
+        let header = egui::Rect::from_x_y_ranges(
+            ui.max_rect().x_range(),
+            top - ADD_ICON_HEIGHT..=ui.cursor().top(),
+        );
+        self.title_hovered = ui.rect_contains_pointer(header);
+        edit.inner
     }
 
     /// Breadcrumbs on the left; save state, undo/redo, favorite and the
@@ -1882,6 +2655,33 @@ impl SilexApp {
                         self.redo();
                     }
                 }
+                // The page's outline (H12.5); a database has no headings.
+                if self.database.is_none() {
+                    let (color, tip) = if self.settings.outline {
+                        (p.accent, "Ocultar el índice")
+                    } else {
+                        (p.text_muted, "Mostrar el índice")
+                    };
+                    if icons::button(ui, true, icons::TABLE_OF_CONTENTS, color, tip, None)
+                        .clicked()
+                    {
+                        extra = Some("outline");
+                    }
+                }
+                // This page and what it connects to, in the graph.
+                if !template
+                    && icons::button(
+                        ui,
+                        true,
+                        icons::WAYPOINTS,
+                        p.text_muted,
+                        "Ver en el grafo local",
+                        None,
+                    )
+                    .clicked()
+                {
+                    extra = Some("local_graph");
+                }
                 let star_color = if is_favorite { p.accent } else { p.text_muted };
                 let star_tip = if is_favorite {
                     "Quitar de favoritos"
@@ -1919,6 +2719,15 @@ impl SilexApp {
                             .clicked()
                     {
                         extra = Some("history");
+                        ui.close();
+                    }
+                    // The page as Markdown, to paste anywhere (H12.7).
+                    if self.database.is_none()
+                        && ui
+                            .button((icons::icon(icons::COPY), " Copiar como Markdown"))
+                            .clicked()
+                    {
+                        extra = Some("copy_markdown");
                         ui.close();
                     }
                     if ui
@@ -1988,6 +2797,12 @@ impl SilexApp {
             }
             Some("history") => {
                 let result = self.open_page_history();
+                self.report(result);
+            }
+            Some("outline") => self.toggle_outline(&ui.ctx().clone()),
+            Some("copy_markdown") => self.copy_page_as_markdown(ui.ctx()),
+            Some("local_graph") => {
+                let result = self.open_local_graph(page_id);
                 self.report(result);
             }
             _ => {}

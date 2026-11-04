@@ -423,6 +423,12 @@ mod tests {
             ),
             ("accent_strong / bg (links)", p.accent_strong, p.bg, TEXT),
             (
+                "accent_strong / subtle (links and icon in a callout)",
+                p.accent_strong,
+                p.subtle,
+                TEXT,
+            ),
+            (
                 "on_accent / accent_strong",
                 p.on_accent,
                 p.accent_strong,

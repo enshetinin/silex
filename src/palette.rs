@@ -9,6 +9,8 @@ use crate::settings::{Settings, ThemeMode, zoom_step};
 pub enum Command {
     NewPage,
     NewDatabase,
+    /// A database inside the open page (H12.11).
+    NewDatabaseHere,
     NewSubpage,
     NewRow,
     RenamePage,
@@ -21,6 +23,21 @@ pub enum Command {
     /// Bold, italic… on the text selected in the last block edited, or on
     /// the whole block (ADR 0015).
     Format(Format),
+    /// «Enlace…»: a web link on the same text as `Format` (ADR 0015).
+    Link,
+    /// Shows or hides the page's outline (H12.5).
+    ToggleOutline,
+    /// «Mover a otra página…»: the selected blocks, or the last block
+    /// edited (ADR 0017).
+    MoveBlocks,
+    /// «Convertir en subpágina»: the same blocks (ADR 0017).
+    ToSubpage,
+    /// The open page as Markdown on the clipboard (H12.7).
+    CopyMarkdown,
+    /// The icon picker of the open page (H12.8).
+    PageIcon,
+    /// Today's note in the journal (H12.9).
+    OpenToday,
     AddFavorite,
     RemoveFavorite,
     ExportPage,
@@ -77,6 +94,8 @@ pub struct PaletteContext {
     /// A block of the open page that takes formatting was the last one
     /// edited (ADR 0015).
     pub format_block: bool,
+    /// Blocks are selected, or one was edited last (ADR 0017).
+    pub blocks_target: bool,
     pub settings: Settings,
 }
 
@@ -85,13 +104,16 @@ pub const MAX_MATCHES: usize = 5;
 
 impl Command {
     /// Menu order: page actions, workspace, appearance, help.
-    pub const ALL: [Command; 36] = [
+    pub const ALL: [Command; 44] = [
         Command::NewPage,
+        Command::OpenToday,
         Command::NewDatabase,
+        Command::NewDatabaseHere,
         Command::NewSubpage,
         Command::NewRow,
         Command::NewFromTemplate,
         Command::RenamePage,
+        Command::PageIcon,
         Command::DuplicatePage,
         Command::FindInPage,
         Command::ReplaceInPage,
@@ -99,9 +121,14 @@ impl Command {
         Command::Format(Format::Italic),
         Command::Format(Format::Code),
         Command::Format(Format::Strike),
+        Command::Link,
+        Command::ToggleOutline,
+        Command::MoveBlocks,
+        Command::ToSubpage,
         Command::AddFavorite,
         Command::RemoveFavorite,
         Command::ExportPage,
+        Command::CopyMarkdown,
         Command::ExportViewCsv,
         Command::ExportDatabaseCsv,
         Command::AttachFiles,
@@ -128,6 +155,7 @@ impl Command {
         match self {
             Command::NewPage => "Nueva página",
             Command::NewDatabase => "Nueva base de datos",
+            Command::NewDatabaseHere => "Nueva base de datos dentro de esta página",
             Command::NewSubpage => "Nueva subpágina",
             Command::NewRow => "Nueva fila",
             Command::RenamePage => "Renombrar la página",
@@ -135,6 +163,13 @@ impl Command {
             Command::FindInPage => "Buscar en la página",
             Command::ReplaceInPage => "Buscar y reemplazar en la página",
             Command::Format(format) => format.label(),
+            Command::Link => "Enlace…",
+            Command::ToggleOutline => "Mostrar u ocultar el índice",
+            Command::MoveBlocks => "Mover a otra página…",
+            Command::ToSubpage => "Convertir en subpágina",
+            Command::CopyMarkdown => "Copiar la página como Markdown",
+            Command::PageIcon => "Cambiar el icono de la página…",
+            Command::OpenToday => "Abrir la nota de hoy",
             Command::AddFavorite => "Añadir a favoritos",
             Command::RemoveFavorite => "Quitar de favoritos",
             Command::ExportPage => "Exportar la página a Markdown",
@@ -167,6 +202,7 @@ impl Command {
         match self {
             Command::NewPage => &["crear", "documento", "new", "page"],
             Command::NewDatabase => &["crear", "tabla", "coleccion", "database", "table"],
+            Command::NewDatabaseHere => &["crear", "tabla", "coleccion", "dentro", "bbdd"],
             Command::NewSubpage => &["crear", "hija", "anidada", "child"],
             Command::NewRow => &["crear", "entrada", "registro", "row"],
             Command::RenamePage => &["titulo", "nombre", "cambiar", "rename"],
@@ -177,6 +213,20 @@ impl Command {
             Command::Format(Format::Italic) => &["formato", "italica", "inclinada", "italic"],
             Command::Format(Format::Code) => &["formato", "monoespaciada", "codigo", "code"],
             Command::Format(Format::Strike) => &["formato", "tachar", "rayado", "strikethrough"],
+            Command::Link => &["formato", "url", "web", "vinculo", "hipervinculo", "link"],
+            Command::MoveBlocks => &["mover", "bloques", "trasladar", "llevar", "move"],
+            Command::ToSubpage => &["subpagina", "pagina", "nueva", "extraer", "page"],
+            Command::CopyMarkdown => &["md", "portapapeles", "texto", "copy", "markdown"],
+            Command::PageIcon => &["emoji", "icono", "imagen", "simbolo", "icon"],
+            Command::OpenToday => &["hoy", "diario", "dia", "fecha", "journal", "today"],
+            Command::ToggleOutline => &[
+                "indice",
+                "titulos",
+                "esquema",
+                "contenido",
+                "outline",
+                "toc",
+            ],
             Command::AddFavorite => &["estrella", "marcar", "favorite", "star"],
             Command::RemoveFavorite => &["estrella", "desmarcar", "favorite", "star"],
             Command::ExportPage => &["md", "descargar", "guardar", "export"],
@@ -226,7 +276,9 @@ impl Command {
             | Command::ShowShortcuts
             | Command::CheckUpdates => true,
             // Inside a database a child is a row: «Nueva fila» instead.
-            Command::NewSubpage => cx.page_open && !cx.database_open && !cx.template_open,
+            Command::NewSubpage | Command::NewDatabaseHere => {
+                cx.page_open && !cx.database_open && !cx.template_open
+            }
             Command::NewRow => cx.database_open,
             Command::ExportViewCsv | Command::ExportDatabaseCsv => {
                 cx.database_open && !cx.csv_export_running
@@ -238,7 +290,18 @@ impl Command {
             | Command::FindInPage
             | Command::ReplaceInPage => cx.page_open && !cx.database_open,
             Command::RenamePage | Command::ExportPage | Command::TrashPage => cx.page_open,
-            Command::Format(_) => cx.page_open && !cx.database_open && cx.format_block,
+            Command::ToggleOutline => cx.page_open && !cx.database_open,
+            Command::MoveBlocks => cx.page_open && !cx.database_open && cx.blocks_target,
+            Command::CopyMarkdown => cx.page_open && !cx.database_open,
+            Command::PageIcon => cx.page_open,
+            Command::OpenToday => true,
+            // A template has no subpages (ADR 0010).
+            Command::ToSubpage => {
+                cx.page_open && !cx.database_open && cx.blocks_target && !cx.template_open
+            }
+            Command::Format(_) | Command::Link => {
+                cx.page_open && !cx.database_open && cx.format_block
+            }
             Command::AddFavorite => cx.page_open && !cx.favorite && !cx.template_open,
             // A template makes pages with «Nueva página desde plantilla».
             Command::DuplicatePage => cx.page_open && !cx.template_open,
@@ -337,8 +400,81 @@ mod tests {
             export_running: false,
             csv_export_running: false,
             format_block: false,
+            blocks_target: false,
             settings: Settings::default(),
         }
+    }
+
+    #[test]
+    fn moving_blocks_is_offered_with_blocks_to_move() {
+        assert!(!Command::MoveBlocks.available(&cx()));
+        let editing = PaletteContext {
+            blocks_target: true,
+            ..cx()
+        };
+        assert_eq!(
+            matching_commands("mover a", &editing),
+            [Command::MoveBlocks]
+        );
+        assert!(matching_commands("convertir en sub", &editing).contains(&Command::ToSubpage));
+        assert!(!Command::ToSubpage.available(&PaletteContext {
+            template_open: true,
+            ..editing
+        }));
+        assert!(!Command::MoveBlocks.available(&PaletteContext {
+            database_open: true,
+            ..editing
+        }));
+    }
+
+    #[test]
+    fn todays_note_is_always_offered() {
+        let nothing = PaletteContext {
+            page_open: false,
+            ..cx()
+        };
+        assert_eq!(matching_commands("hoy", &nothing)[0], Command::OpenToday);
+        assert!(matching_commands("diario", &nothing).contains(&Command::OpenToday));
+    }
+
+    #[test]
+    fn the_page_icon_can_be_changed_from_the_palette() {
+        assert_eq!(matching_commands("emoji", &cx()), [Command::PageIcon]);
+        assert!(matching_commands("icono", &cx()).contains(&Command::PageIcon));
+        assert!(!Command::PageIcon.available(&PaletteContext {
+            page_open: false,
+            ..cx()
+        }));
+    }
+
+    #[test]
+    fn a_page_can_be_copied_as_markdown() {
+        assert_eq!(
+            matching_commands("copiar como markdown", &cx()),
+            [Command::CopyMarkdown]
+        );
+        assert!(!Command::CopyMarkdown.available(&PaletteContext {
+            database_open: true,
+            ..cx()
+        }));
+    }
+
+    #[test]
+    fn the_outline_is_offered_on_pages() {
+        let page = PaletteContext {
+            page_open: true,
+            ..cx()
+        };
+        assert_eq!(matching_commands("indice", &page), [Command::ToggleOutline]);
+        assert!(matching_commands("titulos", &page).contains(&Command::ToggleOutline));
+        assert!(!Command::ToggleOutline.available(&PaletteContext {
+            page_open: false,
+            ..cx()
+        }));
+        assert!(!Command::ToggleOutline.available(&PaletteContext {
+            database_open: true,
+            ..page
+        }));
     }
 
     #[test]
@@ -356,7 +492,10 @@ mod tests {
             matching_commands("tachar", &editing),
             [Command::Format(Format::Strike)]
         );
-        assert!(matching_commands("formato", &editing).len() >= 4);
+        assert!(matching_commands("formato", &editing).len() >= 5);
+        assert_eq!(matching_commands("enlace", &editing)[0], Command::Link);
+        assert_eq!(matching_commands("url", &editing), [Command::Link]);
+        assert!(!Command::Link.available(&cx()));
         assert!(!Command::Format(Format::Bold).available(&PaletteContext {
             database_open: true,
             ..editing
@@ -496,6 +635,7 @@ mod tests {
             settings: Settings {
                 theme: ThemeMode::Dark,
                 zoom_percent: 150,
+                ..Settings::default()
             },
             ..cx()
         };
@@ -532,11 +672,15 @@ mod tests {
             [
                 Command::NewPage,
                 Command::NewDatabase,
+                Command::NewDatabaseHere,
                 Command::NewSubpage,
                 Command::NewFromTemplate
             ]
         );
-        assert_eq!(matching_commands("tabla", &cx()), [Command::NewDatabase]);
+        assert_eq!(
+            matching_commands("tabla", &cx()),
+            [Command::NewDatabase, Command::NewDatabaseHere]
+        );
         assert_eq!(matching_commands("SUBPAGINA", &cx()), [Command::NewSubpage]);
         assert_eq!(matching_commands("oscuro", &cx()), [Command::ThemeDark]);
         assert_eq!(matching_commands("dark", &cx()), [Command::ThemeDark]);

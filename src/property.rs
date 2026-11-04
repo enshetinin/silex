@@ -4,6 +4,7 @@
 use std::{collections::HashMap, fmt};
 
 use crate::editor::fold;
+use crate::marks::normalize_url;
 
 /// The type of a property. Stored as text; see [`PropertyKind::as_str`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -13,19 +14,32 @@ pub enum PropertyKind {
     Checkbox,
     Date,
     Select,
+    /// Zero or more options of the property (H13.2, ADR 0018).
+    MultiSelect,
+    /// A web address, opened with a click (H13.3).
+    Url,
+    /// When the row was created: read only, from its page (H13.3).
+    Created,
+    /// When the row was last edited: read only, from its page (H13.3).
+    Edited,
 }
 
 impl PropertyKind {
     /// Menu order.
-    pub const ALL: [PropertyKind; 5] = [
+    pub const ALL: [PropertyKind; 9] = [
         PropertyKind::Text,
         PropertyKind::Number,
         PropertyKind::Checkbox,
         PropertyKind::Date,
         PropertyKind::Select,
+        PropertyKind::MultiSelect,
+        PropertyKind::Url,
+        PropertyKind::Created,
+        PropertyKind::Edited,
     ];
 
-    /// Name stored in SQLite (must match the CHECK in migration 0005).
+    /// Name stored in SQLite (must match the CHECK in migrations 0005 and
+    /// 0014).
     pub fn as_str(self) -> &'static str {
         match self {
             PropertyKind::Text => "text",
@@ -33,7 +47,22 @@ impl PropertyKind {
             PropertyKind::Checkbox => "checkbox",
             PropertyKind::Date => "date",
             PropertyKind::Select => "select",
+            PropertyKind::MultiSelect => "multi_select",
+            PropertyKind::Url => "url",
+            PropertyKind::Created => "created",
+            PropertyKind::Edited => "edited",
         }
+    }
+
+    /// Whether its cells take options of the property (and it has some).
+    pub fn has_options(self) -> bool {
+        matches!(self, PropertyKind::Select | PropertyKind::MultiSelect)
+    }
+
+    /// Whether Silex fills its cells from the row's page (when it was
+    /// created or last edited): they are read only and never stored.
+    pub fn is_computed(self) -> bool {
+        matches!(self, PropertyKind::Created | PropertyKind::Edited)
     }
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -48,6 +77,10 @@ impl PropertyKind {
             PropertyKind::Checkbox => "Casilla",
             PropertyKind::Date => "Fecha",
             PropertyKind::Select => "Selección",
+            PropertyKind::MultiSelect => "Selección múltiple",
+            PropertyKind::Url => "URL",
+            PropertyKind::Created => "Creado",
+            PropertyKind::Edited => "Editado",
         }
     }
 }
@@ -134,7 +167,8 @@ pub struct SelectOption {
     pub color: OptionColor,
 }
 
-/// A typed column of a database. `options` is empty unless it is a select.
+/// A typed column of a database. `options` is empty unless it is a select
+/// or a multi-select.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Property {
     pub id: String,
@@ -375,6 +409,48 @@ impl fmt::Display for Date {
     }
 }
 
+/// A date and time to the minute in the system's time zone
+/// (`AAAA-MM-DD HH:MM`): when a row was created or last edited (H13.3).
+/// Ordered in time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Moment {
+    date: Date,
+    hour: u8,
+    minute: u8,
+}
+
+impl Moment {
+    /// Reads `AAAA-MM-DD HH:MM`, as SQLite's `strftime` writes it.
+    pub fn parse(input: &str) -> Option<Self> {
+        let (date, time) = input.trim().split_once(' ')?;
+        let (hour, minute) = time.split_once(':')?;
+        let two_digits = |part: &str| -> Option<u8> {
+            (part.len() == 2 && part.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| part.parse().ok())
+                .flatten()
+        };
+        let (hour, minute) = (two_digits(hour)?, two_digits(minute)?);
+        // Only `AAAA-MM-DD`: `Date::parse` also reads `D/M/AAAA`.
+        let iso = date.len() == 10 && date.as_bytes()[4] == b'-';
+        (hour < 24 && minute < 60 && iso).then_some(Self {
+            date: Date::parse(date)?,
+            hour,
+            minute,
+        })
+    }
+
+    pub fn date(self) -> Date {
+        self.date
+    }
+}
+
+/// `AAAA-MM-DD HH:MM`.
+impl fmt::Display for Moment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {:02}:{:02}", self.date, self.hour, self.minute)
+    }
+}
+
 fn days_in_month(year: u16, month: u8) -> u8 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -424,6 +500,14 @@ pub enum CellValue {
     Date(Date),
     /// The id of one of the property's options.
     Select(String),
+    /// Ids of the property's options, in the property's order (ADR 0018).
+    /// No ids is an empty cell.
+    MultiSelect(Vec<String>),
+    /// What was typed: a web address if [`CellValue::web_url`] says so.
+    Url(String),
+    /// Read from the row's page, never stored (H13.3).
+    Created(Moment),
+    Edited(Moment),
 }
 
 impl CellValue {
@@ -434,16 +518,83 @@ impl CellValue {
             CellValue::Checkbox(_) => PropertyKind::Checkbox,
             CellValue::Date(_) => PropertyKind::Date,
             CellValue::Select(_) => PropertyKind::Select,
+            CellValue::MultiSelect(_) => PropertyKind::MultiSelect,
+            CellValue::Url(_) => PropertyKind::Url,
+            CellValue::Created(_) => PropertyKind::Created,
+            CellValue::Edited(_) => PropertyKind::Edited,
         }
     }
 
-    /// Values stored as "no value": empty text and an unticked box.
+    /// Values stored as "no value": empty text, an unticked box and a
+    /// multi-select with no options.
     pub fn is_empty(&self) -> bool {
         match self {
-            CellValue::Text(text) => text.is_empty(),
+            CellValue::Text(text) | CellValue::Url(text) => text.is_empty(),
             CellValue::Checkbox(on) => !on,
+            CellValue::MultiSelect(ids) => ids.is_empty(),
             _ => false,
         }
+    }
+
+    /// The address a URL cell opens: only web (`http`, `https`) and mail
+    /// (`mailto:`) links, as in a block's text (ADR 0015). `None` for
+    /// anything else, which is shown but never opened.
+    pub fn web_url(&self) -> Option<&str> {
+        match self {
+            CellValue::Url(url) if normalize_url(url).as_deref() == Some(url.as_str()) => Some(url),
+            _ => None,
+        }
+    }
+
+    /// The date and time of a «Creado» or «Editado» cell.
+    pub fn moment(&self) -> Option<Moment> {
+        match self {
+            CellValue::Created(moment) | CellValue::Edited(moment) => Some(*moment),
+            _ => None,
+        }
+    }
+
+    /// The options of a multi-select (none for any other value or none).
+    pub fn option_ids(value: Option<&CellValue>) -> &[String] {
+        match value {
+            Some(CellValue::MultiSelect(ids)) => ids,
+            _ => &[],
+        }
+    }
+
+    /// A click on `option` in a multi-select's menu: `current` with it
+    /// added, or taken out if it was there. `None` if no option is left.
+    pub fn toggled(property: &Property, current: Option<&CellValue>, option: &str) -> Option<Self> {
+        let mut ids = Self::option_ids(current).to_vec();
+        if ids.iter().any(|id| id == option) {
+            ids.retain(|id| id != option);
+        } else {
+            ids.push(option.to_owned());
+        }
+        Self::multi_select(property, &ids)
+    }
+
+    /// `current` with `option` added (a new option created from the cell).
+    pub fn with_option(
+        property: &Property,
+        current: Option<&CellValue>,
+        option: &str,
+    ) -> Option<Self> {
+        let mut ids = Self::option_ids(current).to_vec();
+        ids.push(option.to_owned());
+        Self::multi_select(property, &ids)
+    }
+
+    /// A multi-select of `ids`: those that are options of `property`, once
+    /// each and in the property's order. `None` if none is left.
+    pub fn multi_select(property: &Property, ids: &[String]) -> Option<Self> {
+        let ids: Vec<String> = property
+            .options
+            .iter()
+            .filter(|o| ids.contains(&o.id))
+            .map(|o| o.id.clone())
+            .collect();
+        (!ids.is_empty()).then_some(CellValue::MultiSelect(ids))
     }
 
     /// The value read from the `db_values` columns for a property of
@@ -464,6 +615,11 @@ impl CellValue {
             PropertyKind::Checkbox => CellValue::Checkbox(flag? == 1),
             PropertyKind::Date => CellValue::Date(Date::parse(&date?)?),
             PropertyKind::Select => CellValue::Select(option?),
+            PropertyKind::Url => CellValue::Url(text?),
+            // Not in `db_values` (ADR 0018): read from `db_multi_values`.
+            PropertyKind::MultiSelect => return None,
+            // Not stored: read from the row's page.
+            PropertyKind::Created | PropertyKind::Edited => return None,
         };
         (!value.is_empty()).then_some(value)
     }
@@ -472,7 +628,7 @@ impl CellValue {
     /// option's name (empty if the option is gone).
     pub fn display(&self, property: &Property) -> String {
         match self {
-            CellValue::Text(text) => text.clone(),
+            CellValue::Text(text) | CellValue::Url(text) => text.clone(),
             CellValue::Number(n) => format_number(*n),
             CellValue::Checkbox(true) => "Sí".to_owned(),
             CellValue::Checkbox(false) => "No".to_owned(),
@@ -481,6 +637,15 @@ impl CellValue {
                 .option(id)
                 .map(|o| o.name.clone())
                 .unwrap_or_default(),
+            // «Novela, Cuento», in the property's order.
+            CellValue::MultiSelect(ids) => property
+                .options
+                .iter()
+                .filter(|o| ids.contains(&o.id))
+                .map(|o| o.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            CellValue::Created(moment) | CellValue::Edited(moment) => moment.to_string(),
         }
     }
 }
@@ -489,8 +654,11 @@ impl CellValue {
 /// cells are absent.
 pub type TableValues = HashMap<String, HashMap<String, CellValue>>;
 
-/// Text typed in a cell of a text, number or date property, turned into
-/// its value. `Ok(None)` empties the cell; `Err` explains what is expected.
+/// Text typed in a cell of a text, number, date or URL property, turned
+/// into its value. `Ok(None)` empties the cell; `Err` explains what is
+/// expected. An address without a scheme (`ejemplo.com`) gets `https://`;
+/// anything else that is not a web address is kept as typed (it is shown,
+/// but not opened).
 pub fn parse_input(kind: PropertyKind, input: &str) -> Result<Option<CellValue>, String> {
     if input.trim().is_empty() {
         return Ok(None);
@@ -506,11 +674,118 @@ pub fn parse_input(kind: PropertyKind, input: &str) -> Result<Option<CellValue>,
             .ok_or_else(|| {
                 format!("«{shown}» no es una fecha válida (AAAA-MM-DD, por ejemplo 2026-10-19).")
             }),
-        PropertyKind::Checkbox | PropertyKind::Select => Err(format!(
+        PropertyKind::Url => {
+            let typed = input.trim();
+            let url = normalize_url(typed).unwrap_or_else(|| typed.to_owned());
+            Ok(Some(CellValue::Url(url)))
+        }
+        PropertyKind::Checkbox | PropertyKind::Select | PropertyKind::MultiSelect => Err(format!(
             "Una {} no se escribe.",
             kind.label().to_lowercase()
         )),
+        PropertyKind::Created | PropertyKind::Edited => {
+            Err(format!("«{}» lo pone Silex: no se escribe.", kind.label()))
+        }
     }
+}
+
+/// An option of a converted cell (H13.4, ADR 0019): one the property
+/// already has, or the name of one to find or create.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptionRef {
+    Id(String),
+    Name(String),
+}
+
+/// A cell's value in its property's new type, before it is written
+/// (H13.4, ADR 0019). Only the column of the new type is written.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Converted {
+    /// `text_value`, for a text or a URL.
+    Text(String),
+    Number(f64),
+    Checkbox(bool),
+    Date(Date),
+    /// A select's option (the first) or a multi-select's options: never
+    /// empty, no names repeated.
+    Options(Vec<OptionRef>),
+}
+
+/// Reads a box from text: «sí», «x», «true», «1», «✓» or «[x]» is ticked;
+/// «no», «false», «0» or «[ ]» is not; ignoring case and accents. Anything
+/// else is not a box.
+pub fn parse_checkbox(input: &str) -> Option<bool> {
+    match fold(input.trim()).as_str() {
+        "si" | "x" | "true" | "1" | "✓" | "[x]" | "yes" => Some(true),
+        "no" | "false" | "0" | "[ ]" => Some(false),
+        _ => None,
+    }
+}
+
+/// What `value`, a cell of `from`, becomes when the property changes to
+/// type `to` (ADR 0019): mostly the text the cell shows, read as the new
+/// type. `None` if it does not fit (the cell is left empty, its value kept
+/// hidden), for an empty value, and always for «Creado» and «Editado»,
+/// which are not stored.
+pub fn convert(value: &CellValue, from: &Property, to: PropertyKind) -> Option<Converted> {
+    if value.is_empty() || to.is_computed() {
+        return None;
+    }
+    let text = value.display(from);
+    match to {
+        PropertyKind::Text | PropertyKind::Url => {
+            (!text.is_empty()).then_some(Converted::Text(text))
+        }
+        PropertyKind::Number => match value {
+            CellValue::Checkbox(on) => Some(Converted::Number(if *on { 1.0 } else { 0.0 })),
+            _ => parse_number(&text).map(Converted::Number),
+        },
+        PropertyKind::Date => match value {
+            CellValue::Date(date) => Some(Converted::Date(*date)),
+            CellValue::Created(moment) | CellValue::Edited(moment) => {
+                Some(Converted::Date(moment.date()))
+            }
+            _ => Date::parse(&text).map(Converted::Date),
+        },
+        PropertyKind::Checkbox => match value {
+            CellValue::Checkbox(on) => Some(Converted::Checkbox(*on)),
+            _ => parse_checkbox(&text).map(Converted::Checkbox),
+        },
+        PropertyKind::Select => match value {
+            CellValue::Select(id) => Some(Converted::Options(vec![OptionRef::Id(id.clone())])),
+            // Its first option, in the property's order.
+            CellValue::MultiSelect(ids) => ids
+                .first()
+                .map(|id| Converted::Options(vec![OptionRef::Id(id.clone())])),
+            _ => named([text.as_str()]),
+        },
+        PropertyKind::MultiSelect => match value {
+            CellValue::Select(id) => Some(Converted::Options(vec![OptionRef::Id(id.clone())])),
+            CellValue::MultiSelect(ids) => (!ids.is_empty()).then(|| {
+                Converted::Options(ids.iter().map(|id| OptionRef::Id(id.clone())).collect())
+            }),
+            // «Novela, Cuento», as a multi-select is written in text.
+            CellValue::Text(_) | CellValue::Url(_) => named(text.split(',')),
+            _ => named([text.as_str()]),
+        },
+        PropertyKind::Created | PropertyKind::Edited => None,
+    }
+}
+
+/// Options by name: trimmed, without empty ones or repeats (ignoring case
+/// and accents). `None` if no name is left.
+fn named<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<Converted> {
+    let mut seen = Vec::new();
+    let mut options = Vec::new();
+    for name in names {
+        let name = name.trim();
+        let key = fold(name);
+        if !name.is_empty() && !seen.contains(&key) {
+            seen.push(key);
+            options.push(OptionRef::Name(name.to_owned()));
+        }
+    }
+    (!options.is_empty()).then_some(Converted::Options(options))
 }
 
 #[cfg(test)]
@@ -794,5 +1069,365 @@ mod tests {
         assert_eq!(CellValue::Select("o1".into()).display(&property), "Leído");
         assert_eq!(CellValue::Select("gone".into()).display(&property), "");
         assert_eq!(CellValue::Number(1.5).display(&property), "1,5");
+    }
+
+    fn generos() -> Property {
+        Property {
+            id: "g".into(),
+            name: "Géneros".into(),
+            kind: PropertyKind::MultiSelect,
+            options: ["novela", "cuento", "ensayo"]
+                .into_iter()
+                .map(|id| SelectOption {
+                    id: id.into(),
+                    name: id.to_uppercase(),
+                    color: OptionColor::Gray,
+                })
+                .collect(),
+        }
+    }
+
+    fn multi(ids: &[&str]) -> CellValue {
+        CellValue::MultiSelect(ids.iter().map(|id| (*id).to_owned()).collect())
+    }
+
+    #[test]
+    fn a_click_adds_or_takes_out_an_option_in_the_property_order() {
+        let property = generos();
+        let one = CellValue::toggled(&property, None, "ensayo");
+        assert_eq!(one, Some(multi(&["ensayo"])));
+        let two = CellValue::toggled(&property, one.as_ref(), "novela");
+        assert_eq!(two, Some(multi(&["novela", "ensayo"])));
+        let back = CellValue::toggled(&property, two.as_ref(), "novela");
+        assert_eq!(back, one);
+        assert_eq!(CellValue::toggled(&property, one.as_ref(), "ensayo"), None);
+        // Unknown ids are left out; adding one twice keeps one.
+        assert_eq!(CellValue::toggled(&property, None, "otra"), None);
+        assert_eq!(
+            CellValue::with_option(&property, one.as_ref(), "ensayo"),
+            one
+        );
+        assert_eq!(
+            CellValue::with_option(&property, one.as_ref(), "cuento"),
+            Some(multi(&["cuento", "ensayo"]))
+        );
+    }
+
+    #[test]
+    fn a_multi_select_shows_its_names_and_empty_is_no_value() {
+        let property = generos();
+        assert_eq!(
+            multi(&["novela", "ensayo"]).display(&property),
+            "NOVELA, ENSAYO"
+        );
+        assert!(multi(&[]).is_empty());
+        assert_eq!(multi(&["cuento"]).kind(), PropertyKind::MultiSelect);
+        assert!(PropertyKind::MultiSelect.has_options());
+        assert!(!PropertyKind::Text.has_options());
+        // Never in `db_values`.
+        assert_eq!(
+            CellValue::from_columns(
+                PropertyKind::MultiSelect,
+                None,
+                None,
+                None,
+                None,
+                Some("x".into())
+            ),
+            None
+        );
+        assert!(parse_input(PropertyKind::MultiSelect, "x").is_err());
+    }
+
+    #[test]
+    fn a_url_gets_https_and_only_web_addresses_open() {
+        let url = |input: &str| match parse_input(PropertyKind::Url, input) {
+            Ok(Some(CellValue::Url(url))) => url,
+            other => panic!("{input:?}: {other:?}"),
+        };
+        assert_eq!(url(" ejemplo.com/a "), "https://ejemplo.com/a");
+        assert_eq!(url("http://a.es"), "http://a.es");
+        assert_eq!(url("mailto:ana@a.es"), "mailto:ana@a.es");
+        // Kept as typed, but never opened.
+        assert_eq!(url(" file:///etc/passwd "), "file:///etc/passwd");
+        assert_eq!(url("no es una web"), "no es una web");
+        assert_eq!(parse_input(PropertyKind::Url, "  "), Ok(None));
+        let opens = |text: &str| CellValue::Url(text.into()).web_url().map(str::to_owned);
+        assert_eq!(
+            opens("https://a.es/x?y=1"),
+            Some("https://a.es/x?y=1".into())
+        );
+        assert_eq!(opens("mailto:ana@a.es"), Some("mailto:ana@a.es".into()));
+        for refused in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ejemplo.com",
+            "no es una web",
+            "",
+        ] {
+            assert_eq!(opens(refused), None, "{refused:?}");
+        }
+        assert_eq!(CellValue::Text("https://a.es".into()).web_url(), None);
+        assert!(CellValue::Url(String::new()).is_empty());
+        assert_eq!(
+            CellValue::from_columns(
+                PropertyKind::Url,
+                Some("https://a.es".into()),
+                None,
+                None,
+                None,
+                None
+            ),
+            Some(CellValue::Url("https://a.es".into()))
+        );
+    }
+
+    #[test]
+    fn moments_read_and_show_to_the_minute_in_order() {
+        let moment = |s: &str| Moment::parse(s).expect(s);
+        assert_eq!(moment("2026-10-30 09:05").to_string(), "2026-10-30 09:05");
+        assert_eq!(
+            moment("2026-10-30 23:59").date(),
+            Date::parse("2026-10-30").expect("date")
+        );
+        assert!(moment("2026-10-30 09:05") < moment("2026-10-30 10:00"));
+        assert!(moment("2026-10-30 23:59") < moment("2026-10-31 00:00"));
+        assert!(moment("2025-12-31 23:59") < moment("2026-01-01 00:00"));
+        for bad in [
+            "",
+            "2026-10-30",
+            "2026-10-30 24:00",
+            "2026-10-30 12:60",
+            "2026-10-30 9:05",
+            "2026-02-30 10:00",
+            "30/10/2026 10:00",
+            "2026-10-30T10:00",
+            "2026-10-30 10:00:00",
+        ] {
+            assert_eq!(Moment::parse(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn created_and_edited_are_read_only_and_never_stored() {
+        let at = Moment::parse("2026-10-30 14:05").expect("moment");
+        for kind in [PropertyKind::Created, PropertyKind::Edited] {
+            assert!(kind.is_computed());
+            assert!(!kind.has_options());
+            let err = parse_input(kind, "2026-10-30 14:05").expect_err("read only");
+            assert!(err.contains(kind.label()), "{err}");
+            assert_eq!(
+                CellValue::from_columns(
+                    kind,
+                    Some("x".into()),
+                    Some(1.0),
+                    Some(1),
+                    Some("2026-10-30".into()),
+                    None
+                ),
+                None
+            );
+        }
+        assert!(!PropertyKind::Url.is_computed());
+        let property = Property {
+            id: "c".into(),
+            name: "Creado".into(),
+            kind: PropertyKind::Created,
+            options: Vec::new(),
+        };
+        let created = CellValue::Created(at);
+        assert_eq!(created.display(&property), "2026-10-30 14:05");
+        assert_eq!(created.kind(), PropertyKind::Created);
+        assert_eq!(CellValue::Edited(at).kind(), PropertyKind::Edited);
+        assert_eq!(created.moment(), Some(at));
+        assert!(!created.is_empty());
+        assert_eq!(CellValue::Url("x".into()).moment(), None);
+    }
+
+    // ---- H13.4, ADR 0019: changing a property's type ----
+
+    fn of(kind: PropertyKind) -> Property {
+        let mut property = generos();
+        property.kind = kind;
+        property
+    }
+
+    fn name(n: &str) -> OptionRef {
+        OptionRef::Name(n.into())
+    }
+
+    fn id(i: &str) -> OptionRef {
+        OptionRef::Id(i.into())
+    }
+
+    #[test]
+    fn every_value_becomes_the_text_it_shows() {
+        use PropertyKind as K;
+        let at = Moment::parse("2026-10-30 14:05").expect("moment");
+        let date = Date::parse("2026-10-30").expect("date");
+        let cases = [
+            (K::Number, CellValue::Number(-12.5), "-12,5"),
+            (K::Checkbox, CellValue::Checkbox(true), "Sí"),
+            (K::Date, CellValue::Date(date), "2026-10-30"),
+            (K::Select, CellValue::Select("cuento".into()), "CUENTO"),
+            (
+                K::MultiSelect,
+                multi(&["novela", "ensayo"]),
+                "NOVELA, ENSAYO",
+            ),
+            (
+                K::Url,
+                CellValue::Url("https://a.es".into()),
+                "https://a.es",
+            ),
+            (K::Created, CellValue::Created(at), "2026-10-30 14:05"),
+            (K::Edited, CellValue::Edited(at), "2026-10-30 14:05"),
+            (K::Url, CellValue::Url(" x ".into()), " x "),
+        ];
+        for (from, value, shown) in cases {
+            for to in [K::Text, K::Url] {
+                assert_eq!(
+                    convert(&value, &of(from), to),
+                    Some(Converted::Text(shown.into())),
+                    "{from:?} → {to:?}"
+                );
+            }
+        }
+        // An option that is gone shows nothing: nothing to convert.
+        assert_eq!(
+            convert(&CellValue::Select("gone".into()), &of(K::Select), K::Text),
+            None
+        );
+    }
+
+    #[test]
+    fn numbers_dates_and_boxes_are_read_from_the_text() {
+        use PropertyKind as K;
+        let text = |t: &str| CellValue::Text(t.into());
+        let to = |value: CellValue, from: K, to: K| convert(&value, &of(from), to);
+        assert_eq!(
+            to(text(" 12,5 "), K::Text, K::Number),
+            Some(Converted::Number(12.5))
+        );
+        assert_eq!(to(text("doce"), K::Text, K::Number), None);
+        assert_eq!(
+            to(CellValue::Checkbox(true), K::Checkbox, K::Number),
+            Some(Converted::Number(1.0))
+        );
+        assert_eq!(
+            to(CellValue::Select("x".into()), K::Select, K::Number),
+            None,
+            "an option that is gone"
+        );
+        let date = Date::parse("2026-10-30").expect("date");
+        assert_eq!(
+            to(text("30/10/2026"), K::Text, K::Date),
+            Some(Converted::Date(date))
+        );
+        assert_eq!(to(text("mañana"), K::Text, K::Date), None);
+        assert_eq!(to(CellValue::Number(3.0), K::Number, K::Date), None);
+        let at = Moment::parse("2026-10-30 23:59").expect("moment");
+        assert_eq!(
+            to(CellValue::Edited(at), K::Edited, K::Date),
+            Some(Converted::Date(date))
+        );
+        for (input, on) in [
+            ("Sí", true),
+            ("X", true),
+            ("true", true),
+            ("[x]", true),
+            ("no", false),
+            ("0", false),
+        ] {
+            assert_eq!(
+                to(text(input), K::Text, K::Checkbox),
+                Some(Converted::Checkbox(on)),
+                "{input}"
+            );
+        }
+        assert_eq!(to(text("quizá"), K::Text, K::Checkbox), None);
+        assert_eq!(
+            to(CellValue::Number(1.0), K::Number, K::Checkbox),
+            Some(Converted::Checkbox(true))
+        );
+        assert_eq!(
+            to(CellValue::Number(0.0), K::Number, K::Checkbox),
+            Some(Converted::Checkbox(false))
+        );
+        assert_eq!(to(CellValue::Number(2.0), K::Number, K::Checkbox), None);
+        assert_eq!(to(CellValue::Date(date), K::Date, K::Checkbox), None);
+    }
+
+    #[test]
+    fn options_keep_their_ids_or_come_by_name() {
+        use PropertyKind as K;
+        let options = |refs: Vec<OptionRef>| Some(Converted::Options(refs));
+        let to = |value: CellValue, from: K, to: K| convert(&value, &of(from), to);
+        // Between selects, the same options.
+        assert_eq!(
+            to(
+                CellValue::Select("cuento".into()),
+                K::Select,
+                K::MultiSelect
+            ),
+            options(vec![id("cuento")])
+        );
+        assert_eq!(
+            to(multi(&["novela", "ensayo"]), K::MultiSelect, K::Select),
+            options(vec![id("novela")])
+        );
+        // Anything else, by the text it shows.
+        assert_eq!(
+            to(CellValue::Text(" Leído ".into()), K::Text, K::Select),
+            options(vec![name("Leído")])
+        );
+        assert_eq!(
+            to(CellValue::Number(3.0), K::Number, K::Select),
+            options(vec![name("3")])
+        );
+        assert_eq!(
+            to(CellValue::Checkbox(true), K::Checkbox, K::MultiSelect),
+            options(vec![name("Sí")])
+        );
+        // Text into a multi-select: split by commas, once each.
+        assert_eq!(
+            to(
+                CellValue::Text("Novela, cuento ,, NOVELA,Ensayo".into()),
+                K::Text,
+                K::MultiSelect
+            ),
+            options(vec![name("Novela"), name("cuento"), name("Ensayo")])
+        );
+        assert_eq!(
+            to(CellValue::Text(" , ".into()), K::Text, K::MultiSelect),
+            None
+        );
+        // A comma inside a single select's name stays.
+        assert_eq!(
+            to(CellValue::Text("Sí, claro".into()), K::Text, K::Select),
+            options(vec![name("Sí, claro")])
+        );
+    }
+
+    #[test]
+    fn nothing_converts_into_created_or_edited_nor_from_empty() {
+        use PropertyKind as K;
+        for to in [K::Created, K::Edited] {
+            assert_eq!(
+                convert(&CellValue::Text("x".into()), &of(K::Text), to),
+                None
+            );
+        }
+        assert_eq!(
+            convert(&CellValue::Text(String::new()), &of(K::Text), K::Number),
+            None
+        );
+        assert_eq!(
+            convert(&CellValue::Checkbox(false), &of(K::Checkbox), K::Text),
+            None
+        );
+        assert_eq!(convert(&multi(&[]), &of(K::MultiSelect), K::Select), None);
+        assert_eq!(parse_checkbox(" SÍ "), Some(true));
+        assert_eq!(parse_checkbox(""), None);
     }
 }

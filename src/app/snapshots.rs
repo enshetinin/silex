@@ -73,6 +73,7 @@ fn demo_app() -> anyhow::Result<SilexApp> {
                 indent: *indent,
                 checked: *checked,
                 content: (*content).to_owned(),
+                marks: Vec::new(),
             },
         )
         .collect();
@@ -532,6 +533,7 @@ fn stored_settings_apply_at_startup_and_keyboard_zoom_is_remembered() -> anyhow:
     db.save_settings(&silex_desktop::settings::Settings {
         theme: silex_desktop::settings::ThemeMode::Dark,
         zoom_percent: 125,
+        ..Default::default()
     })?;
     let mut harness = a11y_harness(SilexApp::new(db)?);
     assert_eq!(harness.ctx.theme(), egui::Theme::Dark);
@@ -2006,6 +2008,7 @@ fn board_cards_and_menus_have_names() -> anyhow::Result<()> {
     click_button(&mut harness, "Nueva vista");
     assert_accessible(&harness, "new view menu");
     assert!(menu_item(&harness, "Tablero").is_some());
+    assert!(menu_item(&harness, "Calendario").is_some());
     Ok(())
 }
 
@@ -2856,6 +2859,225 @@ fn page_history() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- H12.11: a database inside a page ----
+
+#[test]
+fn the_page_menu_makes_a_database_inside_the_page() -> anyhow::Result<()> {
+    let app = demo_app()?;
+    let open = app.selected.clone().expect("a page is open");
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Más acciones de la página");
+    harness.run();
+    menu_item(&harness, "Nueva base de datos dentro")
+        .expect("«Nueva base de datos dentro» in the page menu")
+        .click();
+    harness.run();
+    let app = harness.state();
+    let base = app.selected.clone().expect("the database is open");
+    let page = app.db.get_page(&base)?.expect("made");
+    assert_eq!(page.kind, silex_desktop::model::PageKind::Database);
+    assert_eq!(page.parent_id.as_deref(), Some(open.as_str()));
+    assert!(app.database.is_some());
+    Ok(())
+}
+
+/// «Club de lectura», a page with a paragraph and the card of
+/// «Lecturas», a database inside it: seven books with a state, an author,
+/// a mark and a «Leído» box (five shown).
+fn database_card_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    use silex_desktop::property::{CellValue, OptionColor, PropertyKind};
+    let mut db = Database::open_in_memory()?;
+    let club = db.create_page("Club de lectura", None)?;
+    let base = db.create_database("Lecturas", Some(&club))?;
+    let estado = db.add_property(&base, "Estado", PropertyKind::Select)?;
+    let autor = db.add_property(&base, "Autor", PropertyKind::Text)?;
+    let nota = db.add_property(&base, "Nota", PropertyKind::Number)?;
+    let leido = db.add_property(&base, "Leído", PropertyKind::Checkbox)?;
+    let hecho = db.add_select_option(&estado, "Leído", OptionColor::Green)?;
+    let leyendo = db.add_select_option(&estado, "Leyendo", OptionColor::Blue)?;
+    let pendiente = db.add_select_option(&estado, "Pendiente", OptionColor::Orange)?;
+    for (title, state, author, mark) in [
+        ("Dune", &hecho, "Frank Herbert", Some(9.0)),
+        ("Solaris", &leyendo, "Stanisław Lem", None),
+        ("Fundación", &pendiente, "Isaac Asimov", None),
+        ("Neuromante", &hecho, "William Gibson", Some(7.0)),
+        (
+            "La mano izquierda de la oscuridad",
+            &hecho,
+            "Ursula K. Le Guin",
+            Some(10.0),
+        ),
+        ("Hyperion", &pendiente, "Dan Simmons", None),
+        ("Ubik", &leyendo, "Philip K. Dick", None),
+    ] {
+        let row = db.create_row(&base, title)?;
+        db.set_value(&row, &estado, Some(&CellValue::Select(state.clone())))?;
+        db.set_value(&row, &autor, Some(&CellValue::Text(author.into())))?;
+        if let Some(mark) = mark {
+            db.set_value(&row, &nota, Some(&CellValue::Number(mark)))?;
+            db.set_value(&row, &leido, Some(&CellValue::Checkbox(true)))?;
+        }
+    }
+    let block = |id: &str, kind: BlockKind, content: &str, link: Option<&str>| Block {
+        id: id.into(),
+        page_id: club.clone(),
+        kind,
+        content: content.into(),
+        checked: false,
+        position: 0,
+        indent: 0,
+        attachment: None,
+        link: link.map(str::to_owned),
+        marks: Vec::new(),
+    };
+    db.save_document(
+        &club,
+        "Club de lectura",
+        &[
+            block(
+                "p",
+                BlockKind::Paragraph,
+                "Lo que leemos este otoño, y lo que nos ha parecido.",
+                None,
+            ),
+            block("l", BlockKind::PageLink, "", Some(&base)),
+            block(
+                "q",
+                BlockKind::Paragraph,
+                "Próxima reunión: el jueves.",
+                None,
+            ),
+        ],
+    )?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(club)?;
+    Ok(app)
+}
+
+#[test]
+fn the_database_card_is_a_link_named_with_its_rows() -> anyhow::Result<()> {
+    let app = database_card_app()?;
+    let mut harness = a11y_harness(app);
+    harness.run();
+    assert_accessible(&harness, "database card");
+    let card = harness.get_by_label("Base de datos «Lecturas», 7 filas. Abrir");
+    card.click();
+    harness.run();
+    let app = harness.state();
+    assert!(app.database.is_some(), "a click opens the database");
+    assert_eq!(
+        app.selected
+            .as_ref()
+            .and_then(|id| app.pages.iter().find(|p| &p.id == id))
+            .map(|p| p.title.as_str()),
+        Some("Lecturas")
+    );
+    Ok(())
+}
+
+fn database_card(theme: eframe::egui::Theme, name: &str) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            database_card_app()?,
+        );
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+#[test]
+fn database_card_light() -> anyhow::Result<()> {
+    database_card(eframe::egui::Theme::Light, "database_card_light")
+}
+
+#[test]
+fn database_card_dark() -> anyhow::Result<()> {
+    database_card(eframe::egui::Theme::Dark, "database_card_dark")
+}
+
+// ---- H12.10: comparing a version with the page now ----
+
+#[test]
+fn comparing_a_version_has_names_for_what_changed() -> anyhow::Result<()> {
+    let (mut app, _) = super::page_history::history_fixture()?;
+    super::page_history::open_fixed_history(&mut app)?;
+    let mut harness = a11y_harness(app);
+    harness.run();
+    click_button(&mut harness, "Comparar con la actual");
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .page_history
+            .as_ref()
+            .is_some_and(|h| h.compare)
+    );
+    harness.run();
+    assert_accessible(&harness, "page history compared");
+    for label in [
+        "Quitado: Sopas",
+        "Quitado: Comprar calabaza",
+        "Cambiado: Solo queda la idea de la sopa.",
+    ] {
+        assert!(has_label(&harness, label), "no «{label}»");
+    }
+    // A second click goes back to the version alone.
+    click_button(&mut harness, "Comparar con la actual");
+    harness.run();
+    assert!(!has_label(&harness, "Quitado: Sopas"));
+    Ok(())
+}
+
+/// Whether some node is named `label` (labels included, which
+/// `query_by_label` leaves out).
+fn has_label(harness: &Harness<'_, SilexApp>, label: &str) -> bool {
+    harness
+        .root()
+        .children_recursive()
+        .any(|n| n.accesskit_node().label().as_deref() == Some(label))
+}
+
+/// The second version (19 oct) compared with the page now.
+fn page_history_compared(theme: eframe::egui::Theme, name: &str) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (mut app, _) = super::page_history::history_fixture()?;
+    super::page_history::open_fixed_history(&mut app)?;
+    if let Some(history) = &mut app.page_history {
+        history.selected = 1;
+        history.compare = true;
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+#[test]
+fn page_history_compared_light() -> anyhow::Result<()> {
+    page_history_compared(eframe::egui::Theme::Light, "page_history_compared_light")
+}
+
+#[test]
+fn page_history_compared_dark() -> anyhow::Result<()> {
+    page_history_compared(eframe::egui::Theme::Dark, "page_history_compared_dark")
+}
+
 // ---- H7.5: links between pages ----
 
 /// «Diario» with a paragraph, a link to «Diseño de la interfaz» (inside
@@ -3252,5 +3474,1782 @@ fn the_block_menu_formats_the_text_selected() -> anyhow::Result<()> {
         })
         .collect();
     assert_eq!(bold, ["interfaz"]);
+    Ok(())
+}
+
+/// H12.1d: the formatting page with «documentación» selected, Cmd+K and
+/// an address typed: the field under the text, which stays highlighted.
+fn link_edit_harness(theme: egui::Theme) -> anyhow::Result<Harness<'static, SilexApp>> {
+    use eframe::egui::{Key, Modifiers};
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 560.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            formatting_app()?,
+        );
+    harness.run();
+    // «Un enlace web a la documentación, …»: select «documentación».
+    harness.state_mut().pending_focus = Some(("b2".into(), 32));
+    harness.state_mut().pending_anchor = Some(("b2".into(), 19));
+    harness.run();
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::K);
+    harness.run();
+    harness.event(egui::Event::Text("ejemplo.com/docs".into()));
+    harness.run();
+    Ok(harness)
+}
+
+#[test]
+fn link_edit_light() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = link_edit_harness(egui::Theme::Light)?;
+    harness.snapshot("link_edit_light");
+    Ok(())
+}
+
+/// H12.1d: the link field and the block's links have names; Intro in the
+/// field links the text; Cmd+clic on a link opens it (once, its URL) and
+/// a plain click only places the cursor.
+#[test]
+fn web_links_are_named_set_with_the_field_and_opened_with_cmd_click() -> anyhow::Result<()> {
+    use eframe::egui::{Key, Modifiers};
+    let mut harness = link_edit_harness(egui::Theme::Light)?;
+    assert_accessible(&harness, "link field");
+    harness.get_by_label("Dirección del enlace");
+    harness.key_press(Key::Enter);
+    harness.run();
+    assert!(harness.state().link_edit.is_none());
+    assert!(
+        harness.state().blocks[2]
+            .marks
+            .iter()
+            .any(|m| m.start == 19 && m.end == 32 && m.url() == Some("https://ejemplo.com/docs"))
+    );
+    let text = harness.state().blocks[2].content.clone();
+    let field = harness.get_by(|node| {
+        node.role() == egui::accesskit::Role::MultilineTextInput
+            && node.value().as_deref() == Some(text.as_str())
+    });
+    let description = field.accesskit_node().description();
+    assert_eq!(
+        description.as_deref(),
+        Some(
+            "Enlaces: enlace web (https://ejemplo.com); documentación (https://ejemplo.com/docs); \
+             otro en negrita (https://ejemplo.com)"
+        )
+    );
+    // «enlace web» starts after «Un »: a little to the right of the
+    // field's left edge, on its first line.
+    let pos = field.rect().left_top() + egui::vec2(40.0, 10.0);
+    let click =
+        |harness: &mut Harness<'_, SilexApp>, modifiers: Modifiers| {
+            harness.hover_at(pos);
+            harness.run();
+            // One event per frame (`step` keeps only the last frame's output).
+            let mut urls = Vec::new();
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            };
+            for event in [
+                egui::Event::ModifiersChanged(modifiers),
+                button(true),
+                button(false),
+                egui::Event::ModifiersChanged(Modifiers::NONE),
+                egui::Event::PointerMoved(pos),
+            ] {
+                harness.event(event);
+                harness.step();
+                urls.extend(harness.output().platform_output.commands.iter().filter_map(
+                    |c| match c {
+                        egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                        _ => None,
+                    },
+                ));
+            }
+            urls
+        };
+    assert!(click(&mut harness, Modifiers::NONE).is_empty());
+    harness.run();
+    assert_eq!(
+        click(&mut harness, Modifiers::COMMAND),
+        ["https://ejemplo.com"]
+    );
+    Ok(())
+}
+
+/// H12.2 and H12.3: a divider between paragraphs and a callout with
+/// formatting, next to a quote.
+fn divider_callout_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::marks::{Mark, MarkKind};
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let page = db.create_page("Separador y aviso", None)?;
+    let specs: Vec<(BlockKind, &str, Vec<Mark>)> = vec![
+        (
+            BlockKind::Paragraph,
+            "Un párrafo antes del separador.",
+            vec![],
+        ),
+        (BlockKind::Divider, "", vec![]),
+        (
+            BlockKind::Callout,
+            "Un aviso con negrita y un enlace, que ocupa el ancho de la columna y \
+             sigue en una segunda línea cuando el texto es largo.",
+            vec![
+                // «negrita» and «y un enlace».
+                Mark::new(13, 20, MarkKind::Bold),
+                Mark::new(21, 32, MarkKind::Link("https://ejemplo.com".into())),
+            ],
+        ),
+        (BlockKind::Quote, "Una cita, para comparar.", vec![]),
+        (BlockKind::Divider, "", vec![]),
+        (BlockKind::Paragraph, "Y un párrafo después.", vec![]),
+    ];
+    let blocks: Vec<Block> = specs
+        .into_iter()
+        .enumerate()
+        .map(|(position, (kind, content, marks))| Block {
+            id: format!("b{position}"),
+            page_id: page.clone(),
+            kind,
+            content: content.to_owned(),
+            checked: false,
+            position: position as i64,
+            indent: 0,
+            attachment: None,
+            link: None,
+            marks,
+        })
+        .collect();
+    db.save_document(&page, "Separador y aviso", &blocks)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+fn divider_callout_snapshot(name: &str, theme: egui::Theme) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 560.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(
+            |ui, app: &mut SilexApp| app.update_ui(ui),
+            divider_callout_app()?,
+        );
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+#[test]
+fn divider_and_callout_light() -> anyhow::Result<()> {
+    divider_callout_snapshot("divider_and_callout_light", egui::Theme::Light)
+}
+
+#[test]
+fn divider_and_callout_dark() -> anyhow::Result<()> {
+    divider_callout_snapshot("divider_and_callout_dark", egui::Theme::Dark)
+}
+
+/// The divider and the callout have names for screen readers.
+#[test]
+fn dividers_and_callouts_have_names() -> anyhow::Result<()> {
+    let harness = a11y_harness(divider_callout_app()?);
+    assert_accessible(&harness, "divider and callout");
+    assert_eq!(harness.get_all_by_label("Separador").count(), 2);
+    harness.get_by_label("Aviso");
+    Ok(())
+}
+
+/// H12.4a: an open toggle with blocks inside (one a toggle itself), a
+/// folded one and an empty one.
+fn toggles_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let page = db.create_page("Desplegables", None)?;
+    let specs: Vec<(BlockKind, u8, &str)> = vec![
+        (BlockKind::Toggle, 0, "Abierto, con contenido"),
+        (BlockKind::Paragraph, 1, "Un párrafo dentro."),
+        (BlockKind::Bulleted, 1, "Y una lista"),
+        (BlockKind::Toggle, 1, "Otro desplegable dentro"),
+        (BlockKind::Paragraph, 2, "Más adentro todavía."),
+        (BlockKind::Toggle, 0, "Plegado: esconde lo que tiene"),
+        (BlockKind::Paragraph, 1, "No se ve."),
+        (BlockKind::Toggle, 0, "Vacío"),
+        (BlockKind::Paragraph, 0, "Fuera de los desplegables."),
+    ];
+    let blocks: Vec<Block> = specs
+        .into_iter()
+        .enumerate()
+        .map(|(position, (kind, indent, content))| Block {
+            id: format!("b{position}"),
+            page_id: page.clone(),
+            kind,
+            content: content.to_owned(),
+            checked: false,
+            position: position as i64,
+            indent,
+            attachment: None,
+            link: None,
+            marks: Vec::new(),
+        })
+        .collect();
+    db.save_document(&page, "Desplegables", &blocks)?;
+    db.save_folded_blocks(r#"["b5"]"#)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+#[test]
+fn toggles_light() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 560.0])
+        .with_theme(egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), toggles_app()?);
+    harness.run();
+    harness.snapshot("toggles_light");
+    Ok(())
+}
+
+/// The arrows have names that say what they do; a real click folds.
+#[test]
+fn toggle_arrows_are_named_and_fold_with_a_click() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(toggles_app()?);
+    assert_accessible(&harness, "toggles");
+    harness.get_by_label("Desplegar «Plegado: esconde lo que tiene»");
+    harness
+        .get_by_label("Plegar «Abierto, con contenido»")
+        .click();
+    harness.run();
+    assert!(harness.state().folds.is_folded("b0"));
+    harness.get_by_label("Desplegar «Abierto, con contenido»");
+    assert!(
+        harness
+            .query_by_label("Plegar «Otro desplegable dentro»")
+            .is_none()
+    );
+    Ok(())
+}
+
+/// H12.4b: dragging a folded toggle by its handle takes what it hides.
+#[test]
+fn a_dragged_toggle_takes_its_content() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(toggles_app()?);
+    let below =
+        block_rect(&harness, "Fuera de los desplegables.").center_bottom() + egui::vec2(0.0, 6.0);
+    start_drag(&mut harness, "Plegado: esconde lo que tiene", below);
+    harness.drop_at(below);
+    harness.run();
+    let ids: Vec<String> = harness
+        .state()
+        .blocks
+        .iter()
+        .map(|b| b.id.clone())
+        .collect();
+    assert_eq!(
+        ids,
+        ["b0", "b1", "b2", "b3", "b4", "b7", "b8", "b5", "b6"],
+        "the toggle and the paragraph it hides, at the end"
+    );
+    assert!(harness.state().folds.is_folded("b5"), "still folded");
+    Ok(())
+}
+
+/// H12.5: the outline beside a page with H1–H3, the heading being read
+/// marked.
+fn outline_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    db.save_settings(&silex_desktop::settings::Settings {
+        outline: true,
+        ..Default::default()
+    })?;
+    let page = db.create_page("Guía de uso", None)?;
+    let specs: Vec<(BlockKind, &str)> = vec![
+        (BlockKind::Heading1, "Primeros pasos"),
+        (BlockKind::Paragraph, "Crea una página con Cmd+N."),
+        (BlockKind::Heading2, "Escribir"),
+        (
+            BlockKind::Paragraph,
+            "Escribe / para cambiar el tipo de bloque.",
+        ),
+        (BlockKind::Heading3, "Formato en línea"),
+        (BlockKind::Paragraph, "Cmd+B, Cmd+I, Cmd+E."),
+        (
+            BlockKind::Heading2,
+            "Organizar las páginas con un título bastante largo",
+        ),
+        (
+            BlockKind::Paragraph,
+            "Arrastra las páginas en la barra lateral.",
+        ),
+        (BlockKind::Heading1, "Copias de seguridad"),
+        (BlockKind::Paragraph, "Se hacen solas cada día."),
+    ];
+    let blocks: Vec<Block> = specs
+        .into_iter()
+        .enumerate()
+        .map(|(position, (kind, content))| Block {
+            id: format!("b{position}"),
+            page_id: page.clone(),
+            kind,
+            content: content.to_owned(),
+            checked: false,
+            position: position as i64,
+            indent: 0,
+            attachment: None,
+            link: None,
+            marks: Vec::new(),
+        })
+        .collect();
+    db.save_document(&page, "Guía de uso", &blocks)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+#[test]
+fn outline_light() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = Harness::builder()
+        .with_size([1280.0, 620.0])
+        .with_theme(egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), outline_app()?);
+    harness.run();
+    harness.snapshot("outline_light");
+    Ok(())
+}
+
+/// The outline's entries are named buttons; clicking one goes to it.
+#[test]
+fn outline_entries_are_named_and_go_to_their_heading() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(outline_app()?);
+    assert_accessible(&harness, "outline");
+    harness.get_by_label("Ocultar el índice");
+    harness.get_by_label("Cerrar el índice");
+    let entries: Vec<_> = harness
+        .get_all_by_label("Copias de seguridad")
+        .filter(|n| n.accesskit_node().role() == egui::accesskit::Role::Button)
+        .collect();
+    assert_eq!(entries.len(), 1);
+    entries[0].click();
+    harness.run();
+    let focused = harness.state().caret.as_ref().map(|c| c.block_id.clone());
+    assert_eq!(focused.as_deref(), Some("b8"));
+    Ok(())
+}
+
+/// A long page: five sections of twenty paragraphs, with the outline.
+fn long_outline_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    db.save_settings(&silex_desktop::settings::Settings {
+        outline: true,
+        ..Default::default()
+    })?;
+    let page = db.create_page("Larga", None)?;
+    let mut blocks = Vec::new();
+    for section in 1..=5 {
+        let (kind, title) = if section % 2 == 1 {
+            (BlockKind::Heading1, format!("Sección {section}"))
+        } else {
+            (BlockKind::Heading2, format!("Apartado {section}"))
+        };
+        blocks.push((kind, title));
+        for n in 1..=20 {
+            blocks.push((
+                BlockKind::Paragraph,
+                format!("Párrafo {n} de la sección {section}."),
+            ));
+        }
+    }
+    let blocks: Vec<Block> = blocks
+        .into_iter()
+        .enumerate()
+        .map(|(position, (kind, content))| Block {
+            id: format!("b{position}"),
+            page_id: page.clone(),
+            kind,
+            content,
+            checked: false,
+            position: position as i64,
+            indent: 0,
+            attachment: None,
+            link: None,
+            marks: Vec::new(),
+        })
+        .collect();
+    db.save_document(&page, "Larga", &blocks)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_page(page)?;
+    Ok(app)
+}
+
+/// H12.5: a heading chosen in the outline goes to the top and stays
+/// marked (also when it cannot reach the top); scrolling by hand marks
+/// the section being read again.
+#[test]
+fn the_outline_marks_the_heading_chosen_and_then_follows_the_scroll() -> anyhow::Result<()> {
+    let mut harness = a11y_harness(long_outline_app()?);
+    assert_eq!(harness.state().outline_current.as_deref(), Some("b0"));
+    for (target, id) in [
+        ("Sección 3", "b42"),
+        ("Apartado 4", "b63"),
+        ("Apartado 2", "b21"),
+        ("Sección 5", "b84"),
+    ] {
+        harness
+            .get_all_by_label(target)
+            .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Button)
+            .expect("entry")
+            .click();
+        harness.run();
+        assert_eq!(
+            harness.state().outline_current.as_deref(),
+            Some(id),
+            "{target}"
+        );
+        let caret = harness.state().caret.as_ref().map(|c| c.block_id.clone());
+        assert_eq!(caret.as_deref(), Some(id), "{target}: the cursor is there");
+        // At the top of the page's view.
+        let top = block_rect(&harness, target).top();
+        let first = harness
+            .get_by_label("Más acciones de la página")
+            .rect()
+            .bottom();
+        assert!(
+            top - first < 80.0,
+            "{target}: at the top ({top} vs {first})"
+        );
+    }
+    // Scrolling up by hand: the section being read is marked again.
+    let page = block_rect(&harness, "Sección 5").center();
+    harness.hover_at(page);
+    harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 700.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    harness.run();
+    let current = harness.state().outline_current.clone();
+    assert!(
+        current.as_deref() != Some("b84") && current.is_some(),
+        "{current:?}"
+    );
+    Ok(())
+}
+
+/// A page with a very, very long title in the trash: the window stays on
+/// screen, the title is cut, and every button can be reached, also in the
+/// question «¿Borrar para siempre?».
+#[test]
+fn a_huge_title_never_pushes_the_trash_buttons_off_screen() -> anyhow::Result<()> {
+    let db = Database::open_in_memory()?;
+    let huge = format!("Título enorme {} fin", "sinespacios".repeat(300));
+    let page = db.create_page(&huge, None)?;
+    db.create_page("Otra", None)?;
+    db.trash_page(&page)?;
+    let mut app = SilexApp::new(db)?;
+    app.open_trash_dialog();
+    let mut harness = Harness::builder()
+        .with_size([900.0, 600.0])
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+    let on_screen = |harness: &Harness<'_, SilexApp>, label: &str| {
+        let rect = harness
+            .get_all_by_label_contains(label)
+            .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Button)
+            .unwrap_or_else(|| panic!("button {label:?}"))
+            .rect();
+        assert!(screen.contains_rect(rect), "{label}: {rect:?}");
+    };
+    for label in ["Restaurar", "Borrar «", "Cerrar", "Vaciar la papelera"] {
+        on_screen(&harness, label);
+    }
+    click_button(&mut harness, "Vaciar la papelera");
+    for label in ["Confirmar: borrar para siempre", "Cancelar"] {
+        on_screen(&harness, label);
+    }
+    harness
+        .get_all_by_label("Cancelar")
+        .next()
+        .expect("cancel")
+        .click();
+    harness.run();
+    // Deleting the item asks with its title cut short.
+    harness
+        .get_all_by_label_contains("Borrar «")
+        .next()
+        .expect("item")
+        .click();
+    harness.run();
+    for label in ["Confirmar: borrar para siempre", "Cancelar"] {
+        on_screen(&harness, label);
+    }
+    Ok(())
+}
+
+/// H12.8: the demo with page icons: in the sidebar, favorites, tabs and
+/// above the title. Emoji come from the system's font, as in the app.
+fn icons_app() -> anyhow::Result<SilexApp> {
+    let mut app = demo_app()?;
+    let id = |app: &SilexApp, title: &str| {
+        app.pages
+            .iter()
+            .find(|p| p.title == title)
+            .map(|p| p.id.clone())
+            .expect("page")
+    };
+    for (title, icon) in [
+        ("Proyecto Silex", "🚀"),
+        ("Diseño de la interfaz", "🎨"),
+        ("Recetas", "🍞"),
+        ("Guía de estilo", "📒"),
+    ] {
+        let page = id(&app, title);
+        app.set_page_icon(&page, Some(icon))?;
+    }
+    app.reload_pages()?;
+    Ok(app)
+}
+
+/// A harness that draws emoji: the system's emoji font, as eframe adds it
+/// (`system_fonts`). Where there is none (a CI runner), missing glyphs are
+/// boxes, not a failure.
+fn emoji_harness(app: SilexApp, size: [f32; 2]) -> Harness<'static, SilexApp> {
+    let mut harness = Harness::builder()
+        .with_size(size)
+        .with_theme(egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .allow_missing_glyphs()
+        .with_context_setup(|ctx| {
+            theme::install(ctx);
+            ctx.add_font_provider(std::sync::Arc::new(
+                egui_system_font_provider::SystemFontProvider::new(),
+            ));
+        })
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness
+}
+
+#[test]
+fn page_icons_light() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut harness = emoji_harness(icons_app()?, [1100.0, 620.0]);
+    harness.snapshot("page_icons_light");
+    Ok(())
+}
+
+#[test]
+fn icon_picker_light() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut app = icons_app()?;
+    let open = app.selected.clone().expect("page");
+    app.open_icon_picker(&open);
+    let mut harness = emoji_harness(app, [1100.0, 700.0]);
+    harness.snapshot("icon_picker_light");
+    Ok(())
+}
+
+/// The picker's emoji have names; a click on one sets the icon; the icon
+/// above the title opens the picker again, which can remove it.
+#[test]
+fn the_icon_picker_works_with_real_clicks() -> anyhow::Result<()> {
+    let mut harness = emoji_harness(icons_app()?, [1100.0, 700.0]);
+    let open = harness.state().selected.clone().expect("page");
+    harness.state_mut().set_page_icon(&open, None)?;
+    harness.run();
+    harness.get_by_label("Añadir un icono a la página").click();
+    harness.run();
+    assert_accessible(&harness, "icon picker");
+    // Found by a word: it is far down the list.
+    harness.event(egui::Event::Text("espiga".into()));
+    harness.run();
+    harness.get_by_label("Icono: espiga").click();
+    harness.run();
+    assert_eq!(
+        harness.state().page_icons.get(&open).map(String::as_str),
+        Some("🌾")
+    );
+    harness
+        .get_by_label("Cambiar el icono de la página")
+        .click();
+    harness.run();
+    harness.get_by_label("Quitar icono").click();
+    harness.run();
+    assert!(!harness.state().page_icons.contains_key(&open));
+    Ok(())
+}
+
+/// H12.9: «Hoy» in the sidebar opens today's note; Ajustes chooses the
+/// template new days come from.
+#[test]
+fn hoy_and_the_journal_template_work_with_real_clicks() -> anyhow::Result<()> {
+    let mut app = demo_app()?;
+    let open = app.selected.clone().expect("page");
+    app.db.save_as_template(&open)?;
+    app.reload_pages()?;
+    let mut harness = emoji_harness(app, [1100.0, 760.0]);
+    harness.get_by_label("Ajustes").click();
+    harness.run();
+    harness
+        .get_by_label_contains("Plantilla del diario")
+        .hover();
+    harness.run();
+    menu_item(&harness, "Guía de estilo")
+        .expect("the template in the list")
+        .click();
+    harness.run();
+    let (_, template) = harness.state().db.journal_settings()?;
+    assert!(template.is_some());
+    harness.get_by_label("Abrir la nota de hoy").click();
+    harness.run();
+    let today = harness.state().db.local_today()?;
+    assert_eq!(harness.state().title, today);
+    assert!(!harness.state().blocks.is_empty(), "from the template");
+    assert_accessible(&harness, "journal");
+    Ok(())
+}
+
+// ---- H13.1: moving rows by hand ----
+
+/// Rayuela dragged by its handle, held just above the end of the table.
+fn drag_rayuela(harness: &mut Harness<'_, SilexApp>) {
+    let row = harness.get_by_label("Seleccionar «Rayuela»").rect();
+    harness.hover_at(row.center());
+    harness.run();
+    let handle = harness.get_by_label("Mover «Rayuela»").rect().center();
+    harness.hover_at(handle);
+    harness.run();
+    harness.drag_at(handle);
+    harness.run();
+    harness.hover_at(handle + egui::vec2(0.0, 24.0));
+    harness.run();
+    let last = harness.get_by_label("Seleccionar «Ficciones»").rect();
+    harness.hover_at(egui::pos2(last.center().x + 240.0, last.bottom() - 4.0));
+    harness.run();
+}
+
+#[test]
+fn database_row_drag() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_row_drag_light",
+        eframe::egui::Theme::Light,
+        drag_rayuela,
+    )
+}
+
+#[test]
+fn database_row_drag_dark() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_row_drag_dark",
+        eframe::egui::Theme::Dark,
+        drag_rayuela,
+    )
+}
+
+#[test]
+fn a_row_handle_has_a_name_and_is_not_a_tab_stop() -> anyhow::Result<()> {
+    let (app, _, rows) = database_app()?;
+    let mut harness = a11y_harness(app);
+    let row = harness.get_by_label("Seleccionar «Rayuela»").rect();
+    harness.hover_at(row.center());
+    harness.run();
+    assert!(harness.query_by_label("Mover «Rayuela»").is_some());
+    assert_accessible(&harness, "row handle");
+    // Not in the Tab order: «Subir» and «Bajar» in the row's menu are.
+    let handle = harness
+        .ctx
+        .read_response(egui::Id::unique(("silex-row-handle", rows[0].as_str())))
+        .expect("handle drawn");
+    assert!(!handle.sense.is_focusable());
+    Ok(())
+}
+
+#[test]
+fn relationship_graph_dark() -> anyhow::Result<()> {
+    snapshot_with("relationship_graph_dark", egui::Theme::Dark, |harness| {
+        *harness.state_mut() = links_app().expect("graph fixture");
+        harness.run();
+        harness.get_by_label("Grafo").click();
+        harness.run();
+    })
+}
+
+// ---- H13.2, ADR 0018: multi-select ----
+
+/// «Lecturas» with «Géneros» (Novela, Cuento): Rayuela is a Novela.
+fn multi_select_app() -> anyhow::Result<(SilexApp, String, Vec<String>, String)> {
+    use silex_desktop::property::{CellValue, OptionColor, PropertyKind};
+    let (mut app, base, rows) = database_app()?;
+    let generos = app
+        .db
+        .add_property(&base, "Géneros", PropertyKind::MultiSelect)?;
+    let novela = app
+        .db
+        .add_select_option(&generos, "Novela", OptionColor::Purple)?;
+    app.db
+        .add_select_option(&generos, "Cuento", OptionColor::Orange)?;
+    app.db.set_value(
+        &rows[0],
+        &generos,
+        Some(&CellValue::MultiSelect(vec![novela])),
+    )?;
+    app.open_page(base.clone())?;
+    Ok((app, base, rows, generos))
+}
+
+/// The names of a multi-select cell as stored.
+fn stored_names(harness: &Harness<'_, SilexApp>, base: &str, row: &str, property: &str) -> String {
+    let state = harness.state();
+    let Some(property) = state
+        .db
+        .database_properties(base)
+        .ok()
+        .and_then(|ps| ps.into_iter().find(|p| p.id == property))
+    else {
+        return String::new();
+    };
+    state
+        .db
+        .database_values(base)
+        .ok()
+        .and_then(|values| values.get(row)?.get(&property.id).cloned())
+        .map(|v| v.display(&property))
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_multi_select_cell_adds_and_takes_out_options_with_the_menu_open() -> anyhow::Result<()> {
+    let (app, base, rows, generos) = multi_select_app()?;
+    let mut harness = a11y_harness(app);
+    let names = |h: &Harness<'_, SilexApp>| stored_names(h, &base, &rows[0], &generos);
+    click_action(&mut harness, "Géneros, Rayuela: Novela");
+    assert_accessible(&harness, "multi-select menu");
+    assert_steady(&mut harness, "Opciones de Géneros, Rayuela");
+    // Each click adds or takes out one, and the menu stays open.
+    menu_item(&harness, "Cuento").expect("«Cuento»").click();
+    harness.run();
+    assert_eq!(names(&harness), "Novela, Cuento");
+    assert!(
+        harness
+            .query_by_label("Opciones de Géneros, Rayuela")
+            .is_some()
+    );
+    menu_item(&harness, "Novela").expect("«Novela»").click();
+    harness.run();
+    assert_eq!(names(&harness), "Cuento");
+    // Typing a new name and Intro creates it, in the cell with the others.
+    harness.get_by_label("Opciones de Géneros, Rayuela").focus();
+    harness.run();
+    harness.event(egui::Event::Text("Ensayo".into()));
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(names(&harness), "Cuento, Ensayo");
+    // «Quitar todas» empties it and closes the menu.
+    menu_item(&harness, "Quitar todas")
+        .expect("«Quitar todas»")
+        .click();
+    harness.run();
+    assert_eq!(names(&harness), "");
+    assert!(
+        harness
+            .query_by_label("Opciones de Géneros, Rayuela")
+            .is_none()
+    );
+    // Each change was one step of the table's undo.
+    harness.state_mut().undo_table();
+    harness.run();
+    assert_eq!(names(&harness), "Cuento, Ensayo");
+    Ok(())
+}
+
+#[test]
+fn a_multi_select_is_offered_and_filtered_by_its_options() -> anyhow::Result<()> {
+    let (app, _, rows, _) = multi_select_app()?;
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Añadir una propiedad");
+    assert!(menu_item(&harness, "Selección múltiple").is_some());
+    egui::Popup::close_all(&harness.ctx);
+    harness.run();
+    // «Contiene» Novela: only Rayuela.
+    let state = harness.state_mut();
+    if let Some(db) = state.database.as_mut()
+        && let Some(property) = db.properties.iter().find(|p| p.name == "Géneros").cloned()
+        && let Some(view) = db.views.get_mut(db.view)
+    {
+        view.config.filters.push(silex_desktop::view::Filter {
+            property: property.id.clone(),
+            op: silex_desktop::view::FilterOp::Contains,
+            value: property.options[0].id.clone(),
+        });
+        db.view_changed();
+    }
+    harness.run();
+    let shown: Vec<String> = harness
+        .state()
+        .database
+        .as_ref()
+        .map(|d| d.order.iter().map(|&i| d.rows[i].id.clone()).collect())
+        .unwrap_or_default();
+    assert_eq!(shown, [rows[0].clone()]);
+    Ok(())
+}
+
+/// A multi-select cell's menu: the options with a tick on the chosen ones.
+#[test]
+fn database_multi_select_menu() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (app, _, _, _) = multi_select_app()?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    click_action(&mut harness, "Géneros, Rayuela: Novela");
+    menu_item(&harness, "Cuento").expect("«Cuento»").click();
+    harness.run();
+    harness.snapshot("database_multi_select_menu_light");
+    Ok(())
+}
+
+/// Multi-select cells: their tags, and «+N» for those that do not fit.
+#[test]
+fn database_multi_select_cells() -> anyhow::Result<()> {
+    use silex_desktop::property::{CellValue, OptionColor};
+    if !enabled() {
+        return Ok(());
+    }
+    let (mut app, base, rows, generos) = multi_select_app()?;
+    let mut ids: Vec<String> = app
+        .db
+        .database_properties(&base)?
+        .into_iter()
+        .find(|p| p.id == generos)
+        .map(|p| p.options.into_iter().map(|o| o.id).collect())
+        .unwrap_or_default();
+    for (name, color) in [
+        ("Ensayo", OptionColor::Green),
+        ("Poesía", OptionColor::Pink),
+    ] {
+        ids.push(app.db.add_select_option(&generos, name, color)?);
+    }
+    app.db.set_value(
+        &rows[1],
+        &generos,
+        Some(&CellValue::MultiSelect(ids.clone())),
+    )?;
+    app.db.set_value(
+        &rows[2],
+        &generos,
+        Some(&CellValue::MultiSelect(vec![
+            ids[1].clone(),
+            ids[2].clone(),
+        ])),
+    )?;
+    app.open_page(base.clone())?;
+    // Only «Géneros» in sight.
+    if let Some(state) = app.database.as_mut()
+        && let Some(view) = state.views.get_mut(state.view)
+    {
+        for property in &state.properties {
+            if property.id != generos {
+                view.config.set_hidden(&property.id, true);
+            }
+        }
+        state.view_changed();
+    }
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot("database_multi_select_cells_light");
+    Ok(())
+}
+
+// ---- H13.3: URL, «Creado» and «Editado» ----
+
+/// «Lecturas» with «Web» (Rayuela: a web address; Ficciones: a file one),
+/// «Creado» and «Editado»; only «Autor» and those in sight.
+fn url_times_app() -> anyhow::Result<(SilexApp, String, Vec<String>, [String; 3])> {
+    use silex_desktop::property::{CellValue, PropertyKind};
+    let (mut app, base, rows) = database_app()?;
+    let web = app.db.add_property(&base, "Web", PropertyKind::Url)?;
+    let creado = app
+        .db
+        .add_property(&base, "Creado", PropertyKind::Created)?;
+    let editado = app
+        .db
+        .add_property(&base, "Editado", PropertyKind::Edited)?;
+    let url = |text: &str| CellValue::Url(text.into());
+    app.db
+        .set_value(&rows[0], &web, Some(&url("https://ejemplo.com")))?;
+    app.db
+        .set_value(&rows[2], &web, Some(&url("file:///etc/hosts")))?;
+    app.open_page(base.clone())?;
+    if let Some(state) = app.database.as_mut()
+        && let Some(view) = state.views.get_mut(state.view)
+    {
+        for property in &state.properties {
+            let shown = ["Autor", "Web", "Creado", "Editado"].contains(&property.name.as_str());
+            view.config.set_hidden(&property.id, !shown);
+        }
+        state.view_changed();
+    }
+    Ok((app, base, rows, [web, creado, editado]))
+}
+
+/// The value of a cell in the open table.
+fn table_value(
+    harness: &Harness<'_, SilexApp>,
+    row: &str,
+    property: &str,
+) -> Option<silex_desktop::property::CellValue> {
+    harness
+        .state()
+        .database
+        .as_ref()
+        .and_then(|d| d.values.get(row)?.get(property).cloned())
+}
+
+/// The URLs the app asked the system to open while handling the event
+/// already queued (at most one) and then `events`, one per frame: a step
+/// keeps only the output of its last frame.
+fn opened_urls(harness: &mut Harness<'_, SilexApp>, events: Vec<egui::Event>) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut collect = |harness: &mut Harness<'_, SilexApp>| {
+        harness.step();
+        urls.extend(
+            harness
+                .output()
+                .platform_output
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                    _ => None,
+                }),
+        );
+    };
+    collect(harness);
+    for event in events {
+        harness.event(event);
+        collect(harness);
+    }
+    harness.run();
+    urls
+}
+
+/// Cmd+Intro, one event per frame.
+fn command_enter() -> Vec<egui::Event> {
+    use egui::{Key, Modifiers};
+    let key = |pressed| egui::Event::Key {
+        key: Key::Enter,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: Modifiers::COMMAND,
+    };
+    vec![
+        egui::Event::ModifiersChanged(Modifiers::COMMAND),
+        key(true),
+        key(false),
+        egui::Event::ModifiersChanged(Modifiers::NONE),
+    ]
+}
+
+#[test]
+fn a_url_cell_opens_web_addresses_and_says_why_not_others() -> anyhow::Result<()> {
+    use egui::Key;
+    use silex_desktop::property::CellValue;
+    let (app, _, rows, [web, ..]) = url_times_app()?;
+    let mut harness = a11y_harness(app);
+    // Its button, shown with the focus on the cell.
+    harness
+        .get_by_label("Web, Rayuela: https://ejemplo.com")
+        .focus();
+    harness.run();
+    assert_accessible(&harness, "URL cell with the focus");
+    harness.get_by_label("Abrir el enlace").click_accesskit();
+    assert_eq!(
+        opened_urls(&mut harness, Vec::new()),
+        ["https://ejemplo.com"]
+    );
+    // Cmd+Intro, with the focus on the cell; no typing starts.
+    harness
+        .get_by_label("Web, Rayuela: https://ejemplo.com")
+        .focus();
+    harness.run();
+    assert_eq!(
+        opened_urls(&mut harness, command_enter()),
+        ["https://ejemplo.com"]
+    );
+    assert!(
+        harness
+            .state()
+            .database
+            .as_ref()
+            .is_some_and(|d| d.editing.is_none())
+    );
+    // Not a web address: a notice, and nothing opens.
+    harness
+        .get_by_label("Web, Ficciones: file:///etc/hosts")
+        .focus();
+    harness.run();
+    harness.get_by_label("Abrir el enlace").click_accesskit();
+    assert!(opened_urls(&mut harness, Vec::new()).is_empty());
+    let notice = harness.state().notice.clone().unwrap_or_default();
+    assert!(notice.contains("no es una dirección web"), "{notice}");
+    // Typed without a scheme, stored with https://.
+    click_action(&mut harness, "Web, Pedro Páramo: vacío");
+    harness.event(egui::Event::Text("ejemplo.org/x".into()));
+    harness.run();
+    harness.key_press(Key::Enter);
+    harness.run();
+    assert_eq!(
+        table_value(&harness, &rows[1], &web),
+        Some(CellValue::Url("https://ejemplo.org/x".into()))
+    );
+    Ok(())
+}
+
+#[test]
+fn created_and_edited_cells_are_read_only_and_edited_follows_changes() -> anyhow::Result<()> {
+    use egui::Key;
+    let (mut app, _, rows, [_, creado, editado]) = url_times_app()?;
+    // Mid-June 2030 in UTC is mid-June 2030 in any time zone.
+    app.db.set_clock(Some("2030-06-15T12:00:00.000Z"));
+    let mut harness = a11y_harness(app);
+    let created = table_value(&harness, &rows[0], &creado).and_then(|v| v.moment());
+    assert!(created.is_some());
+    let month = |h: &Harness<'_, SilexApp>, property: &str| {
+        table_value(h, &rows[0], property)
+            .and_then(|v| v.moment())
+            .map(|m| (m.date().year(), m.date().month()))
+    };
+    assert_ne!(month(&harness, &editado), Some((2030, 6)));
+    // A click on «Creado» does not start typing.
+    let label = format!(
+        "Creado, Rayuela: {}",
+        created.map(|m| m.to_string()).unwrap_or_default()
+    );
+    click_action(&mut harness, &label);
+    assert!(
+        harness
+            .state()
+            .database
+            .as_ref()
+            .is_some_and(|d| d.editing.is_none())
+    );
+    // Changing a cell moves the row's «Editado», not its «Creado».
+    click_action(&mut harness, "Autor, Rayuela: Julio Cortázar");
+    harness.event(egui::Event::Text(" (1963)".into()));
+    harness.run();
+    harness.key_press(Key::Enter);
+    harness.run();
+    assert_eq!(month(&harness, &editado), Some((2030, 6)));
+    assert_eq!(
+        table_value(&harness, &rows[0], &creado).and_then(|v| v.moment()),
+        created
+    );
+    // The new types are offered.
+    click_button(&mut harness, "Añadir una propiedad");
+    for kind in ["URL", "Creado", "Editado"] {
+        assert!(menu_item(&harness, kind).is_some(), "{kind}");
+    }
+    Ok(())
+}
+
+/// URL cells (a web address in the link color, with «Abrir» under the
+/// pointer) and «Creado» and «Editado».
+#[test]
+fn database_url_and_times() -> anyhow::Result<()> {
+    use silex_desktop::property::{CellValue, Moment};
+    if !enabled() {
+        return Ok(());
+    }
+    let (mut app, _, rows, [_, creado, editado]) = url_times_app()?;
+    // Fixed, so the image does not depend on the time zone or the day.
+    if let Some(state) = app.database.as_mut() {
+        // Room for every column.
+        if let Some(view) = state.views.get_mut(state.view)
+            && let Some(autor) = state.properties.iter().find(|p| p.name == "Autor")
+        {
+            view.config.set_hidden(&autor.id, true);
+        }
+        state.view_changed();
+        for (row, created, edited) in [
+            (&rows[0], "2026-10-28 09:15", "2026-10-30 18:42"),
+            (&rows[1], "2026-10-28 09:16", "2026-10-28 09:16"),
+            (&rows[2], "2026-10-29 21:03", "2026-10-30 08:05"),
+        ] {
+            let cells = state.values.entry(row.clone()).or_default();
+            let at = |s: &str| Moment::parse(s).expect("moment");
+            cells.insert(creado.clone(), CellValue::Created(at(created)));
+            cells.insert(editado.clone(), CellValue::Edited(at(edited)));
+        }
+    }
+    let mut harness = Harness::builder()
+        .with_size([1240.0, 560.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness
+        .get_by_label("Web, Rayuela: https://ejemplo.com")
+        .hover();
+    harness.run();
+    harness.snapshot("database_url_times_light");
+    Ok(())
+}
+
+/// A workspace like the owner's: two page trees, a database linked from a
+/// page and some pages without connections; the graph open.
+fn graph_app() -> anyhow::Result<SilexApp> {
+    use silex_desktop::model::Block;
+    let mut db = Database::open_in_memory()?;
+    let tipografia = db.create_page("Tipografía", None)?;
+    for title in [
+        "Tipografía y sistemas tipográficos",
+        "Familia tipográfica",
+        "Cuerpo tipográfico, unidades e interlineado",
+        "Mapa de caracteres",
+        "Design with fonts",
+        "Universidad TT",
+    ] {
+        db.create_page(title, Some(&tipografia))?;
+    }
+    let prueba = db.create_page("Prueba de página", None)?;
+    for title in ["salchichas", "mayonesas", "pan", "humus"] {
+        db.create_page(title, Some(&prueba))?;
+    }
+    let anclada = db.create_database("BBDD anclada", None)?;
+    db.create_database("BBDD", None)?;
+    for title in ["Ideas", "Lista de recursos", "Tremenda nota"] {
+        db.create_page(title, None)?;
+    }
+    let link = Block {
+        id: "graph-link".into(),
+        page_id: prueba.clone(),
+        kind: BlockKind::PageLink,
+        content: String::new(),
+        checked: false,
+        position: 0,
+        indent: 0,
+        attachment: None,
+        link: Some(anclada),
+        marks: Vec::new(),
+    };
+    db.save_document(&prueba, "Prueba de página", &[link])?;
+    let mut app = SilexApp::new(db)?;
+    app.reload_pages()?;
+    app.open_page(prueba)?;
+    app.open_graph(&egui::Context::default())?;
+    Ok(app)
+}
+
+fn graph_snapshot(
+    name: &str,
+    theme: eframe::egui::Theme,
+    setup: impl FnOnce(&mut SilexApp),
+) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let mut app = graph_app()?;
+    setup(&mut app);
+    let mut harness = Harness::builder()
+        .with_size([1280.0, 800.0])
+        .with_theme(theme)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.run();
+    harness.snapshot(name);
+    Ok(())
+}
+
+/// The global graph with «Tipografía» selected: the inspector lists its
+/// subpages.
+fn select_tipografia(app: &mut SilexApp) {
+    let id = app
+        .pages
+        .iter()
+        .find(|p| p.title == "Tipografía")
+        .map(|p| p.id.clone());
+    if let (Some(graph), Some(id)) = (app.graph.as_mut(), id) {
+        graph.select_for_test(&id);
+    }
+}
+
+#[test]
+fn graph_global_dark() -> anyhow::Result<()> {
+    graph_snapshot(
+        "graph_global_dark",
+        eframe::egui::Theme::Dark,
+        select_tipografia,
+    )
+}
+
+#[test]
+fn graph_global_light() -> anyhow::Result<()> {
+    graph_snapshot("graph_global_light", eframe::egui::Theme::Light, |_| {})
+}
+
+#[test]
+fn graph_local_dark() -> anyhow::Result<()> {
+    graph_snapshot("graph_local_dark", eframe::egui::Theme::Dark, |app| {
+        let id = app
+            .pages
+            .iter()
+            .find(|p| p.title == "Prueba de página")
+            .map(|p| p.id.clone());
+        if let Some(id) = id {
+            let _ = app.open_local_graph(&id);
+        }
+        if let Some(graph) = app.graph.as_mut() {
+            graph.depth_for_test(2);
+        }
+    })
+}
+
+// ---- H13.4b, ADR 0019: change a property's type ----
+
+/// The type of the property `name` of `base`, and how its cell of `row`
+/// reads.
+fn kind_and_cell(
+    harness: &Harness<'_, SilexApp>,
+    base: &str,
+    name: &str,
+    row: &str,
+) -> (Option<silex_desktop::property::PropertyKind>, String) {
+    let state = harness.state();
+    let Some(property) = state
+        .db
+        .database_properties(base)
+        .ok()
+        .and_then(|ps| ps.into_iter().find(|p| p.name == name))
+    else {
+        return (None, String::new());
+    };
+    let cell = state
+        .db
+        .database_values(base)
+        .ok()
+        .and_then(|values| values.get(row)?.get(&property.id).cloned())
+        .map(|v| v.display(&property))
+        .unwrap_or_default();
+    (Some(property.kind), cell)
+}
+
+/// Opens «Cambiar tipo» from the header of `header` and picks `kind`.
+fn pick_kind(harness: &mut Harness<'_, SilexApp>, header: &str, kind: &str) {
+    click_action(harness, header);
+    menu_item(harness, "Cambiar tipo…")
+        .expect("«Cambiar tipo…»")
+        .click();
+    harness.run();
+    menu_item(harness, kind)
+        .unwrap_or_else(|| panic!("type {kind:?}"))
+        .click();
+    harness.run();
+}
+
+#[test]
+fn a_property_changes_type_from_its_menu_after_a_preview() -> anyhow::Result<()> {
+    use silex_desktop::property::PropertyKind;
+    let (app, base, rows) = database_app()?;
+    let mut harness = a11y_harness(app);
+    click_action(&mut harness, "Páginas, Número");
+    menu_item(&harness, "Cambiar tipo…")
+        .expect("«Cambiar tipo…»")
+        .click();
+    harness.run();
+    assert!(
+        harness
+            .query_by_label("Cambiar el tipo de «Páginas»")
+            .is_some()
+    );
+    // Nothing chosen yet: nothing to confirm, and the current type is not offered.
+    assert!(
+        harness
+            .query_by_label("Elige el tipo nuevo para ver qué pasa con los valores.")
+            .is_some()
+    );
+    assert!(menu_item(&harness, "Número").is_none());
+    assert_accessible(&harness, "change type dialog");
+
+    menu_item(&harness, "Texto").expect("«Texto»").click();
+    harness.run();
+    assert!(
+        harness
+            .query_by_label("2 valores se convierten a «Texto».")
+            .is_some()
+    );
+    let page = |h: &Harness<'_, SilexApp>| kind_and_cell(h, &base, "Páginas", &rows[0]);
+    assert_eq!(
+        page(&harness).0,
+        Some(PropertyKind::Number),
+        "only a preview"
+    );
+
+    click_button(&mut harness, "Cambiar tipo");
+    assert_eq!(page(&harness), (Some(PropertyKind::Text), "736".into()));
+    assert!(
+        harness
+            .state()
+            .database
+            .as_ref()
+            .is_some_and(|d| d.kind_change.is_none())
+    );
+    let notice = harness.state().notice.clone().unwrap_or_default();
+    assert!(notice.contains("ahora es de tipo «Texto»"), "{notice}");
+    // The header says the new type.
+    assert!(harness.query_by_label("Páginas, Texto").is_some());
+
+    // One step of the table's undo, both ways.
+    harness.state_mut().undo_table();
+    harness.run();
+    assert_eq!(page(&harness), (Some(PropertyKind::Number), "736".into()));
+    harness.state_mut().redo_table();
+    harness.run();
+    assert_eq!(page(&harness), (Some(PropertyKind::Text), "736".into()));
+    harness.state_mut().undo_table();
+    harness.run();
+    assert_eq!(page(&harness).0, Some(PropertyKind::Number));
+    Ok(())
+}
+
+#[test]
+fn escape_closes_the_change_type_dialog_without_changing_anything() -> anyhow::Result<()> {
+    use silex_desktop::property::PropertyKind;
+    let (app, base, rows) = database_app()?;
+    let mut harness = a11y_harness(app);
+    pick_kind(&mut harness, "Autor, Texto", "Número");
+    assert!(
+        harness
+            .query_by_label(
+                "3 valores no encajan y quedan vacíos. No se pierden: vuelven si cambias otra vez a «Texto»."
+            )
+            .is_some()
+    );
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .database
+            .as_ref()
+            .is_some_and(|d| d.kind_change.is_none())
+    );
+    assert_eq!(
+        kind_and_cell(&harness, &base, "Autor", &rows[0]),
+        (Some(PropertyKind::Text), "Julio Cortázar".into())
+    );
+    Ok(())
+}
+
+#[test]
+fn many_new_options_ask_a_second_time() -> anyhow::Result<()> {
+    use silex_desktop::property::{CellValue, PropertyKind};
+    let (mut app, base, rows) = database_app()?;
+    let autor = app
+        .db
+        .database_properties(&base)?
+        .into_iter()
+        .find(|p| p.name == "Autor")
+        .map(|p| p.id)
+        .unwrap_or_default();
+    for n in 0..101 {
+        let row = app.db.create_row(&base, &format!("Libro {n}"))?;
+        app.db
+            .set_value(&row, &autor, Some(&CellValue::Text(format!("Autor {n}"))))?;
+    }
+    app.reload_pages()?;
+    app.open_page(base.clone())?;
+    let mut harness = a11y_harness(app);
+    pick_kind(&mut harness, "Autor, Texto", "Selección");
+    assert!(
+        harness
+            .query_by_label_contains("Se crearán 104 opciones: «Julio Cortázar»")
+            .is_some()
+    );
+    click_button(&mut harness, "Cambiar tipo");
+    assert!(harness.query_by_label("¿Crear 104 opciones?").is_some());
+    assert_eq!(
+        kind_and_cell(&harness, &base, "Autor", &rows[0]).0,
+        Some(PropertyKind::Text),
+        "not yet"
+    );
+    // «Volver» goes back to the preview; asking again and saying yes changes it.
+    click_button(&mut harness, "Volver");
+    assert!(
+        harness
+            .query_by_label("Cambiar el tipo de «Autor»")
+            .is_some()
+    );
+    click_button(&mut harness, "Cambiar tipo");
+    click_button(&mut harness, "Crear 104 opciones y cambiar");
+    assert_eq!(
+        kind_and_cell(&harness, &base, "Autor", &rows[0]),
+        (Some(PropertyKind::Select), "Julio Cortázar".into())
+    );
+    let options = harness
+        .state()
+        .database
+        .as_ref()
+        .and_then(|d| d.properties.iter().find(|p| p.name == "Autor"))
+        .map_or(0, |p| p.options.len());
+    assert_eq!(options, 104);
+    Ok(())
+}
+
+/// The «Cambiar tipo» dialog: «Autor» to a select, with its new options.
+#[test]
+fn database_change_kind() -> anyhow::Result<()> {
+    database_snapshot(
+        "database_change_kind_light",
+        eframe::egui::Theme::Light,
+        |harness| pick_kind(harness, "Autor, Texto", "Selección"),
+    )
+}
+
+// ---- H13.5: the calendar view ----
+
+/// «Lecturas» in a calendar view on September 2026 (Rayuela is on the
+/// 14th by «Terminado»; the others have no date).
+fn calendar_app() -> anyhow::Result<(SilexApp, String, Vec<String>)> {
+    use silex_desktop::property::{CalendarMonth, Date};
+    let (mut app, base, rows) = database_app()?;
+    app.add_view(silex_desktop::model::ViewKind::Calendar)?;
+    if let Some(state) = app.database.as_mut() {
+        state.month = Date::parse("2026-09-01").map(CalendarMonth::of);
+    }
+    Ok((app, base, rows))
+}
+
+#[test]
+fn a_calendar_moves_between_months_and_adds_rows_on_a_day() -> anyhow::Result<()> {
+    use silex_desktop::property::{CellValue, Date};
+    let (app, base, _) = calendar_app()?;
+    let mut harness = a11y_harness(app);
+    assert_accessible(&harness, "calendar");
+    assert!(harness.query_by_label("Septiembre de 2026").is_some());
+    assert!(
+        harness
+            .query_by_label("«Rayuela», 14 de septiembre de 2026")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("«Pedro Páramo», sin fecha")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Sin fecha · 2").is_some());
+
+    click_button(&mut harness, "Mes siguiente");
+    assert!(harness.query_by_label("Octubre de 2026").is_some());
+    assert!(
+        harness
+            .query_by_label("«Rayuela», 14 de septiembre de 2026")
+            .is_none()
+    );
+    click_button(&mut harness, "Mes anterior");
+    click_button(&mut harness, "Mes anterior");
+    assert!(harness.query_by_label("Agosto de 2026").is_some());
+
+    // «+» on a day: a new row with that date, opened to be named.
+    click_action(&mut harness, "Nueva fila el 20 de agosto de 2026");
+    let state = harness.state();
+    let row = state.selected.clone().unwrap_or_default();
+    assert!(state.db.database_rows(&base)?.iter().any(|r| r.id == row));
+    let fecha = state
+        .db
+        .database_properties(&base)?
+        .into_iter()
+        .find(|p| p.name == "Terminado")
+        .map(|p| p.id)
+        .unwrap_or_default();
+    assert_eq!(
+        state.db.database_values(&base)?[&row][&fecha],
+        CellValue::Date(Date::parse("2026-08-20").expect("date"))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_full_day_lists_the_rest_in_a_menu() -> anyhow::Result<()> {
+    use silex_desktop::property::{CellValue, Date};
+    let (mut app, base, _) = calendar_app()?;
+    let fecha = app
+        .db
+        .database_properties(&base)?
+        .into_iter()
+        .find(|p| p.name == "Terminado")
+        .map(|p| p.id)
+        .unwrap_or_default();
+    let date = CellValue::Date(Date::parse("2026-09-14").expect("date"));
+    for n in 1..=8 {
+        let row = app.db.create_row(&base, &format!("Libro {n}"))?;
+        app.db.set_value(&row, &fecha, Some(&date))?;
+    }
+    app.reload_pages()?;
+    app.open_page(base.clone())?;
+    if let Some(state) = app.database.as_mut() {
+        state.month = Date::parse("2026-09-01").map(silex_desktop::property::CalendarMonth::of);
+    }
+    let mut harness = a11y_harness(app);
+    let more = harness
+        .query_all_by_label_contains("más el 14 de septiembre de 2026")
+        .next()
+        .map(|n| n.accesskit_node().label().unwrap_or_default());
+    let more = more.expect("«+N más» on the 14th");
+    click_action(&mut harness, &more);
+    // The menu has all nine, Libro 8 too.
+    assert!(menu_item(&harness, "Libro 8").is_some());
+    menu_item(&harness, "Libro 8").expect("«Libro 8»").click();
+    harness.run();
+    let opened = harness.state().selected.clone().unwrap_or_default();
+    let title = harness
+        .state()
+        .db
+        .database_rows(&base)?
+        .into_iter()
+        .find(|r| r.id == opened)
+        .map(|r| r.title);
+    assert_eq!(title.as_deref(), Some("Libro 8"));
+    Ok(())
+}
+
+#[test]
+fn the_calendar_date_property_is_chosen_in_its_menu() -> anyhow::Result<()> {
+    use silex_desktop::property::PropertyKind;
+    let (mut app, base, _) = calendar_app()?;
+    let otra = app.db.add_property(&base, "Empezado", PropertyKind::Date)?;
+    app.reload_properties()?;
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Fecha: Terminado");
+    assert_accessible(&harness, "date property menu");
+    assert!(
+        harness
+            .get_all_by_label("Terminado")
+            .any(|n| n.accesskit_node().role() == egui::accesskit::Role::CheckBox)
+    );
+    harness
+        .get_all_by_label("Empezado")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::CheckBox)
+        .expect("«Empezado»")
+        .click();
+    harness.run();
+    let state = harness.state();
+    assert_eq!(
+        state
+            .database
+            .as_ref()
+            .and_then(|d| d.config()?.date_by.clone()),
+        Some(otra)
+    );
+    assert!(
+        harness.query_by_label("Sin fecha · 3").is_some(),
+        "nobody started"
+    );
+    Ok(())
+}
+
+/// A month with a row on its day and two without a date.
+#[test]
+fn database_calendar() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (app, _, _) = calendar_app()?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot("database_calendar_light");
+    Ok(())
+}
+
+// ---- H13.6: list and gallery views ----
+
+/// «Lecturas» in a new view of `kind`.
+fn collection_app(
+    kind: silex_desktop::model::ViewKind,
+) -> anyhow::Result<(SilexApp, String, Vec<String>)> {
+    let (mut app, base, rows) = database_app()?;
+    app.add_view(kind)?;
+    Ok((app, base, rows))
+}
+
+/// The control whose name starts with `start`.
+fn click_starting(harness: &mut Harness<'_, SilexApp>, start: &str) {
+    harness
+        .get_all_by_label_contains(start)
+        .find(|node| {
+            node.accesskit_node().role() == egui::accesskit::Role::Button
+                && node
+                    .accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with(start))
+        })
+        .unwrap_or_else(|| panic!("control {start:?}"))
+        .click_accesskit();
+    harness.run();
+}
+
+#[test]
+fn a_list_shows_a_line_per_row_and_opens_it() -> anyhow::Result<()> {
+    use silex_desktop::model::ViewKind;
+    let (app, base, rows) = collection_app(ViewKind::List)?;
+    let mut harness = a11y_harness(app);
+    assert_accessible(&harness, "list view");
+    assert!(harness.query_by_label("Vista «Lista»").is_some(), "its tab");
+    // Each line says its values; an unticked box says nothing.
+    assert!(
+        harness
+            .query_by_label(
+                "«Rayuela»; Autor: Julio Cortázar; Páginas: 736; Leído: Sí; Estado: Terminado; Terminado: 2026-09-14"
+            )
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("«Pedro Páramo»; Autor: Juan Rulfo; Páginas: 124")
+            .is_some()
+    );
+    assert!(
+        harness.query_by_label("Propiedades").is_some(),
+        "not «Columnas»"
+    );
+    click_starting(&mut harness, "«Pedro Páramo»");
+    assert_eq!(harness.state().selected.as_deref(), Some(rows[1].as_str()));
+
+    // «Nueva fila»: a new row, opened.
+    harness.state_mut().open_page(base.clone())?;
+    harness.run();
+    click_button(&mut harness, "Nueva fila");
+    let opened = harness.state().selected.clone().unwrap_or_default();
+    assert!(!rows.contains(&opened));
+    assert!(
+        harness
+            .state()
+            .db
+            .database_rows(&base)?
+            .iter()
+            .any(|r| r.id == opened)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_gallery_has_a_card_per_row_and_its_menu() -> anyhow::Result<()> {
+    use silex_desktop::model::ViewKind;
+    let (app, _, rows) = collection_app(ViewKind::Gallery)?;
+    let mut harness = a11y_harness(app);
+    assert_accessible(&harness, "gallery view");
+    assert!(
+        harness.query_by_label("Vista «Galería»").is_some(),
+        "its tab"
+    );
+    assert!(
+        harness
+            .query_by_label("Tarjeta «Ficciones»; Autor: Jorge Luis Borges; Estado: Leyendo")
+            .is_some()
+    );
+    // «⋯» has the page's menu: «Enviar a la papelera» sends it there.
+    click_button(&mut harness, "Acciones de «Ficciones»");
+    menu_item(&harness, "Enviar a la papelera")
+        .expect("«Enviar a la papelera»")
+        .click();
+    harness.run();
+    let trashed = harness
+        .state()
+        .db
+        .list_trash()?
+        .iter()
+        .any(|t| t.page.id == rows[2]);
+    assert!(trashed);
+    Ok(())
+}
+
+/// A list: names on the left, values on the right.
+#[test]
+fn database_list() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (app, _, _) = collection_app(silex_desktop::model::ViewKind::List)?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot("database_list_light");
+    Ok(())
+}
+
+/// A gallery: a card per row, without covers (no row has an image).
+#[test]
+fn database_gallery() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (app, _, _) = collection_app(silex_desktop::model::ViewKind::Gallery)?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot("database_gallery_light");
     Ok(())
 }

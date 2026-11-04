@@ -40,6 +40,8 @@ pub(super) enum RowAction {
     UseTemplate(String, Option<String>),
     /// «Nueva página desde plantilla…», inside a page or at the root.
     FromTemplate(Option<String>),
+    /// «Nueva base de datos dentro» of a page (H12.11).
+    NewDatabase(String),
     SaveAsTemplate(String),
 }
 
@@ -136,6 +138,8 @@ struct RowParts<'a> {
     /// Reserve room for a caret (tree rows) so titles line up.
     caret_slot: bool,
     icon: &'a str,
+    /// The page's emoji, shown instead of `icon` (H12.8).
+    emoji: Option<&'a str>,
     label: &'a str,
     /// Muted text at the right (e.g. a count).
     trailing: Option<String>,
@@ -152,6 +156,7 @@ impl<'a> RowParts<'a> {
             caret: None,
             caret_slot: false,
             icon,
+            emoji: None,
             label,
             trailing,
             selected: false,
@@ -255,11 +260,13 @@ fn sidebar_row(ui: &mut egui::Ui, parts: &RowParts<'_>) -> RowOutput {
         }
         x += CARET_SLOT;
     }
-    ui.painter().text(
+    icons::paint_page_icon(
+        ui.painter(),
         egui::pos2(x, cy),
         egui::Align2::LEFT_CENTER,
+        parts.emoji,
         parts.icon,
-        icons::font(theme::icon::MD),
+        theme::icon::MD,
         if parts.selected {
             p.sidebar_selected_text
         } else {
@@ -402,6 +409,7 @@ impl SilexApp {
             caret: (arrows && row.has_children).then(|| self.expanded.contains(&id)),
             caret_slot: arrows,
             icon,
+            emoji: self.page_icons.get(&id).map(String::as_str),
             label: display_title(&row.page.title),
             trailing: None,
             selected: self.selected.as_deref() == Some(id.as_str()),
@@ -504,7 +512,14 @@ impl SilexApp {
             .filter(|p| p.parent_id == page.parent_id)
             .map(|p| p.id.as_str())
             .collect();
-        let index = siblings.iter().position(|s| *s == id);
+        let mut index = siblings.iter().position(|s| *s == id);
+        let mut count = siblings.len();
+        // A row of the open database moves in the list it is shown in, the
+        // table or its board column (H13.1).
+        if let Some(shown) = self.database.as_ref().and_then(|d| d.shown_with(id)) {
+            index = shown.iter().position(|s| s == id);
+            count = shown.len();
+        }
         let is_favorite = self.favorites.iter().any(|p| p.id == id);
         let owned = || id.to_owned();
         let mut action = None;
@@ -531,6 +546,16 @@ impl SilexApp {
         if ui.button(child).clicked() {
             action = Some(RowAction::Subpage(owned()));
         }
+        // Not inside a database, nor inside one of its rows (their
+        // subpages are not in the sidebar).
+        let row = page
+            .parent_id
+            .as_deref()
+            .is_some_and(|parent| self.is_database(parent));
+        if page.kind == PageKind::Page && !row && ui.button("Nueva base de datos dentro").clicked()
+        {
+            action = Some(RowAction::NewDatabase(owned()));
+        }
         // Templates (ADR 0010): not inside a database, nor of one.
         if page.kind == PageKind::Page && ui.button("Nueva página desde plantilla…").clicked() {
             action = Some(RowAction::FromTemplate(Some(owned())));
@@ -555,7 +580,7 @@ impl SilexApp {
         }
         if ui
             .add_enabled(
-                index.is_some_and(|i| i + 1 < siblings.len()),
+                index.is_some_and(|i| i + 1 < count),
                 egui::Button::new("Bajar"),
             )
             .clicked()
@@ -620,6 +645,7 @@ impl SilexApp {
                 Ok(())
             }
             RowAction::SaveAsTemplate(id) => self.save_as_template(&id),
+            RowAction::NewDatabase(id) => self.create_database(Some(&id)),
         }
     }
 
@@ -657,7 +683,8 @@ impl SilexApp {
             Ok(())
         } else {
             self.db.rename_page(&rename.id, &title)?;
-            self.reload_pages()
+            self.reload_pages()?;
+            self.refresh_row_times(&[&rename.id])
         }
     }
 
@@ -689,6 +716,18 @@ impl SilexApp {
         // «Silex» is in the window's top bar; a new page is «Páginas +»
         // (or Cmd+N).
         self.search_button(ui, p);
+        ui.add_space(theme::space::XS);
+        // Today's note (H12.9).
+        let shortcut = format!("{}+Mayús+D", cmd_label(ui.ctx()));
+        let today = sidebar_row(ui, &RowParts::nav(icons::CALENDAR, "Hoy", Some(shortcut)));
+        // «Hoy» alone would be any «Hoy» (a date picker has one too).
+        ui.ctx().accesskit_node_builder(today.row.id, |node| {
+            node.set_label("Abrir la nota de hoy");
+        });
+        if today.row.clicked() {
+            let result = self.open_today();
+            self.report(result);
+        }
         ui.add_space(theme::space::MD);
 
         // The tree is drawn before the footer, so Tab goes through them in
@@ -902,6 +941,8 @@ impl SilexApp {
         );
         let ctx = ui.ctx().clone();
         self.set_settings(&ctx, settings);
+        ui.add_space(theme::space::SM);
+        self.journal_template_menu(ui);
         self.privacy_section(ui);
         ui.separator();
         // ADR 0014: the version, and a page to compare it with; no request.
@@ -962,6 +1003,14 @@ impl SilexApp {
                         "Negrita / cursiva / código",
                     ),
                     (format!("{cmd}+Mayús+X"), "Tachado"),
+                    (format!("{cmd}+K con texto seleccionado"), "Enlace web"),
+                    (format!("{cmd}+clic / {cmd}+Intro"), "Abrir el enlace"),
+                    (
+                        format!("{cmd}+Intro en un desplegable"),
+                        "Plegar o desplegar",
+                    ),
+                    (format!("{cmd}+Mayús+V"), "Pegar como texto plano"),
+                    (format!("{cmd}+Mayús+D"), "Abrir la nota de hoy"),
                     (
                         "Arrastrar el asa".to_owned(),
                         "Mover el bloque (Esc cancela)",

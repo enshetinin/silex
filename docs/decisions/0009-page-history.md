@@ -97,6 +97,7 @@ Así una página editada todos los días acumula unas 30 versiones al mes y 52 a
 - **La base crece con el historial.** Con la poda, una página de 100 bloques editada a diario durante un año ocupa unos 2 MB de versiones (unas 110 de 18 KB). Las copias de seguridad crecen igual.
 - **Un guardado puede escribir una versión más** (< 1 ms medido con 1000 bloques).
 - **No hay comparación** entre versiones (resaltar qué cambió). Se puede añadir después sin cambiar el esquema.
+  - *Actualización (H12.10):* ya la hay, sin cambiar el esquema: «Comparar con la actual» en la ventana del historial (`versions::compare`, bloques emparejados por id y diff por palabras).
 - **Fuera de alcance**, cada uno con su historia o ADR: historial de las bases de datos (propiedades, valores, vistas), historial del espacio entero, comparar versiones, nombrar o fijar versiones, y deshacer persistente entre sesiones.
 
 ### Historias propuestas

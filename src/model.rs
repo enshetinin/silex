@@ -53,11 +53,20 @@ pub enum BlockKind {
     /// (for search and export), and its page is `Block::link`. Created by
     /// choosing a page, not by converting a text block.
     PageLink,
+    /// A line between blocks (H12.2): no text. Created with «/separador»
+    /// or `---`, not by converting a text block.
+    Divider,
+    /// Text on a background, with an icon (H12.3): a paragraph that stands
+    /// out. Takes formatting like a paragraph.
+    Callout,
+    /// A title that shows or hides the blocks after it with more indent
+    /// (ADR 0016). Takes formatting like a paragraph.
+    Toggle,
 }
 
 impl BlockKind {
     /// The kinds a text block can take: the `/` menu and «Convertir en».
-    pub const ALL: [BlockKind; 9] = [
+    pub const ALL: [BlockKind; 11] = [
         BlockKind::Paragraph,
         BlockKind::Heading1,
         BlockKind::Heading2,
@@ -66,10 +75,12 @@ impl BlockKind {
         BlockKind::Bulleted,
         BlockKind::Numbered,
         BlockKind::Quote,
+        BlockKind::Toggle,
+        BlockKind::Callout,
         BlockKind::Code,
     ];
 
-    /// Name stored in SQLite (must match the CHECK in migration 0007).
+    /// Name stored in SQLite (must match the CHECK in migration 0012).
     pub fn as_str(self) -> &'static str {
         match self {
             BlockKind::Paragraph => "paragraph",
@@ -83,20 +94,26 @@ impl BlockKind {
             BlockKind::Code => "code",
             BlockKind::File => "file",
             BlockKind::PageLink => "page_link",
+            BlockKind::Divider => "divider",
+            BlockKind::Callout => "callout",
+            BlockKind::Toggle => "toggle",
         }
     }
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
-            .chain([BlockKind::File, BlockKind::PageLink])
+            .chain([BlockKind::File, BlockKind::PageLink, BlockKind::Divider])
             .find(|k| k.as_str() == name)
     }
 
-    /// Whether the block is edited as text (every kind but a file or a
-    /// link: those are cards).
+    /// Whether the block is edited as text (every kind but a file, a link
+    /// or a divider: those are cards).
     pub fn is_text(self) -> bool {
-        !matches!(self, BlockKind::File | BlockKind::PageLink)
+        !matches!(
+            self,
+            BlockKind::File | BlockKind::PageLink | BlockKind::Divider
+        )
     }
 
     /// Name shown in the UI.
@@ -113,6 +130,9 @@ impl BlockKind {
             BlockKind::Code => "Código",
             BlockKind::File => "Archivo",
             BlockKind::PageLink => "Enlace a página",
+            BlockKind::Divider => "Separador",
+            BlockKind::Callout => "Aviso",
+            BlockKind::Toggle => "Desplegable",
         }
     }
 
@@ -135,21 +155,36 @@ impl BlockKind {
 pub enum ViewKind {
     Table,
     Board,
+    /// The rows on the days of a month, by a date property (H13.5).
+    Calendar,
+    /// One line per row: its name and properties (H13.6).
+    List,
+    /// A card per row, with the row's first image on top (H13.6).
+    Gallery,
 }
 
 impl ViewKind {
-    /// Name stored in SQLite (must match the CHECK in migration 0005).
+    /// Name stored in SQLite (must match the CHECK in migration 0015).
     pub fn as_str(self) -> &'static str {
         match self {
             ViewKind::Table => "table",
             ViewKind::Board => "board",
+            ViewKind::Calendar => "calendar",
+            ViewKind::List => "list",
+            ViewKind::Gallery => "gallery",
         }
     }
 
     pub fn parse(name: &str) -> Option<Self> {
-        [ViewKind::Table, ViewKind::Board]
-            .into_iter()
-            .find(|k| k.as_str() == name)
+        [
+            ViewKind::Table,
+            ViewKind::Board,
+            ViewKind::Calendar,
+            ViewKind::List,
+            ViewKind::Gallery,
+        ]
+        .into_iter()
+        .find(|k| k.as_str() == name)
     }
 }
 
@@ -200,6 +235,8 @@ pub struct NewBlock {
     pub indent: u8,
     pub checked: bool,
     pub content: String,
+    /// Inline formatting (ADR 0015), over `content`.
+    pub marks: Vec<crate::marks::Mark>,
 }
 
 /// Number shown before each numbered block (`None` for other blocks).

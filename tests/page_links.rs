@@ -304,7 +304,7 @@ fn links_export_as_relative_links_in_the_workspace_and_text_alone() -> anyhow::R
 
         // A page alone: its links are just titles.
         let blocks = db.list_blocks(&diario)?;
-        let alone = export_page_with_files(&db, &tmp.join("sola"), "Diario", &blocks)?;
+        let alone = export_page_with_files(&db, &tmp.join("sola"), "Diario", None, &blocks)?;
         let text = std::fs::read_to_string(alone)?;
         assert!(text.contains(r"Pan \[de\] centeno"), "{text}");
         assert!(!text.contains("](<"), "{text}");
@@ -312,4 +312,14 @@ fn links_export_as_relative_links_in_the_workspace_and_text_alone() -> anyhow::R
     })();
     let _ = std::fs::remove_dir_all(&tmp);
     result
+}
+
+#[test]
+fn graph_only_contains_live_links() -> anyhow::Result<()> {
+    let mut db = Database::open_in_memory()?;
+    let (source, target, _) = linked(&mut db)?;
+    assert_eq!(db.graph_edges()?, vec![(source, target.clone())]);
+    db.trash_page(&target)?;
+    assert!(db.graph_edges()?.is_empty());
+    Ok(())
 }

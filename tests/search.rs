@@ -16,6 +16,7 @@ fn paragraphs(texts: &[&str]) -> Vec<NewBlock> {
             indent: 0,
             checked: false,
             content: (*text).to_owned(),
+            marks: Vec::new(),
         })
         .collect()
 }
