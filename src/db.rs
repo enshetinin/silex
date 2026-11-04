@@ -42,6 +42,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (12, include_str!("db/migrations/0012_toggle.sql")),
     (13, include_str!("db/migrations/0013_page_icon.sql")),
     (14, include_str!("db/migrations/0014_property_kinds.sql")),
+    (15, include_str!("db/migrations/0015_view_kinds.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 

@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 14;
+const LATEST: i64 = 15;
 
 struct TempDir(PathBuf);
 
@@ -1650,7 +1650,7 @@ mod v14 {
     /// A database exactly as Silex v13 left it (v12 content plus an icon,
     /// and properties, options and values in the database «Lecturas»: what
     /// a rebuild of `db_properties` with foreign keys on would cascade away).
-    fn write_v13_database(path: &Path) -> anyhow::Result<()> {
+    pub(super) fn write_v13_database(path: &Path) -> anyhow::Result<()> {
         write_v12_database(path)?;
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA_V13)?;
@@ -1859,6 +1859,172 @@ mod v14 {
             CellValue::Select("hecho".into())
         );
         db.add_property("base", "Géneros", PropertyKind::MultiSelect)?;
+        Ok(())
+    }
+}
+
+mod v15 {
+    use super::v14::write_v13_database;
+    use super::*;
+    use silex_desktop::model::ViewKind;
+    use silex_desktop::view::ViewConfig;
+
+    const SCHEMA_V14: &str = include_str!("../src/db/migrations/0014_property_kinds.sql");
+
+    /// A database exactly as Silex v14 left it: the v13 content, a date
+    /// property, and two views of «Lecturas» (a sorted table and a board),
+    /// the board remembered as its last view.
+    fn write_v14_database(path: &Path) -> anyhow::Result<()> {
+        write_v13_database(path)?;
+        let conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        conn.execute_batch(SCHEMA_V14)?;
+        conn.execute_batch(
+            r#"INSERT INTO db_properties (id, database_id, name, kind, position)
+                   VALUES ('fin', 'base', 'Terminado', 'date', 3);
+               INSERT INTO db_values (page_id, property_id, date_value) VALUES ('fila', 'fin', '2026-09-14');
+               INSERT INTO db_views (id, database_id, name, kind, position, config) VALUES
+                   ('tabla', 'base', 'Tabla', 'table', 0, '{"sort":[{"property":"autor","direction":"asc"}]}'),
+                   ('tablero', 'base', 'Por estado', 'board', 1, '{"group_by":"estado"}');
+               INSERT INTO settings (key, value) VALUES ('last_view:base', 'tablero')
+                   ON CONFLICT (key) DO UPDATE SET value = excluded.value;
+               PRAGMA user_version = 14;"#,
+        )?;
+        Ok(())
+    }
+
+    fn views(path: &Path) -> anyhow::Result<Vec<(String, i64, String, String)>> {
+        Ok(Connection::open(path)?
+            .prepare("SELECT id, rowid, kind, config FROM db_views ORDER BY id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    #[test]
+    fn v14_database_gets_calendar_views_keeping_the_views() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v14_database(&tmp.db())?;
+        let before = views(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert_eq!(
+            views(&tmp.db())?,
+            before,
+            "ids, rowids, kinds and settings kept"
+        );
+        let read = db.database_views("base")?;
+        let view = |id: &str| read.iter().find(|v| v.id == id).expect("view");
+        assert_eq!(view("tabla").kind, ViewKind::Table);
+        assert_eq!(view("tabla").config.sorts.len(), 1);
+        assert_eq!(view("tablero").kind, ViewKind::Board);
+        assert_eq!(view("tablero").config.group_by.as_deref(), Some("estado"));
+        assert_eq!(db.last_view("base")?.as_deref(), Some("tablero"));
+        assert_eq!(
+            backup::list_backups(&backup::backups_dir(&tmp.db()))?.len(),
+            1,
+            "a verified v14 copy first"
+        );
+        // A calendar view is stored and read back with its date property.
+        let mut config = ViewConfig::default();
+        config.date_by = Some("fin".into());
+        let calendar = db.add_view("base", "Calendario", ViewKind::Calendar, &config)?;
+        let read = db.database_views("base")?;
+        let shown = read.iter().find(|v| v.id == calendar).expect("calendar");
+        assert_eq!(shown.kind, ViewKind::Calendar);
+        assert_eq!(shown.config.date_by.as_deref(), Some("fin"));
+        drop(db);
+        backup::verify_backup(&tmp.db())?;
+        let conn = Connection::open(tmp.db())?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        // The CHECK takes the kinds of H13.5 and H13.6, and nothing else.
+        for kind in ["list", "gallery"] {
+            conn.execute(
+                "INSERT INTO db_views (id, database_id, name, kind, position)
+                 VALUES (?1, 'base', ?1, ?1, 9)",
+                [kind],
+            )?;
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO db_views (id, database_id, name, kind, position)
+                 VALUES ('t', 'base', 't', 'timeline', 9)",
+                [],
+            )
+            .is_err()
+        );
+        // Still a foreign key: deleting the database takes its views.
+        conn.execute("DELETE FROM pages WHERE id = 'base'", [])?;
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM db_views", [], |r| r.get(0))?;
+        assert_eq!(left, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn v1_database_upgrades_straight_to_v15() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v1_database(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, LATEST);
+        let base = db.create_database("Lecturas", None)?;
+        db.add_view(
+            &base,
+            "Calendario",
+            ViewKind::Calendar,
+            &ViewConfig::default(),
+        )?;
+        assert!(
+            db.database_views(&base)?
+                .iter()
+                .any(|v| v.kind == ViewKind::Calendar)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_upgrade_leaves_the_v14_database_untouched() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v14_database(&tmp.db())?;
+        // Another tool already made the new table: 0015 fails at once, and
+        // nothing may change.
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE db_views_v15 (x);")?;
+        let before = views(&tmp.db())?;
+        let err = Database::open(tmp.db()).err().expect("migration must fail");
+        assert!(format!("{err:#}").contains("esquema 15"), "{err:#}");
+        let conn = Connection::open(tmp.db())?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, 14);
+        assert_eq!(views(&tmp.db())?, before, "views untouched");
+        // The old CHECK is still there.
+        assert!(
+            conn.execute(
+                "INSERT INTO db_views (id, database_id, name, kind, position)
+                 VALUES ('c', 'base', 'c', 'calendar', 9)",
+                [],
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn v14_backup_restores_into_v15() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let old_dir = tmp.0.join("old");
+        fs::create_dir_all(&old_dir)?;
+        let old_db = old_dir.join("silex.sqlite3");
+        write_v14_database(&old_db)?;
+        let v14_backup = backup::create_backup(&old_db, &old_dir.join("backups"))?;
+        let mut db = Database::open(tmp.db())?;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.restore_from_backup(&v14_backup)?;
+        assert_eq!(db.schema_version()?, LATEST);
+        assert!(db.database_views("base")?.iter().any(|v| v.id == "tablero"));
+        db.add_view(
+            "base",
+            "Calendario",
+            ViewKind::Calendar,
+            &ViewConfig::default(),
+        )?;
         Ok(())
     }
 }

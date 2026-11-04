@@ -15,6 +15,7 @@ use silex_desktop::{
 
 mod blocks;
 mod board;
+mod calendar;
 mod cells;
 mod compare;
 mod database;

@@ -112,8 +112,14 @@
 - Rust solo guarda un emoji (`emoji::is_icon`: con su tono, ZWJ, bandera o tecla). Duplicar, guardar como plantilla y crear desde plantilla lo copian. Cambiarlo no es un paso de Cmd+Z (como marcar favorito).
 - Probado: v12→v13 y v1→v13 sin reconstruir y conservando la búsqueda, los desplegables y las plantillas; un fallo (una columna `icon` puesta por otra herramienta) que deja la v12 intacta; una copia v12 restaurada y actualizada; el `CHECK`.
 
+## Versión 15 — vistas de calendario, lista y galería (`0015_view_kinds.sql`, H13.5)
+- `db_views` se reconstruye (tabla nueva, copia con `rowid`, borrar la vieja, renombrar) para que el `CHECK` de `kind` admita `calendar`, `list` y `gallery` además de `table` y `board`. La lista y la galería son de H13.6, que así no necesita migración. Ninguna tabla apunta a `db_views`: la última vista de cada base se guarda por id en `settings`, y los ids no cambian.
+- El calendario guarda en `db_views.config` la propiedad de fecha por la que pone las filas: `"date_by": id` (como `group_by` del tablero). Si falta, o ya no es una fecha viva, se usa la primera (`view::calendar_property`). «Creado» y «Editado» no cuentan: una fila no se podría mover de día.
+- Una versión anterior no abre una base v15 (ADR 0014). Si leyera una vista de un tipo que no conoce, la saltaría (`ViewKind::parse`).
+- Probado: v14→v15 y v1→v15 conservando ids, `rowid`, tipos, configuración y la última vista; el `CHECK` (admite `list` y `gallery`, rechaza otros); la clave ajena a `pages`; un fallo (una tabla `db_views_v15` puesta por otra herramienta) que deja la v14 intacta; una copia v14 restaurada y actualizada.
+
 ## Evolución
-- Las migraciones publicadas (`0001`…`0013`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
+- Las migraciones publicadas (`0001`…`0015`) son inmutables. Un cambio nuevo es un archivo `000N_*.sql` añadido a `MIGRATIONS` en `src/db.rs`, más tests desde una base de la versión anterior (`tests/migrations.rs`).
 - Todas las migraciones pendientes se aplican en **una sola transacción**: la base queda actualizada del todo o exactamente como estaba (test con un fallo a mitad de la `0002`).
 - Antes de actualizar una base existente en disco se crea una copia verificada con el esquema antiguo. Si esa copia falla, no se migra.
 - Las copias de esquemas anteriores son válidas: la verificación acepta `1..=LATEST` y la restauración actualiza la base después de restaurar.

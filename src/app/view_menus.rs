@@ -1,12 +1,15 @@
 //! The view's menus in the table's toolbar (H6.3a, ADR 0006): filters,
 //! sort and visible columns; on a board (H6.5), the properties on the
-//! cards and the property it groups by. They edit the view's settings in place and
+//! cards and the property it groups by; on a calendar (H13.5), the date
+//! property it puts the rows by. They edit the view's settings in place and
 //! say whether they changed; the table applies them at once and saves them
 //! (`DatabaseState::view_changed`).
 use eframe::egui::{self, TextEdit};
 use silex_desktop::model::ViewKind;
 use silex_desktop::property::{Property, PropertyKind};
-use silex_desktop::view::{Direction, Filter, FilterOp, NAME, Sort, ViewConfig, board_property};
+use silex_desktop::view::{
+    Direction, Filter, FilterOp, NAME, Sort, ViewConfig, board_property, calendar_property,
+};
 
 use super::*;
 use super::{icons, theme};
@@ -34,7 +37,19 @@ pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState, compact: 
         return false;
     };
     let board = kind == ViewKind::Board;
+    let calendar = kind == ViewKind::Calendar;
     let mut changed = false;
+
+    if calendar {
+        let label = match calendar_property(properties, config) {
+            Some(p) => format!("Fecha: {}", p.name),
+            None => "Fecha".to_owned(),
+        };
+        let button = toolbar_button(ui, icons::CALENDAR, &label, false, compact);
+        menu_from(&button, "silex-date-by-menu", 240.0).show(|ui| {
+            changed |= date_by_menu(ui, config, properties);
+        });
+    }
 
     if board {
         let group = board_property(properties, config);
@@ -78,6 +93,10 @@ pub(super) fn view_menus(ui: &mut egui::Ui, state: &mut DatabaseState, compact: 
         changed |= sort_menu(ui, config, properties, view_picker);
     });
 
+    // A calendar shows the rows' names only.
+    if calendar {
+        return changed;
+    }
     let hidden = properties
         .iter()
         .filter(|p| config.is_hidden(&p.id))
@@ -126,6 +145,31 @@ fn group_menu(ui: &mut egui::Ui, config: &mut ViewConfig, properties: &[Property
         menu_caption(
             ui,
             "Un tablero se agrupa por una propiedad de selección, y todavía no hay ninguna.",
+        );
+    }
+    changed
+}
+
+/// The date properties a calendar can put its rows by, the current one
+/// ticked.
+fn date_by_menu(ui: &mut egui::Ui, config: &mut ViewConfig, properties: &[Property]) -> bool {
+    menu_spacing(ui);
+    menu_caption(ui, "Poner las filas según");
+    let current = calendar_property(properties, config).map(|p| p.id.clone());
+    let mut changed = false;
+    let mut any = false;
+    for property in properties.iter().filter(|p| p.kind == PropertyKind::Date) {
+        any = true;
+        let on = current.as_deref() == Some(property.id.as_str());
+        if check_row(ui, on, property_icon(property.kind), &property.name).clicked() && !on {
+            config.date_by = Some(property.id.clone());
+            changed = true;
+        }
+    }
+    if !any {
+        menu_caption(
+            ui,
+            "Un calendario pone las filas según una propiedad de fecha, y todavía no hay ninguna.",
         );
     }
     changed

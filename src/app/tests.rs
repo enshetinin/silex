@@ -6763,3 +6763,164 @@ fn changing_type_saves_what_is_being_typed_first() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---- H13.5: the calendar view ----
+
+/// A database with «Terminado» (a date) and a calendar view showing
+/// September 2026: Rayuela and Ficciones on the 14th, Aleph without a date.
+fn calendar_app() -> anyhow::Result<(SilexApp, egui::Context, Vec<String>, String)> {
+    let (mut app, ctx, base) = database_app()?;
+    let rows = ["Rayuela", "Ficciones", "Aleph"]
+        .into_iter()
+        .map(|title| app.db.create_row(&base, title))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let fin = app.add_property(PropertyKind::Date, "Terminado")?;
+    for row in &rows[..2] {
+        app.db
+            .set_value(row, &fin, Some(&CellValue::Date(day("2026-09-14"))))?;
+    }
+    app.reload_pages()?;
+    app.open_page(base)?;
+    app.add_view(silex_desktop::model::ViewKind::Calendar)?;
+    if let Some(state) = app.database.as_mut() {
+        state.month = Some(silex_desktop::property::CalendarMonth::of(day(
+            "2026-09-01",
+        )));
+    }
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    Ok((app, ctx, rows, fin))
+}
+
+fn day(text: &str) -> Date {
+    Date::parse(text).unwrap_or_else(|| panic!("date {text}"))
+}
+
+fn chip_rect(ctx: &egui::Context, row: &str) -> egui::Rect {
+    ctx.read_response(calendar::chip_id(row))
+        .map(|r| r.rect)
+        .unwrap_or_else(|| panic!("label {row} drawn"))
+}
+
+/// A point inside the day `date`, under its «+».
+fn inside_day(ctx: &egui::Context, date: Date) -> egui::Pos2 {
+    ctx.read_response(calendar::add_on_day_id(date))
+        .map(|r| r.rect.left_bottom() + egui::vec2(-30.0, 30.0))
+        .unwrap_or_else(|| panic!("day {date:?} drawn"))
+}
+
+#[test]
+fn a_calendar_puts_rows_on_their_day_and_a_drag_changes_the_date() -> anyhow::Result<()> {
+    let (mut app, ctx, rows, fin) = calendar_app()?;
+    let state = app.database.as_ref().expect("database open");
+    assert_eq!(state.kind(), silex_desktop::model::ViewKind::Calendar);
+    assert_eq!(
+        state.config().and_then(|c| c.date_by.clone()),
+        Some(fin.clone()),
+        "a new calendar goes by the first date"
+    );
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 760.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+    output.textures_delta.clear();
+    let painted = painted_text(&output.shapes);
+    for text in [
+        "Septiembre de 2026",
+        "lun",
+        "Rayuela",
+        "Ficciones",
+        "Sin fecha · 1",
+        "Aleph",
+    ] {
+        assert!(painted.iter().any(|t| t == text), "{text}: {painted:?}");
+    }
+    // The two on the 14th, one under the other.
+    let (rayuela, ficciones) = (chip_rect(&ctx, &rows[0]), chip_rect(&ctx, &rows[1]));
+    assert!(rayuela.bottom() <= ficciones.top());
+
+    // Dragging Rayuela to the 20th gives it that date; Cmd+Z takes it back.
+    drag(
+        &mut app,
+        &ctx,
+        rayuela.center(),
+        inside_day(&ctx, day("2026-09-20")),
+    );
+    let date =
+        |app: &SilexApp, row: &str| -> anyhow::Result<Option<CellValue>> { stored(app, row, &fin) };
+    assert_eq!(
+        date(&app, &rows[0])?,
+        Some(CellValue::Date(day("2026-09-20")))
+    );
+    app.undo_table();
+    // Two frames: the labels' places are read from the last one.
+    sized_frame(&mut app, &ctx, vec![]);
+    sized_frame(&mut app, &ctx, vec![]);
+    assert_eq!(
+        date(&app, &rows[0])?,
+        Some(CellValue::Date(day("2026-09-14")))
+    );
+
+    // Onto «Sin fecha» (where Aleph is), Ficciones loses its date.
+    let aleph = chip_rect(&ctx, &rows[2]);
+    drag(
+        &mut app,
+        &ctx,
+        chip_rect(&ctx, &rows[1]).center(),
+        aleph.center(),
+    );
+    assert_eq!(date(&app, &rows[1])?, None);
+    // And Aleph, dragged to a day, gets one.
+    sized_frame(&mut app, &ctx, vec![]);
+    let aleph = chip_rect(&ctx, &rows[2]);
+    drag(
+        &mut app,
+        &ctx,
+        aleph.center(),
+        inside_day(&ctx, day("2026-09-03")),
+    );
+    assert_eq!(
+        date(&app, &rows[2])?,
+        Some(CellValue::Date(day("2026-09-03")))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_calendar_without_a_date_property_offers_to_add_one() -> anyhow::Result<()> {
+    let (mut app, ctx, base) = database_app()?;
+    app.add_view(silex_desktop::model::ViewKind::Calendar)?;
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 760.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| app.update_ui(ui));
+    output.textures_delta.clear();
+    let painted = painted_text(&output.shapes);
+    assert!(
+        painted
+            .iter()
+            .any(|t| t.contains("Añadir la propiedad «Fecha»")),
+        "{painted:?}"
+    );
+    app.apply_table_action(
+        &base,
+        TableAction::AddProperty(PropertyKind::Date, "Fecha".into()),
+    )?;
+    sized_frame(&mut app, &ctx, vec![]);
+    let state = app.database.as_ref().expect("database open");
+    let fecha = state
+        .properties
+        .iter()
+        .find(|p| p.kind == PropertyKind::Date);
+    assert!(fecha.is_some_and(|p| p.name == "Fecha"));
+    assert!(state.month.is_some(), "the month is on show");
+    Ok(())
+}

@@ -2008,6 +2008,7 @@ fn board_cards_and_menus_have_names() -> anyhow::Result<()> {
     click_button(&mut harness, "Nueva vista");
     assert_accessible(&harness, "new view menu");
     assert!(menu_item(&harness, "Tablero").is_some());
+    assert!(menu_item(&harness, "Calendario").is_some());
     Ok(())
 }
 
@@ -4953,4 +4954,164 @@ fn database_change_kind() -> anyhow::Result<()> {
         eframe::egui::Theme::Light,
         |harness| pick_kind(harness, "Autor, Texto", "Selección"),
     )
+}
+
+// ---- H13.5: the calendar view ----
+
+/// «Lecturas» in a calendar view on September 2026 (Rayuela is on the
+/// 14th by «Terminado»; the others have no date).
+fn calendar_app() -> anyhow::Result<(SilexApp, String, Vec<String>)> {
+    use silex_desktop::property::{CalendarMonth, Date};
+    let (mut app, base, rows) = database_app()?;
+    app.add_view(silex_desktop::model::ViewKind::Calendar)?;
+    if let Some(state) = app.database.as_mut() {
+        state.month = Date::parse("2026-09-01").map(CalendarMonth::of);
+    }
+    Ok((app, base, rows))
+}
+
+#[test]
+fn a_calendar_moves_between_months_and_adds_rows_on_a_day() -> anyhow::Result<()> {
+    use silex_desktop::property::{CellValue, Date};
+    let (app, base, _) = calendar_app()?;
+    let mut harness = a11y_harness(app);
+    assert_accessible(&harness, "calendar");
+    assert!(harness.query_by_label("Septiembre de 2026").is_some());
+    assert!(
+        harness
+            .query_by_label("«Rayuela», 14 de septiembre de 2026")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("«Pedro Páramo», sin fecha")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Sin fecha · 2").is_some());
+
+    click_button(&mut harness, "Mes siguiente");
+    assert!(harness.query_by_label("Octubre de 2026").is_some());
+    assert!(
+        harness
+            .query_by_label("«Rayuela», 14 de septiembre de 2026")
+            .is_none()
+    );
+    click_button(&mut harness, "Mes anterior");
+    click_button(&mut harness, "Mes anterior");
+    assert!(harness.query_by_label("Agosto de 2026").is_some());
+
+    // «+» on a day: a new row with that date, opened to be named.
+    click_action(&mut harness, "Nueva fila el 20 de agosto de 2026");
+    let state = harness.state();
+    let row = state.selected.clone().unwrap_or_default();
+    assert!(state.db.database_rows(&base)?.iter().any(|r| r.id == row));
+    let fecha = state
+        .db
+        .database_properties(&base)?
+        .into_iter()
+        .find(|p| p.name == "Terminado")
+        .map(|p| p.id)
+        .unwrap_or_default();
+    assert_eq!(
+        state.db.database_values(&base)?[&row][&fecha],
+        CellValue::Date(Date::parse("2026-08-20").expect("date"))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_full_day_lists_the_rest_in_a_menu() -> anyhow::Result<()> {
+    use silex_desktop::property::{CellValue, Date};
+    let (mut app, base, _) = calendar_app()?;
+    let fecha = app
+        .db
+        .database_properties(&base)?
+        .into_iter()
+        .find(|p| p.name == "Terminado")
+        .map(|p| p.id)
+        .unwrap_or_default();
+    let date = CellValue::Date(Date::parse("2026-09-14").expect("date"));
+    for n in 1..=8 {
+        let row = app.db.create_row(&base, &format!("Libro {n}"))?;
+        app.db.set_value(&row, &fecha, Some(&date))?;
+    }
+    app.reload_pages()?;
+    app.open_page(base.clone())?;
+    if let Some(state) = app.database.as_mut() {
+        state.month = Date::parse("2026-09-01").map(silex_desktop::property::CalendarMonth::of);
+    }
+    let mut harness = a11y_harness(app);
+    let more = harness
+        .query_all_by_label_contains("más el 14 de septiembre de 2026")
+        .next()
+        .map(|n| n.accesskit_node().label().unwrap_or_default());
+    let more = more.expect("«+N más» on the 14th");
+    click_action(&mut harness, &more);
+    // The menu has all nine, Libro 8 too.
+    assert!(menu_item(&harness, "Libro 8").is_some());
+    menu_item(&harness, "Libro 8").expect("«Libro 8»").click();
+    harness.run();
+    let opened = harness.state().selected.clone().unwrap_or_default();
+    let title = harness
+        .state()
+        .db
+        .database_rows(&base)?
+        .into_iter()
+        .find(|r| r.id == opened)
+        .map(|r| r.title);
+    assert_eq!(title.as_deref(), Some("Libro 8"));
+    Ok(())
+}
+
+#[test]
+fn the_calendar_date_property_is_chosen_in_its_menu() -> anyhow::Result<()> {
+    use silex_desktop::property::PropertyKind;
+    let (mut app, base, _) = calendar_app()?;
+    let otra = app.db.add_property(&base, "Empezado", PropertyKind::Date)?;
+    app.reload_properties()?;
+    let mut harness = a11y_harness(app);
+    click_button(&mut harness, "Fecha: Terminado");
+    assert_accessible(&harness, "date property menu");
+    assert!(
+        harness
+            .get_all_by_label("Terminado")
+            .any(|n| n.accesskit_node().role() == egui::accesskit::Role::CheckBox)
+    );
+    harness
+        .get_all_by_label("Empezado")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::CheckBox)
+        .expect("«Empezado»")
+        .click();
+    harness.run();
+    let state = harness.state();
+    assert_eq!(
+        state
+            .database
+            .as_ref()
+            .and_then(|d| d.config()?.date_by.clone()),
+        Some(otra)
+    );
+    assert!(
+        harness.query_by_label("Sin fecha · 3").is_some(),
+        "nobody started"
+    );
+    Ok(())
+}
+
+/// A month with a row on its day and two without a date.
+#[test]
+fn database_calendar() -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let (app, _, _) = calendar_app()?;
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 760.0])
+        .with_theme(eframe::egui::Theme::Light)
+        .with_os(eframe::egui::os::OperatingSystem::Mac)
+        .with_context_setup(theme::install)
+        .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
+    harness.run();
+    harness.snapshot("database_calendar_light");
+    Ok(())
 }

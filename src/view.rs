@@ -33,6 +33,10 @@ pub struct ViewConfig {
     /// that is no longer a live select: the first select property
     /// ([`board_property`]).
     pub group_by: Option<String>,
+    /// The date property a calendar puts its rows by (H13.5). `None`, or
+    /// one that is no longer a live date: the first date property
+    /// ([`calendar_property`]).
+    pub date_by: Option<String>,
     /// Keys this version does not use, kept as they were.
     extra: Map<String, Value>,
 }
@@ -241,11 +245,16 @@ impl ViewConfig {
             Some(Value::String(id)) => Some(id),
             _ => None,
         };
+        let date_by = match map.remove("date_by") {
+            Some(Value::String(id)) => Some(id),
+            _ => None,
+        };
         Self {
             sorts,
             filters,
             hidden,
             group_by,
+            date_by,
             extra: map,
         }
     }
@@ -270,6 +279,9 @@ impl ViewConfig {
         map.insert("hidden".into(), json!(self.hidden));
         if let Some(group_by) = &self.group_by {
             map.insert("group_by".into(), json!(group_by));
+        }
+        if let Some(date_by) = &self.date_by {
+            map.insert("date_by".into(), json!(date_by));
         }
         Value::Object(map).to_string()
     }
@@ -638,6 +650,54 @@ pub fn board_groups(
         groups[column].rows.push(index);
     }
     groups
+}
+
+/// The property a calendar puts its rows by (H13.5): the view's choice if
+/// it is still a live date property, else the first one. `None` if the
+/// database has no date property (the calendar says how to add one).
+/// «Creado» and «Editado» are not offered: a row could not be moved to
+/// another day.
+pub fn calendar_property<'a>(
+    properties: &'a [Property],
+    config: &ViewConfig,
+) -> Option<&'a Property> {
+    let dates = || properties.iter().filter(|p| p.kind == PropertyKind::Date);
+    config
+        .date_by
+        .as_deref()
+        .and_then(|id| dates().find(|p| p.id == id))
+        .or_else(|| dates().next())
+}
+
+/// The rows in sight (`order`, indices into `rows`, already filtered and
+/// sorted) of a calendar by `property`: those with a date, by day, and
+/// those without one. Each list keeps the view's order.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CalendarRows {
+    pub days: std::collections::BTreeMap<Date, Vec<usize>>,
+    pub undated: Vec<usize>,
+}
+
+pub fn calendar_rows(
+    order: &[usize],
+    rows: &[Page],
+    values: &TableValues,
+    property: &Property,
+) -> CalendarRows {
+    let mut calendar = CalendarRows::default();
+    for &index in order {
+        let Some(row) = rows.get(index) else {
+            continue;
+        };
+        match values
+            .get(&row.id)
+            .and_then(|cells| cells.get(&property.id))
+        {
+            Some(CellValue::Date(date)) => calendar.days.entry(*date).or_default().push(index),
+            _ => calendar.undated.push(index),
+        }
+    }
+    calendar
 }
 
 /// A checkbox without a value is an unticked box, for sorting.
@@ -1094,6 +1154,81 @@ mod tests {
             groups.iter().map(|g| g.rows.len()).collect::<Vec<_>>(),
             [0, 0, 0, 1]
         );
+    }
+
+    #[test]
+    fn a_calendar_goes_by_its_date_property_or_the_first_one() {
+        let (_, _, mut properties) = library();
+        let mut config = ViewConfig::default();
+        assert_eq!(
+            calendar_property(&properties, &config).map(|p| p.id.as_str()),
+            Some("fin")
+        );
+        properties.push(property("inicio", PropertyKind::Date));
+        properties.push(property("creado", PropertyKind::Created));
+        config.date_by = Some("inicio".into());
+        assert_eq!(
+            calendar_property(&properties, &config).map(|p| p.id.as_str()),
+            Some("inicio")
+        );
+        // Not a date (also «Creado»), or gone: back to the first date.
+        for other in ["paginas", "creado", "borrada"] {
+            config.date_by = Some(other.into());
+            assert_eq!(
+                calendar_property(&properties, &config).map(|p| p.id.as_str()),
+                Some("fin"),
+                "{other}"
+            );
+        }
+        properties.retain(|p| p.kind != PropertyKind::Date);
+        assert!(calendar_property(&properties, &config).is_none());
+    }
+
+    #[test]
+    fn calendar_rows_go_on_their_day_in_the_view_order() {
+        let (rows, mut values, properties) = library();
+        let fin = properties.iter().find(|p| p.id == "fin").expect("fin");
+        let day = |d: &str| Date::parse(d).expect("date");
+        values
+            .entry("2".into())
+            .or_default()
+            .insert("fin".into(), CellValue::Date(day("2026-09-14")));
+        let by_pages = sorted(&[("paginas", Direction::Ascending)]);
+        let order = visible_rows(&rows, &values, &properties, &by_pages);
+        let calendar = calendar_rows(&order, &rows, &values, fin);
+        let days: Vec<(Date, Vec<String>)> = calendar
+            .days
+            .iter()
+            .map(|(d, r)| (*d, ids(&rows, r)))
+            .collect();
+        assert_eq!(
+            days,
+            [
+                (day("2025-01-02"), vec!["3".to_owned()]),
+                // Pedro Páramo (124) before Rayuela (736), as the view sorts.
+                (day("2026-09-14"), vec!["2".to_owned(), "1".to_owned()]),
+            ]
+        );
+        assert_eq!(ids(&rows, &calendar.undated), ["4", "5"]);
+        // Filtered out rows are on no day and not undated.
+        let only = filtered(&[(NAME, FilterOp::Contains, "rayuela")]);
+        let order = visible_rows(&rows, &values, &properties, &only);
+        let calendar = calendar_rows(&order, &rows, &values, fin);
+        assert_eq!(calendar.days.len(), 1);
+        assert!(calendar.undated.is_empty());
+    }
+
+    #[test]
+    fn the_calendar_date_property_is_stored_and_read_back() {
+        let config = ViewConfig {
+            date_by: Some("fin".into()),
+            ..ViewConfig::default()
+        };
+        let read = ViewConfig::from_json(&config.to_json());
+        assert_eq!(read.date_by.as_deref(), Some("fin"));
+        assert_eq!(read, config);
+        // Not text: as if there were none.
+        assert_eq!(ViewConfig::from_json(r#"{"date_by": 3}"#).date_by, None);
     }
 
     #[test]

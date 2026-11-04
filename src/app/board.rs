@@ -814,7 +814,7 @@ impl CardLook<'_> {
 
 /// One line of text from `left_center`, cut at `max_width`. Returns where
 /// it ends.
-fn paint_text(
+pub(super) fn paint_text(
     ui: &egui::Ui,
     painter: &egui::Painter,
     left_center: egui::Pos2,

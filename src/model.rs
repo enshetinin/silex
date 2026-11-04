@@ -155,19 +155,22 @@ impl BlockKind {
 pub enum ViewKind {
     Table,
     Board,
+    /// The rows on the days of a month, by a date property (H13.5).
+    Calendar,
 }
 
 impl ViewKind {
-    /// Name stored in SQLite (must match the CHECK in migration 0005).
+    /// Name stored in SQLite (must match the CHECK in migration 0015).
     pub fn as_str(self) -> &'static str {
         match self {
             ViewKind::Table => "table",
             ViewKind::Board => "board",
+            ViewKind::Calendar => "calendar",
         }
     }
 
     pub fn parse(name: &str) -> Option<Self> {
-        [ViewKind::Table, ViewKind::Board]
+        [ViewKind::Table, ViewKind::Board, ViewKind::Calendar]
             .into_iter()
             .find(|k| k.as_str() == name)
     }

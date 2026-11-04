@@ -113,6 +113,8 @@ CREATE TABLE db_views (
 5. **H6.5 — Vista Kanban** agrupada por una propiedad de selección; arrastrar tarjetas entre columnas cambia el valor.
    - *Actualización (2026-10-19):* la propiedad de agrupación es `group_by` en el JSON de la vista; si falta o ya no es una selección viva, se usa la primera. El orden de las tarjetas dentro de una columna es el de la vista (orden manual o «Ordenar»); arrastrar solo cambia de columna, no reordena. Para teclado y lectores de pantalla, el menú de la tarjeta ofrece «Mover a…». Mover una tarjeta es un cambio de celda, así que se deshace con el historial de H6.4.
 
+- *Actualización (2026-11-04, H13.5):* vista **calendario** (`db_views.kind = 'calendar'`, migración 0015, que también admite `list` y `gallery` para H13.6). Pone las filas en los días de un mes según una propiedad de **fecha** (`date_by` en el JSON de la vista; si falta o ya no es una fecha viva, la primera). «Creado» y «Editado» no se ofrecen. Los filtros y el orden de la vista se aplican; dentro de un día, el orden de la vista. Arrastrar una fila a otro día cambia su fecha, y a «Sin fecha» la quita (un paso de Cmd+Z); «+» en un día crea una fila con esa fecha y la abre. El calendario solo muestra el nombre de cada fila: no tiene menú de columnas.
+
 ## Consecuencias
 - **Una columna y cuatro tablas más.** `Page` gana un `kind`, que hay que propagar a sus 14 construcciones.
 - **El esquema queda fijado al publicarse.** La migración 0005 lleva el esquema completo de este ADR desde H6.1, y si una historia posterior necesita otra columna, será una migración 0006 aditiva.

@@ -13,7 +13,7 @@ use eframe::egui::{self, TextEdit};
 use silex_desktop::db::Shift;
 use silex_desktop::model::{DatabaseView, Page, ViewKind};
 use silex_desktop::property::{
-    CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues,
+    CalendarMonth, CellValue, OptionColor, Property, PropertyKind, SelectOption, TableValues,
 };
 use silex_desktop::view::{ViewConfig, board_property, visible_rows};
 
@@ -91,6 +91,12 @@ pub(super) struct DatabaseState {
     pub(super) bulk: BulkValue,
     /// The open «Cambiar tipo» dialog (H13.4b).
     pub(super) kind_change: Option<KindDialog>,
+    /// The month a calendar view shows (H13.5); `None` until one is shown:
+    /// then this month.
+    pub(super) month: Option<CalendarMonth>,
+    /// Today, as the calendar marks it: read when it is first shown and
+    /// with «Hoy».
+    pub(super) today: Option<silex_desktop::property::Date>,
 }
 
 impl DatabaseState {
@@ -99,11 +105,22 @@ impl DatabaseState {
         self.views.get(self.view).map(|v| &v.config)
     }
 
-    /// Whether the view on show is a board (H6.5).
-    pub(super) fn is_board(&self) -> bool {
+    /// The kind of the view on show (a table if there is none).
+    pub(super) fn kind(&self) -> ViewKind {
         self.views
             .get(self.view)
-            .is_some_and(|v| v.kind == ViewKind::Board)
+            .map_or(ViewKind::Table, |v| v.kind)
+    }
+
+    /// Whether the view on show is a board (H6.5).
+    pub(super) fn is_board(&self) -> bool {
+        self.kind() == ViewKind::Board
+    }
+
+    /// Whether the view on show is a table: the only one with row
+    /// selection and arrow keys between cells.
+    pub(super) fn is_table(&self) -> bool {
+        self.kind() == ViewKind::Table
     }
 
     /// Works out which rows and columns are in sight, and in what order.
@@ -221,6 +238,8 @@ pub(super) enum TableAction {
     DeleteProperty(String),
     /// Open «Cambiar tipo» for a property (H13.4b).
     ChangeKind(String),
+    /// «+» on a calendar's day: a new row with that date (H13.5).
+    AddOnDate(silex_desktop::property::Date),
     RenameOption(String, String),
     SetOptionColor(String, OptionColor),
     DeleteOption(String),
@@ -295,6 +314,8 @@ impl SilexApp {
             select_anchor: None,
             bulk: BulkValue::default(),
             kind_change: None,
+            month: None,
+            today: None,
         });
         // The view last open (also in an earlier session, H11.6), else the
         // first. If it cannot be read, the first: not worth an error.
@@ -485,7 +506,7 @@ impl SilexApp {
     }
 
     /// [`Self::add_row`], returning the new row's id.
-    fn insert_row(&mut self, database: &str) -> Result<String> {
+    pub(super) fn insert_row(&mut self, database: &str) -> Result<String> {
         self.save_now()?;
         let row = self.db.create_row(database, "")?;
         self.reload_pages()?;
@@ -512,7 +533,7 @@ impl SilexApp {
         let Some(mut state) = self.database.take() else {
             return;
         };
-        if !state.is_board() {
+        if state.is_table() {
             table_keys(ui.ctx(), &mut state);
             selection_keys(ui.ctx(), &mut state);
         }
@@ -594,6 +615,7 @@ impl SilexApp {
             }
             TableAction::DeleteProperty(id) => self.delete_property(&id)?,
             TableAction::ChangeKind(id) => self.open_kind_dialog(&id)?,
+            TableAction::AddOnDate(date) => self.add_on_date(database, date)?,
             TableAction::RenameOption(id, name) => {
                 let unchanged = self
                     .database
@@ -715,7 +737,7 @@ impl SilexApp {
             selected_tab = view_tabs(ui, state, &mut actions);
             compact = ui.available_width() - theme::space::LG < full_width;
             // While rows are chosen, the bar to act on them (H11.2).
-            if !state.selection.is_empty() && !state.is_board() {
+            if !state.selection.is_empty() && state.is_table() {
                 selection_bar(ui, state, &mut actions);
             } else {
                 let used = toolbar_menus(ui, state, &mut actions, compact);
@@ -724,9 +746,16 @@ impl SilexApp {
                 }
             }
         });
-        if state.is_board() {
-            self.draw_board(ui, state, selected_tab, &mut actions, &mut cells);
-            return (actions, cells);
+        match state.kind() {
+            ViewKind::Board => {
+                self.draw_board(ui, state, selected_tab, &mut actions, &mut cells);
+                return (actions, cells);
+            }
+            ViewKind::Calendar => {
+                self.draw_calendar(ui, state, selected_tab, &mut actions, &mut cells);
+                return (actions, cells);
+            }
+            ViewKind::Table => {}
         }
 
         let columns: f32 = state

@@ -593,3 +593,18 @@ Con una base nueva de la semilla (`cargo run --example seed -- /ruta/nueva.sqlit
 - En un tablero agrupado por esa selección, cámbiala a texto: el tablero agrupa por otra selección o explica que no hay ninguna.
 - Cierra y vuelve a abrir la app: el tipo nuevo y los valores siguen ahí.
 - Tema oscuro y VoiceOver: los tipos del diálogo se anuncian por su nombre y la vista previa se lee.
+
+## 62. Vista calendario (H13.5)
+- Abre una base de una versión anterior (v14): se actualiza sin perder vistas, y la base abre en la vista de la última vez.
+- En una base con una propiedad de fecha, «+» junto a las vistas → «Calendario»: una pestaña «Calendario» con el mes actual, la semana desde el lunes, hoy con el número en un círculo y los días de otros meses en gris. En la barra, «Fecha: <propiedad>».
+- Cada fila con fecha aparece en su día con su nombre; las que no tienen, debajo, en «Sin fecha · N». «‹» y «›» cambian de mes y «Hoy» vuelve al actual.
+- Un clic (o Tab hasta la etiqueta e Intro) abre la fila como página. El clic derecho da el menú de la página (renombrar, duplicar, papelera…); Supr con la etiqueta enfocada la manda a la papelera.
+- Arrastra una fila a otro día: se mueve allí, el día de destino se resalta mientras la llevas y soltarla fuera del calendario la deja como estaba. Cmd/Ctrl+Z la devuelve. Arrástrala a «Sin fecha»: pierde la fecha. Arrastra una de «Sin fecha» a un día: la gana.
+- Pasa el puntero por un día: aparece «+». Al pulsarlo se crea una fila con esa fecha y se abre para escribir su nombre. También se llega con Tab.
+- Pon muchas filas en un día: salen las que caben y «+N más», que abre un menú con todas; elegir una la abre.
+- Con dos propiedades de fecha, «Fecha: …» permite elegir la otra: las filas se recolocan y las que no la tienen pasan a «Sin fecha».
+- Los filtros y el orden de la vista se aplican: una fila filtrada no sale en ningún día ni en «Sin fecha», y dentro de un día el orden es el de «Ordenar».
+- En una base sin propiedades de fecha, el calendario lo explica y «Añadir la propiedad «Fecha»» la crea.
+- Cambia la ventana de tamaño y abre la base al lado de otra página: los días se encogen sin solaparse. En una ventana baja, «Sin fecha» queda debajo y se llega desplazando.
+- Cierra y vuelve a abrir la app: la base abre en el calendario.
+- Tema oscuro y VoiceOver: las etiquetas se anuncian «"Rayuela", 14 de septiembre de 2026», y «+», «Nueva fila el 14 de septiembre de 2026».
