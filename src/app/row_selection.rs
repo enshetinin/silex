@@ -323,13 +323,16 @@ fn bulk_menu(ui: &mut egui::Ui, state: &mut DatabaseState, actions: &mut Vec<Tab
             }
         }
         // Each chosen row gets just that option, or none (H13.2).
-        PropertyKind::MultiSelect => {
+        PropertyKind::MultiSelect | PropertyKind::Relation => {
             if property.options.is_empty() {
                 menu_caption(ui, "Esta propiedad aún no tiene opciones.");
             }
             for option in &property.options {
                 if ui.button(format!("Solo «{}»", option.name)).clicked() {
-                    set(Some(CellValue::MultiSelect(vec![option.id.clone()])));
+                    set(CellValue::multi_select(
+                        &property,
+                        std::slice::from_ref(&option.id),
+                    ));
                     ui.close();
                 }
             }

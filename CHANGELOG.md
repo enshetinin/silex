@@ -2,6 +2,14 @@
 
 Todos los cambios de Silex que se notan al usarlo. El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y las versiones, [versionado semántico](https://semver.org/lang/es/): desde la 1.0.0, una versión nueva siempre abre la base de datos de una anterior (ADR 0014).
 
+## [Sin publicar]
+
+- Tablas editables dentro de páginas: `/bbdd` crea una base sin abandonar la página.
+- `/vista` inserta una vista enlazada con filtros, orden y columnas propios, compartiendo los datos originales.
+- Anchos de columna ajustables desde la cabecera y guardados por vista.
+- Propiedades de relación con una o varias entradas de otra base de datos.
+- Migración 0016 con copia previa; las relaciones sobreviven a enviar entradas a la papelera y restaurarlas.
+
 ## [1.1.0] - 2026-11-04
 
 Un editor más completo y bases de datos más potentes. Una base de la 1.0 se abre en la 1.1 y se actualiza sola, después de guardar una copia verificada; una base ya actualizada no se abre con la 1.0.

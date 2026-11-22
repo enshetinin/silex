@@ -111,6 +111,7 @@ impl SilexApp {
     pub(super) fn save_now(&mut self) -> Result<()> {
         // Row names and cells edited in a database table are saved with
         // the rest; their error is reported apart from the document's.
+        self.save_inline_tables()?;
         let table = self.save_table_edits();
         self.report(table);
         if !self.save.is_dirty() {

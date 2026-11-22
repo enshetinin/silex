@@ -24,6 +24,10 @@ use super::{icons, theme};
 /// edits in progress.
 pub(super) struct DatabaseState {
     pub(super) id: String,
+    pub(super) linked_block: Option<String>,
+    pub(super) inline_title: String,
+    pub(super) inline_title_dirty: bool,
+    pub(super) inline_edits: HashMap<(String, String), String>,
     pub(super) rows: Vec<Page>,
     pub(super) views: Vec<DatabaseView>,
     /// The columns after «Nombre», in order.
@@ -192,14 +196,14 @@ const HEADER_HEIGHT: f32 = 36.0;
 const NAME_MIN_WIDTH: f32 = 240.0;
 /// The «+» column that adds a property.
 const ADD_COLUMN_WIDTH: f32 = 40.0;
-fn column_width(kind: PropertyKind) -> f32 {
+pub(super) fn column_width(kind: PropertyKind) -> f32 {
     match kind {
         PropertyKind::Text => 180.0,
         PropertyKind::Number => 110.0,
         PropertyKind::Checkbox => 96.0,
         PropertyKind::Date => 124.0,
         PropertyKind::Select => 150.0,
-        PropertyKind::MultiSelect => 200.0,
+        PropertyKind::MultiSelect | PropertyKind::Relation => 200.0,
         PropertyKind::Url => 200.0,
         PropertyKind::Created | PropertyKind::Edited => 140.0,
     }
@@ -235,6 +239,12 @@ fn property_menu_id(property: &str) -> egui::Id {
 
 /// What the user did in the table this frame, applied after drawing.
 pub(super) enum TableAction {
+    Undo,
+    Redo,
+    CommitNames,
+    CommitInline,
+    RemoveLinkedView(String),
+    ResizeColumn(String, super::column_resize::Resize, Option<f32>),
     Open(String),
     AddRow,
     Row(RowAction),
@@ -291,6 +301,10 @@ impl SilexApp {
     pub(super) fn load_database(&mut self, id: &str) -> Result<()> {
         self.database = Some(DatabaseState {
             id: id.to_owned(),
+            linked_block: None,
+            inline_title: self.db.get_page(id)?.map(|p| p.title).unwrap_or_default(),
+            inline_title_dirty: false,
+            inline_edits: HashMap::new(),
             rows: self.db.database_rows(id)?,
             views: self.db.database_views(id)?,
             properties: self.db.database_properties(id)?,
@@ -388,7 +402,12 @@ impl SilexApp {
             return Ok(());
         }
         if let Some(view) = state.views.get(state.view) {
-            self.db.set_view_config(&view.id, &view.config)?;
+            if let Some(block) = &state.linked_block {
+                self.db
+                    .set_linked_view_config(block, &state.id, &view.config)?;
+            } else {
+                self.db.set_view_config(&view.id, &view.config)?;
+            }
         }
         state.view_dirty = false;
         Ok(())
@@ -522,7 +541,12 @@ impl SilexApp {
         self.save_now()?;
         let row = self.db.create_row(database, "")?;
         self.reload_pages()?;
-        if self.selected.as_deref() != Some(database) {
+        if self.selected.as_deref() != Some(database)
+            && self
+                .database
+                .as_ref()
+                .is_none_or(|d| d.linked_block.is_none())
+        {
             self.open_page(database.to_owned())?;
         }
         self.refresh_row_times(&[&row])?;
@@ -593,6 +617,31 @@ impl SilexApp {
 
     pub(super) fn apply_table_action(&mut self, database: &str, action: TableAction) -> Result<()> {
         match action {
+            TableAction::RemoveLinkedView(block) => {
+                self.commit_inline_buffers()?;
+                self.save_table_edits()?;
+                self.blocks.retain(|b| b.id != block);
+                self.mark_dirty();
+            }
+            TableAction::CommitInline => self.commit_inline_buffers()?,
+            TableAction::CommitNames => self.save_row_names()?,
+            TableAction::Undo => self.undo_table(),
+            TableAction::Redo => self.redo_table(),
+            TableAction::ResizeColumn(id, resize, name_width) => {
+                if let Some(state) = self.database.as_mut()
+                    && let Some(view) = state.views.get_mut(state.view)
+                {
+                    // The name normally fills unused space. Keep its left-to-right
+                    // layout stable once the user starts sizing other columns.
+                    if let Some(width) = name_width {
+                        view.config
+                            .set_column_width(silex_desktop::view::NAME, width);
+                    }
+                    view.config.set_column_width(&id, resize.width);
+                    state.view_dirty |= resize.finished;
+                }
+                self.save_view()?;
+            }
             TableAction::Open(row) => self.open_page(row)?,
             TableAction::AddRow => self.add_row(database)?,
             // Rows are not in the sidebar: rename in the table.
@@ -620,7 +669,11 @@ impl SilexApp {
             TableAction::Row(RowAction::Reorder(id, shift)) => self.shift_row(&id, shift)?,
             TableAction::Row(other) => self.apply(other)?,
             TableAction::AddProperty(kind, name) => {
-                self.add_property(kind, &name)?;
+                if kind == PropertyKind::Relation {
+                    self.relation_dialog = Some((database.to_owned(), name));
+                } else {
+                    self.add_property(kind, &name)?;
+                }
             }
             TableAction::RenameProperty(id, name) => {
                 let unchanged = self
@@ -798,11 +851,23 @@ impl SilexApp {
         let columns: f32 = state
             .columns
             .iter()
-            .map(|&i| column_width(state.properties[i].kind))
+            .map(|&i| {
+                state
+                    .config()
+                    .map_or(column_width(state.properties[i].kind), |c| {
+                        c.column_width(
+                            &state.properties[i].id,
+                            column_width(state.properties[i].kind),
+                        )
+                    })
+            })
             .sum();
         let visible = ui.available_width();
-        let name_width =
+        let default_name =
             (visible - SELECT_COLUMN_WIDTH - columns - ADD_COLUMN_WIDTH).max(NAME_MIN_WIDTH);
+        let name_width = state.config().map_or(default_name, |c| {
+            c.column_width(silex_desktop::view::NAME, default_name)
+        });
         let width = SELECT_COLUMN_WIDTH + name_width + columns + ADD_COLUMN_WIDTH;
         // A table wider than its room scrolls sideways in all but the last
         // ADD_COLUMN_WIDTH: there the rows' «⋯» stay in sight, over no cell.
@@ -953,6 +1018,10 @@ impl SilexApp {
             egui::vec2(name_width, rect.height()),
         );
         header_label(ui, name, icons::TEXT_AA, "Nombre");
+        if let Some(width) = super::column_resize::handle(ui, name, "name", name_width) {
+            actions.push(TableAction::ResizeColumn("name".into(), width, None));
+        }
+        let config = state.config().cloned().unwrap_or_default();
 
         let DatabaseState {
             properties,
@@ -973,7 +1042,10 @@ impl SilexApp {
             };
             let cell = egui::Rect::from_min_size(
                 egui::pos2(x, rect.top()),
-                egui::vec2(column_width(property.kind), rect.height()),
+                egui::vec2(
+                    config.column_width(&property.id, column_width(property.kind)),
+                    rect.height(),
+                ),
             );
             x = cell.right();
             let button = ui
@@ -986,6 +1058,14 @@ impl SilexApp {
             }
             header_label(ui, cell, property_icon(property.kind), &property.name);
             focus_ring(ui, cell, &button);
+            if let Some(width) = super::column_resize::handle(ui, cell, &property.id, cell.width())
+            {
+                actions.push(TableAction::ResizeColumn(
+                    property.id.clone(),
+                    width,
+                    Some(name_width),
+                ));
+            }
 
             let menu = property_menu_id(&property.id);
             let opening = button.clicked() && !egui::Popup::is_id_open(ui.ctx(), menu);
@@ -1082,6 +1162,7 @@ impl SilexApp {
     ) -> Option<f32> {
         let p = theme::current(ui.ctx());
         // Rows moved by hand (H13.1): only without a sort.
+        let config = state.config().cloned().unwrap_or_default();
         let sorted = state.sorted_by();
         let dragging = egui::DragAndDrop::payload::<RowDrag>(ui.ctx());
         let clip = ui.clip_rect();
@@ -1261,7 +1342,10 @@ impl SilexApp {
             for (column, property) in (1..).zip(shown.iter().filter_map(|&i| properties.get(i))) {
                 let rect = egui::Rect::from_min_size(
                     egui::pos2(x, rect.top()),
-                    egui::vec2(column_width(property.kind), rect.height()),
+                    egui::vec2(
+                        config.column_width(&property.id, column_width(property.kind)),
+                        rect.height(),
+                    ),
                 );
                 x = rect.right();
                 let cell = Cell {
@@ -1498,9 +1582,10 @@ impl PropertyMenu<'_> {
         }
         ui.add_space(theme::space::XS);
         menu_caption(ui, &format!("Tipo: {}", property.kind.label()));
-        if ui
-            .button((icons::icon(icons::ARROWS_DOWN_UP), " Cambiar tipo…"))
-            .clicked()
+        if property.kind != PropertyKind::Relation
+            && ui
+                .button((icons::icon(icons::ARROWS_DOWN_UP), " Cambiar tipo…"))
+                .clicked()
         {
             actions.push(TableAction::ChangeKind(property.id.clone()));
             ui.close();

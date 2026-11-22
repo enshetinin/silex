@@ -169,7 +169,9 @@ impl FilterOp {
             Some(PropertyKind::Date) => &[Is, Before, After, Empty, NotEmpty],
             Some(PropertyKind::Select) => &[Is, IsNot, Empty, NotEmpty],
             // One of its options (ADR 0018).
-            Some(PropertyKind::MultiSelect) => &[Contains, NotContains, Empty, NotEmpty],
+            Some(PropertyKind::MultiSelect | PropertyKind::Relation) => {
+                &[Contains, NotContains, Empty, NotEmpty]
+            }
             // By the day (H13.3); never empty.
             Some(PropertyKind::Created | PropertyKind::Edited) => &[Is, Before, After],
         }
@@ -286,6 +288,27 @@ impl ViewConfig {
         Value::Object(map).to_string()
     }
 
+    /// Column widths belong to the view, including the name column.
+    pub fn column_width(&self, property: &str, fallback: f32) -> f32 {
+        self.extra
+            .get("widths")
+            .and_then(|v| v.get(property))
+            .and_then(Value::as_u64)
+            .filter(|w| (80..=1200).contains(w))
+            .map_or(fallback, |w| w as f32)
+    }
+
+    pub fn set_column_width(&mut self, property: &str, width: f32) {
+        if !width.is_finite() {
+            return;
+        }
+        let widths = self.extra.entry("widths").or_insert_with(|| json!({}));
+        if !widths.is_object() {
+            *widths = json!({});
+        }
+        widths[property] = json!(width.clamp(80.0, 1200.0).round() as u32);
+    }
+
     pub fn is_hidden(&self, property: &str) -> bool {
         self.hidden.iter().any(|id| id == property)
     }
@@ -393,9 +416,11 @@ impl Filter {
             Some(PropertyKind::Date | PropertyKind::Created | PropertyKind::Edited) => {
                 Date::parse(&self.value).is_some()
             }
-            Some(PropertyKind::Select | PropertyKind::MultiSelect) => properties
-                .iter()
-                .any(|p| p.id == self.property && p.option(&self.value).is_some()),
+            Some(PropertyKind::Select | PropertyKind::MultiSelect | PropertyKind::Relation) => {
+                properties
+                    .iter()
+                    .any(|p| p.id == self.property && p.option(&self.value).is_some())
+            }
             Some(PropertyKind::Checkbox) => true,
         }
     }
@@ -468,10 +493,10 @@ impl Filter {
                     _ => true,
                 }
             }
-            Some(PropertyKind::MultiSelect) => {
+            Some(PropertyKind::MultiSelect | PropertyKind::Relation) => {
                 let has = matches!(
                     subject,
-                    Subject::Value(_, Some(CellValue::MultiSelect(ids))) if ids.contains(&self.value)
+                    Subject::Value(_, Some(CellValue::MultiSelect(ids) | CellValue::Relation(ids))) if ids.contains(&self.value)
                 );
                 match self.op {
                     Contains => has,
@@ -524,7 +549,8 @@ fn compare(a: Subject<'_>, b: Subject<'_>) -> Ordering {
             position(x).cmp(&position(y))
         }
         // By its first option, then the next ones (ADR 0018).
-        (Some(CellValue::MultiSelect(x)), Some(CellValue::MultiSelect(y))) => {
+        (Some(CellValue::MultiSelect(x)), Some(CellValue::MultiSelect(y)))
+        | (Some(CellValue::Relation(x)), Some(CellValue::Relation(y))) => {
             let positions = |ids: &[String]| -> Vec<Option<usize>> {
                 ids.iter()
                     .map(|id| property.options.iter().position(|o| o.id == *id))

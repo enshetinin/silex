@@ -24,7 +24,7 @@ pub(super) fn property_icon(kind: PropertyKind) -> &'static str {
         PropertyKind::Date => icons::CALENDAR,
         PropertyKind::Select => icons::CARET_CIRCLE_DOWN,
         PropertyKind::MultiSelect => icons::TAGS,
-        PropertyKind::Url => icons::LINK,
+        PropertyKind::Url | PropertyKind::Relation => icons::LINK,
         PropertyKind::Created => icons::CLOCK_PLUS,
         PropertyKind::Edited => icons::PENCIL_LINE,
     }
@@ -71,6 +71,7 @@ pub(super) enum CellAction {
     Commit(CellEdit),
     /// Say something in the notice bar (a URL that is not opened).
     Notice(String),
+    OpenRelated(String),
 }
 
 /// Where a cell is drawn and what it shows.
@@ -132,7 +133,9 @@ pub(super) fn property_cell(
         PropertyKind::Date => date_cell(ui, cell, editing, option_filter, actions),
         PropertyKind::Checkbox => checkbox_cell(ui, cell, actions),
         PropertyKind::Select => select_cell(ui, cell, editing, option_filter, actions),
-        PropertyKind::MultiSelect => multi_select_cell(ui, cell, editing, option_filter, actions),
+        PropertyKind::MultiSelect | PropertyKind::Relation => {
+            multi_select_cell(ui, cell, editing, option_filter, actions)
+        }
     }
 }
 
@@ -520,7 +523,11 @@ pub(super) fn multi_select_cell(
             let field = menu_field(
                 ui,
                 filter,
-                "Busca o crea una opción",
+                if cell.property.kind == PropertyKind::Relation {
+                    "Busca una entrada"
+                } else {
+                    "Busca o crea una opción"
+                },
                 &format!("Opciones de {}", cell.name()),
             );
             if opening {
@@ -543,11 +550,23 @@ pub(super) fn multi_select_cell(
             ui.add_space(theme::space::XS);
             for option in &matches {
                 let on = chosen.iter().any(|c| c.id == option.id);
-                if option_row(ui, option, on).clicked() {
-                    action = Some(toggle(option));
-                }
+                ui.horizontal(|ui| {
+                    if cell.property.kind == PropertyKind::Relation
+                        && ui
+                            .small_button("↗")
+                            .on_hover_text("Abrir entrada relacionada")
+                            .clicked()
+                    {
+                        actions.push(CellAction::OpenRelated(option.id.clone()));
+                        ui.close();
+                    }
+                    if option_row(ui, option, on).clicked() {
+                        action = Some(toggle(option));
+                    }
+                });
             }
-            if !typed.is_empty() && exact.is_none() {
+            if cell.property.kind != PropertyKind::Relation && !typed.is_empty() && exact.is_none()
+            {
                 let label = format!("Crear «{typed}»");
                 if ui
                     .button((icons::icon(icons::PLUS), format!(" {label}")))
@@ -557,11 +576,22 @@ pub(super) fn multi_select_cell(
                 }
             }
             if cell.property.options.is_empty() && typed.is_empty() {
-                menu_caption(ui, "Escribe para crear la primera opción.");
+                menu_caption(
+                    ui,
+                    if cell.property.kind == PropertyKind::Relation {
+                        "La base relacionada no tiene entradas disponibles."
+                    } else {
+                        "Escribe para crear la primera opción."
+                    },
+                );
             }
             // Enter adds or takes out the option with that name, else the
             // first match, else creates it; the search is cleared to go on.
-            if enter && action.is_none() && !typed.is_empty() {
+            if enter
+                && action.is_none()
+                && !typed.is_empty()
+                && (cell.property.kind != PropertyKind::Relation || !matches.is_empty())
+            {
                 action = Some(match exact.or(matches.first().copied()) {
                     Some(option) => toggle(option),
                     None => create(),
@@ -1093,6 +1123,7 @@ impl SilexApp {
                     name,
                 } => self.create_option(&row, &property, &name),
                 CellAction::Commit(edit) => self.commit_cell_edit(&edit),
+                CellAction::OpenRelated(id) => self.open_page(id),
                 CellAction::Notice(text) => {
                     self.notice = Some(text);
                     Ok(())
