@@ -40,6 +40,7 @@ pub(super) enum LinkState {
 #[derive(Debug, Clone, Default)]
 pub(super) struct LinkPicker {
     pub(super) query: String,
+    pub(super) databases_only: bool,
     pub(super) selected: usize,
     /// The link goes after this block (else at the end).
     pub(super) after: Option<String>,
@@ -495,7 +496,10 @@ impl SilexApp {
         // Blocks only go to pages (a database shows its table).
         let matches: Vec<Page> = picker_matches(&self.pages, &picker.query, exclude.as_deref())
             .into_iter()
-            .filter(|p| !moving || p.kind == PageKind::Page)
+            .filter(|p| {
+                (!moving || p.kind == PageKind::Page)
+                    && (!picker.databases_only || p.kind == PageKind::Database)
+            })
             .cloned()
             .collect();
         use egui::{Key, Modifiers as M};
@@ -515,7 +519,9 @@ impl SilexApp {
         let page_icons = &self.page_icons;
         let response = egui::Modal::new(egui::Id::unique("silex_link_picker")).show(ctx, |ui| {
             ui.set_width(460.0);
-            ui.heading(if moving {
+            ui.heading(if picker.databases_only {
+                "Enlazar una base de datos"
+            } else if moving {
                 "Mover a una página"
             } else {
                 "Enlazar a una página"
@@ -633,6 +639,8 @@ impl SilexApp {
         self.pending_focus = Some((link.id.clone(), 0));
         self.blocks.insert(at.min(self.blocks.len()), link);
         self.mark_dirty();
+        let result = self.save_now();
+        self.report(result);
     }
 }
 

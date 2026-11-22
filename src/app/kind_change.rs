@@ -177,7 +177,7 @@ impl SilexApp {
             menu_caption(ui, "Tipo nuevo");
             let chosen = dialog.to.as_ref().map(|(k, _)| *k);
             let mut first = true;
-            for kind in PropertyKind::ALL {
+            for kind in PropertyKind::ALL.into_iter().filter(|k| *k != PropertyKind::Relation) {
                 if kind == dialog.from {
                     continue;
                 }

@@ -439,6 +439,7 @@ pub enum SlashItem {
     Divider,
     /// A new database inside the page, with a card to it (H12.11).
     Database,
+    LinkedDatabase,
 }
 
 /// Words «Separador» answers to in the slash menu.
@@ -481,6 +482,9 @@ pub fn slash_items(query: &str) -> Vec<SlashItem> {
         .map(SlashItem::Kind)
         .collect();
     let folded = fold(query);
+    if ["vista", "enlazada"].iter().any(|w| w.starts_with(&folded)) {
+        items.push(SlashItem::LinkedDatabase);
+    }
     if DIVIDER_WORDS.iter().any(|w| w.starts_with(&folded)) {
         items.push(SlashItem::Divider);
     }

@@ -864,7 +864,7 @@ pub(super) fn slash_menu_ui(
     let p = theme::current(ui.ctx());
     // Text starts after the gutter; rows are ~30 px plus the header.
     let left = block.left() + GUTTER + ui.spacing().item_spacing.x;
-    let height = 44.0 + 30.0 * menu.matches.len() as f32;
+    let height = (44.0 + 30.0 * menu.matches.len() as f32).min(400.0);
     let screen = ui.ctx().content_rect();
     let below = screen.bottom() - block.bottom() >= height || block.top() - screen.top() < height;
     let (pivot, anchor) = if below {
@@ -893,28 +893,40 @@ pub(super) fn slash_menu_ui(
                             .small()
                             .color(p.text_muted),
                     );
-                    for (i, item) in menu.matches.iter().enumerate() {
-                        let (icon, label) = match item {
-                            editor::SlashItem::Kind(kind) => (kind_icon(*kind), kind.label()),
-                            editor::SlashItem::AttachFiles => {
-                                (icons::PAPERCLIP, "Adjuntar archivos…")
+                    egui::ScrollArea::vertical()
+                        .id_salt("slash-options")
+                        .max_height((screen.height() - 80.0).min(350.0))
+                        .show(ui, |ui| {
+                            for (i, item) in menu.matches.iter().enumerate() {
+                                let (icon, label) = match item {
+                                    editor::SlashItem::Kind(kind) => {
+                                        (kind_icon(*kind), kind.label())
+                                    }
+                                    editor::SlashItem::AttachFiles => {
+                                        (icons::PAPERCLIP, "Adjuntar archivos…")
+                                    }
+                                    editor::SlashItem::LinkPage => {
+                                        (icons::LINK, "Enlazar a una página…")
+                                    }
+                                    editor::SlashItem::Divider => (icons::MINUS, "Separador"),
+                                    editor::SlashItem::Database => (icons::TABLE, "Base de datos"),
+                                    editor::SlashItem::LinkedDatabase => {
+                                        (icons::TABLE, "Vista enlazada…")
+                                    }
+                                };
+                                let option = ui.add(egui::Button::selectable(
+                                    i == menu.selected,
+                                    (icons::icon(icon), format!("  {label}")),
+                                ));
+                                if i == menu.selected {
+                                    // Arrow keys can move past the visible part.
+                                    option.scroll_to_me(None);
+                                }
+                                if option.clicked() {
+                                    clicked = Some(*item);
+                                }
                             }
-                            editor::SlashItem::LinkPage => (icons::LINK, "Enlazar a una página…"),
-                            editor::SlashItem::Divider => (icons::MINUS, "Separador"),
-                            editor::SlashItem::Database => (icons::TABLE, "Base de datos"),
-                        };
-                        let option = ui.add(egui::Button::selectable(
-                            i == menu.selected,
-                            (icons::icon(icon), format!("  {label}")),
-                        ));
-                        if i == menu.selected {
-                            // Arrow keys can move past the visible part.
-                            option.scroll_to_me(None);
-                        }
-                        if option.clicked() {
-                            clicked = Some(*item);
-                        }
-                    }
+                        });
                 });
             });
         });
@@ -1403,13 +1415,18 @@ impl SilexApp {
             // empty, the files take its place.
             // «/enlace»: the text goes and the page picker opens; the link
             // takes the block's place if it was left empty.
-            EditorKey::Slash(editor::SlashItem::LinkPage) => {
+            EditorKey::Slash(
+                item @ (editor::SlashItem::LinkPage | editor::SlashItem::LinkedDatabase),
+            ) => {
                 self.slash = None;
                 let kind = self.blocks[index].kind;
                 let caret = editor::apply_slash(&mut self.blocks, index, cursor, kind);
                 let empty = self.blocks[index].content.trim().is_empty()
                     && self.blocks[index].kind == BlockKind::Paragraph;
                 self.open_link_picker(Some(block_id.clone()), empty.then(|| block_id.clone()));
+                if let Some(picker) = self.links.picker.as_mut() {
+                    picker.databases_only = item == editor::SlashItem::LinkedDatabase;
+                }
                 caret
             }
             // «/separador», or `---` typed in a paragraph (H12.2).
@@ -2228,6 +2245,20 @@ impl SilexApp {
                                 at,
                                 egui::vec2(ui.available_width(), 0.0),
                             ));
+                            continue;
+                        }
+                        if let Some(table) = self.inline_tables.get_mut(&block.id) {
+                            let (rect, actions, cells) = super::linked_tables::draw(
+                                ui,
+                                table,
+                                &block.id,
+                                selected.is_some_and(|(a, b)| (a..=b).contains(&index)),
+                            );
+                            rects.push(rect);
+                            if pointer.is_some_and(|p| rect.contains(p)) {
+                                hovered = Some(block.id.clone());
+                            }
+                            self.inline_actions.push((block.id.clone(), actions, cells));
                             continue;
                         }
                         let field = field_id(self.doc_generation, "block", &block.id);

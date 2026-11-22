@@ -9,7 +9,7 @@ use silex_desktop::db::{Database, backup};
 
 const SCHEMA_V1: &str = include_str!("../src/db/migrations/0001_init.sql");
 const SCHEMA_V2: &str = include_str!("../src/db/migrations/0002_favorites.sql");
-const LATEST: i64 = 15;
+const LATEST: i64 = 16;
 
 struct TempDir(PathBuf);
 
@@ -2025,6 +2025,89 @@ mod v15 {
             ViewKind::Calendar,
             &ViewConfig::default(),
         )?;
+        Ok(())
+    }
+}
+
+mod v16 {
+    use super::*;
+    use silex_desktop::property::CellValue;
+
+    fn write_v15(path: &Path) -> anyhow::Result<()> {
+        let conn = Connection::open(path)?;
+        for sql in [
+            SCHEMA_V1,
+            SCHEMA_V2,
+            include_str!("../src/db/migrations/0003_block_kinds.sql"),
+            include_str!("../src/db/migrations/0004_settings.sql"),
+            include_str!("../src/db/migrations/0005_databases.sql"),
+            include_str!("../src/db/migrations/0006_attachments.sql"),
+            include_str!("../src/db/migrations/0007_page_links.sql"),
+            include_str!("../src/db/migrations/0008_page_versions.sql"),
+            include_str!("../src/db/migrations/0009_templates.sql"),
+            include_str!("../src/db/migrations/0010_inline_marks.sql"),
+            include_str!("../src/db/migrations/0011_divider_callout.sql"),
+            include_str!("../src/db/migrations/0012_toggle.sql"),
+            include_str!("../src/db/migrations/0013_page_icon.sql"),
+            include_str!("../src/db/migrations/0014_property_kinds.sql"),
+            include_str!("../src/db/migrations/0015_view_kinds.sql"),
+        ] {
+            conn.execute_batch(sql)?;
+        }
+        conn.execute_batch("INSERT INTO pages (id,title,kind,sort_order) VALUES ('db','Tareas','database',0);
+            INSERT INTO pages (id,title,parent_id,sort_order) VALUES ('row','Una tarea','db',0);
+            INSERT INTO db_properties (id,database_id,name,kind,position) VALUES ('prop','db','Estado','multi_select',0);
+            INSERT INTO db_select_options (id,property_id,name,color,position) VALUES ('option','prop','Pendiente','blue',0);
+            INSERT INTO db_multi_values VALUES ('row','prop','option');
+            INSERT INTO db_views (id,database_id,name,kind,position,config) VALUES ('view','db','Tabla','table',0,'{\"widths\":{\"name\":330}}');
+            PRAGMA user_version = 15;")?;
+        Ok(())
+    }
+
+    #[test]
+    fn upgrade_from_v15_preserves_properties_options_and_values() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v15(&tmp.db())?;
+        let mut db = Database::open(tmp.db())?;
+        assert_eq!(db.schema_version()?, 16);
+        assert_eq!(
+            db.row_values("row")?["prop"],
+            CellValue::MultiSelect(vec!["option".into()])
+        );
+        assert_eq!(
+            db.database_properties("db")?[0].options[0].name,
+            "Pendiente"
+        );
+        assert_eq!(
+            db.database_views("db")?[0]
+                .config
+                .column_width("name", 100.0),
+            330.0
+        );
+        let target = db.create_database("Proyectos", None)?;
+        db.add_relation("db", "Proyecto", &target)?;
+        assert!(!backup::list_backups(&backup::backups_dir(&tmp.db()))?.is_empty());
+        backup::verify_backup(&tmp.db())?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_v16_migration_rolls_back_the_rebuilt_properties() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        write_v15(&tmp.db())?;
+        Connection::open(tmp.db())?.execute_batch("CREATE TABLE db_relations (occupied);")?;
+        assert!(Database::open(tmp.db()).is_err());
+        let conn = Connection::open(tmp.db())?;
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?,
+            15
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM db_multi_values", [], |r| r
+                .get::<_, i64>(0))?,
+            1
+        );
+        assert!(conn.execute("INSERT INTO db_properties (id,database_id,name,kind,position) VALUES ('r','db','R','relation',1)",[]).is_err());
         Ok(())
     }
 }

@@ -25,6 +25,7 @@ use crate::versions::{self, VersionBlocks, VersionInfo};
 use crate::view::{TablePreview, ViewConfig, table_preview};
 
 pub mod backup;
+mod relations;
 
 /// Published migrations, in order. Never edit one that has shipped: add a new file.
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -43,6 +44,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (13, include_str!("db/migrations/0013_page_icon.sql")),
     (14, include_str!("db/migrations/0014_property_kinds.sql")),
     (15, include_str!("db/migrations/0015_view_kinds.sql")),
+    (16, include_str!("db/migrations/0016_linked_databases.sql")),
 ];
 const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
@@ -1270,6 +1272,10 @@ impl Database {
         name: &str,
         kind: PropertyKind,
     ) -> Result<String> {
+        ensure!(
+            kind != PropertyKind::Relation,
+            "Elige una base de datos para la relación"
+        );
         let tx = self.conn.transaction()?;
         ensure!(
             page_kind(&tx, database_id)? == Some(PageKind::Database),
@@ -1447,6 +1453,7 @@ impl Database {
                 .or_default()
                 .insert(property, CellValue::MultiSelect(ids));
         }
+        relations::read_relation_values(&self.conn, database_id, &mut values)?;
         // «Creado» and «Editado» (H13.3), from the rows' pages.
         let times = read_times(
             &self.conn,
@@ -1670,6 +1677,13 @@ impl Database {
         )?;
         for ((_, property), ids) in multi {
             values.insert(property, CellValue::MultiSelect(ids));
+        }
+        if let Some(page) = self.get_page(row_id)?
+            && let Some(parent) = page.parent_id
+        {
+            let mut related = TableValues::new();
+            relations::read_relation_values(&self.conn, &parent, &mut related)?;
+            values.extend(related.remove(row_id).unwrap_or_default());
         }
         values.extend(self.row_times(row_id)?);
         Ok(values)
@@ -2886,6 +2900,7 @@ fn read_properties(
             color: OptionColor::parse(&color).unwrap_or(OptionColor::Gray),
         });
     }
+    relations::read_relation_options(conn, database_id, &mut options)?;
     let mut stmt = conn.prepare(sql)?;
     let mut rows = stmt.query([database_id])?;
     let mut properties = Vec::new();
@@ -3027,6 +3042,10 @@ fn plan_kind_change(conn: &Connection, id: &str, to: PropertyKind) -> Result<Kin
         .find(|p| p.id == id)
         .context("La propiedad es de un tipo que esta versión no conoce")?;
     let from = property.kind;
+    ensure!(
+        from != PropertyKind::Relation && to != PropertyKind::Relation,
+        "Las relaciones se crean con su base de destino y no cambian de tipo"
+    );
     ensure!(from != to, "La propiedad ya es de tipo «{}»", to.label());
     // The cells as they read now, and what the column of the new type
     // already holds.
@@ -3364,6 +3383,9 @@ fn write_value(
             kind.label()
         );
     }
+    if kind == PropertyKind::Relation {
+        return relations::write_relation(tx, clock, row_id, property_id, value);
+    }
     // The row was edited (H13.3).
     touch_page(tx, clock, row_id)?;
     // A multi-select's options are rows of their own (ADR 0018).
@@ -3417,7 +3439,9 @@ fn write_value(
                     ensure!(belongs, "La opción no es de esta propiedad");
                     option = Some(id.as_str());
                 }
-                CellValue::MultiSelect(_) => bail!("La selección múltiple se escribe aparte"),
+                CellValue::MultiSelect(_) | CellValue::Relation(_) => {
+                    bail!("La selección múltiple se escribe aparte")
+                }
                 // Rejected above with the property's kind.
                 CellValue::Created(_) | CellValue::Edited(_) => {
                     bail!("La fecha de creación o edición no se escribe")
@@ -3849,6 +3873,13 @@ fn copy_page_tree(
             ],
         )?;
     }
+    let related: Vec<(String, String)> = tx
+        .prepare("SELECT property_id, target_page_id FROM db_relation_values WHERE page_id = ?1")?
+        .query_map([from], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (property, target) in related {
+        tx.execute("INSERT INTO db_relation_values (page_id, property_id, target_page_id) VALUES (?1, ?2, ?3)", params![id, mapped(&property), target])?;
+    }
     // A row's multi-select cells (ADR 0018).
     let chosen: Vec<(String, String)> = tx
         .prepare("SELECT property_id, option_id FROM db_multi_values WHERE page_id = ?1")?
@@ -3916,6 +3947,11 @@ fn copy_schema(
             )?;
             ids.insert(old_option, new_option);
         }
+        tx.execute(
+            "INSERT INTO db_relations (property_id, target_database_id)
+            SELECT ?2, target_database_id FROM db_relations WHERE property_id = ?1",
+            params![old, new],
+        )?;
         ids.insert(old, new);
     }
     let views: Vec<(String, String, i64, String)> = tx
@@ -3964,8 +4000,9 @@ fn copy_blocks(tx: &Connection, from: &str, to: &str, today: Option<&str>) -> Re
             }
             _ => (block.content.clone(), block.marks.clone()),
         };
+        let copied_block = Uuid::new_v4().to_string();
         insert.execute(params![
-            Uuid::new_v4().to_string(),
+            copied_block,
             to,
             block.kind.as_str(),
             content,
@@ -3976,6 +4013,11 @@ fn copy_blocks(tx: &Connection, from: &str, to: &str, today: Option<&str>) -> Re
             block.link,
             marks::to_json(&marks)
         ])?;
+        tx.execute(
+            "INSERT INTO db_linked_views (block_id, database_id, config)
+            SELECT ?2, database_id, config FROM db_linked_views WHERE block_id = ?1",
+            params![block.id, copied_block],
+        )?;
     }
     Ok(())
 }

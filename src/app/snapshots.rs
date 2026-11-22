@@ -2961,7 +2961,7 @@ fn the_database_card_is_a_link_named_with_its_rows() -> anyhow::Result<()> {
     let mut harness = a11y_harness(app);
     harness.run();
     assert_accessible(&harness, "database card");
-    let card = harness.get_by_label("Base de datos «Lecturas», 7 filas. Abrir");
+    let card = harness.get_by_label("Abrir base de datos");
     card.click();
     harness.run();
     let app = harness.state();
@@ -5251,5 +5251,166 @@ fn database_gallery() -> anyhow::Result<()> {
         .build_ui_state(|ui, app: &mut SilexApp| app.update_ui(ui), app);
     harness.run();
     harness.snapshot("database_gallery_light");
+    Ok(())
+}
+
+#[test]
+fn inline_tables_add_edit_and_undo_without_leaving_the_page() -> anyhow::Result<()> {
+    let app = database_card_app()?;
+    let host = app.selected.clone();
+    let mut harness = a11y_harness(app);
+    let base = harness
+        .state()
+        .inline_tables
+        .values()
+        .next()
+        .expect("inline table")
+        .id
+        .clone();
+    click_button(&mut harness, "+ Nueva fila");
+    harness.run();
+    assert_eq!(harness.state().selected, host);
+    assert_eq!(harness.state().db.database_rows(&base)?.len(), 8);
+    harness.event(egui::Event::Text("Libro nuevo".into()));
+    harness.run();
+    // Leaving the text field commits its name.
+    click_button(&mut harness, "Columnas");
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .db
+            .database_rows(&base)?
+            .iter()
+            .any(|r| r.title == "Libro nuevo")
+    );
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    let block = harness
+        .state()
+        .inline_tables
+        .keys()
+        .next()
+        .expect("inline")
+        .clone();
+    harness.state_mut().inline_actions.push((
+        block.clone(),
+        vec![super::TableAction::Undo],
+        vec![],
+    ));
+    harness.state_mut().apply_inline_actions();
+    assert!(
+        !harness
+            .state()
+            .db
+            .database_rows(&base)?
+            .iter()
+            .any(|r| r.title == "Libro nuevo")
+    );
+    harness
+        .state_mut()
+        .inline_actions
+        .push((block, vec![super::TableAction::Undo], vec![]));
+    harness.state_mut().apply_inline_actions();
+    assert_eq!(harness.state().db.database_rows(&base)?.len(), 7);
+    assert_eq!(harness.state().selected, host);
+    Ok(())
+}
+
+#[test]
+fn database_column_resize_persists_and_keeps_cells_aligned() -> anyhow::Result<()> {
+    let (app, base, _) = database_app()?;
+    let mut harness = a11y_harness(app);
+    let handle = harness
+        .get_by_label("Ajustar ancho de name")
+        .rect()
+        .center();
+    let before = harness
+        .state()
+        .database
+        .as_ref()
+        .expect("table")
+        .config()
+        .expect("view")
+        .column_width("name", 240.0);
+    harness.hover_at(handle);
+    harness.run();
+    harness.drag_at(handle);
+    harness.run();
+    for step in 1..=4 {
+        harness.hover_at(handle + egui::vec2(step as f32 * 20.0, 0.0));
+        harness.run();
+    }
+    harness.drop_at(handle + egui::vec2(80.0, 0.0));
+    harness.run();
+    let state = harness.state().database.as_ref().expect("table");
+    let width = state.config().expect("view").column_width("name", 240.0);
+    assert!(width > before + 40.0, "{before} -> {width}");
+    assert_eq!(
+        harness.state().db.database_views(&base)?[0]
+            .config
+            .column_width("name", 240.0),
+        width
+    );
+    Ok(())
+}
+
+#[test]
+fn linked_column_resize_tracks_the_press_point_and_saves_on_release() -> anyhow::Result<()> {
+    let mut h = a11y_harness(database_card_app()?);
+    let (block, table) = h.state().inline_tables.iter().next().expect("linked table");
+    let (block, base) = (block.clone(), table.id.clone());
+    let read_width = |h: &Harness<'_, SilexApp>| -> anyhow::Result<f32> {
+        Ok(h.state()
+            .db
+            .linked_view_config(&block, &base)?
+            .column_width("name", 206.0))
+    };
+    let start = h.get_by_label("Ajustar ancho de name").rect().center();
+    h.drag_at(start);
+    h.run();
+    // Cross the minimum and return: the handle only follows once the
+    // pointer comes back inside the permitted range.
+    for dx in [-150.0, -135.0, -110.0, 35.0] {
+        h.hover_at(start + egui::vec2(dx, 0.0));
+        h.run();
+        let x = h.get_by_label("Ajustar ancho de name").rect().center().x;
+        assert!(
+            (x - start.x - dx.max(80.0 - 206.0)).abs() < 1.1,
+            "offset {dx}, got {}",
+            x - start.x
+        );
+        assert_eq!(read_width(&h)?, 206.0);
+    }
+    h.drop_at(start + egui::vec2(35.0, 0.0));
+    h.run();
+    assert_eq!(read_width(&h)?, 241.0);
+    Ok(())
+}
+
+#[test]
+fn resizing_a_property_keeps_the_name_column_in_place() -> anyhow::Result<()> {
+    use silex_desktop::property::PropertyKind;
+    let mut app = demo_app()?;
+    let base = app.db.create_database("Una columna", None)?;
+    let prop = app.db.add_property(&base, "Nota", PropertyKind::Number)?;
+    app.open_page(base)?;
+    let mut h = a11y_harness(app);
+    let handle = |h: &Harness<'_, SilexApp>, id: &str| {
+        h.get_by_label(&format!("Ajustar ancho de {id}"))
+            .rect()
+            .center()
+    };
+    let name = handle(&h, "name");
+    let start = handle(&h, &prop);
+    h.drag_at(start);
+    h.run();
+    let end = start - egui::vec2(20.0, 0.0);
+    h.hover_at(end);
+    h.run();
+    h.drop_at(end);
+    h.run();
+    assert!((handle(&h, "name").x - name.x).abs() < 1.1);
+    assert!((handle(&h, &prop).x - end.x).abs() < 1.1);
     Ok(())
 }

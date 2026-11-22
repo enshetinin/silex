@@ -18,6 +18,7 @@ mod board;
 mod calendar;
 mod cells;
 mod collection;
+mod column_resize;
 mod compare;
 mod database;
 mod database_card;
@@ -35,6 +36,7 @@ mod inline;
 mod jobs;
 mod journal;
 mod kind_change;
+mod linked_tables;
 mod links;
 mod move_blocks;
 mod outline;
@@ -42,6 +44,7 @@ mod page_history;
 mod palette;
 mod privacy;
 mod read_only;
+mod relations;
 mod row_order;
 mod row_page;
 mod row_selection;
@@ -102,6 +105,9 @@ pub struct SilexApp {
     graph: Option<graph::Graph>,
     /// The open page's rows and views, when it is a database (ADR 0006).
     database: Option<DatabaseState>,
+    inline_tables: std::collections::HashMap<String, DatabaseState>,
+    inline_actions: Vec<(String, Vec<TableAction>, Vec<CellAction>)>,
+    relation_dialog: Option<(String, String)>,
     /// The open page's properties, when it is a row of a database.
     row_page: Option<RowPage>,
     /// The view last open in each database (database id → view id), as
@@ -352,6 +358,9 @@ impl SilexApp {
             search: None,
             graph: None,
             database: None,
+            inline_tables: std::collections::HashMap::new(),
+            inline_actions: Vec::new(),
+            relation_dialog: None,
             row_page: None,
             last_views: std::collections::HashMap::new(),
             shortcuts_dialog: false,
@@ -543,6 +552,7 @@ impl SilexApp {
         let page = self.db.get_page(&id)?;
         let found = page.is_some();
         if let Some(page) = page {
+            self.inline_tables.clear();
             self.slash = None;
             self.slash_dismissed = None;
             self.selection = None;
@@ -818,16 +828,9 @@ impl SilexApp {
         self.mark_dirty();
         self.save_now()?;
         self.load_links()?;
-        self.create_database_opened(&open, base)
-    }
-
-    /// Shows database `id`, just made inside `parent`, with its name to write.
-    fn create_database_opened(&mut self, parent: &str, id: String) -> Result<()> {
-        self.expanded.insert(parent.to_owned());
+        self.expanded.insert(open);
         self.reload_pages()?;
-        self.open_page(id)?;
-        self.focus_title = true;
-        Ok(())
+        self.prepare_inline_tables()
     }
 
     fn create_root_page(&mut self, title: &str) -> Result<()> {
@@ -873,7 +876,8 @@ impl SilexApp {
         let find_dialog = self.links.picker.is_some()
             || self.page_history.is_some()
             || self.templates.picker.is_some()
-            || self.icon_picker.is_some();
+            || self.icon_picker.is_some()
+            || self.relation_dialog.is_some();
         if !find_dialog {
             if pressed(replace_shortcut(ctx)) || pressed(Sc::new(M::COMMAND | M::ALT, Key::F)) {
                 self.open_find(ctx, true);
@@ -886,7 +890,8 @@ impl SilexApp {
         let dialog = self.links.picker.is_some()
             || self.page_history.is_some()
             || self.templates.picker.is_some()
-            || self.icon_picker.is_some();
+            || self.icon_picker.is_some()
+            || self.relation_dialog.is_some();
         if !dialog && pressed(Sc::new(M::COMMAND, Key::T)) {
             self.open_search(ctx);
             if let Some(window) = &mut self.search {
@@ -1098,6 +1103,7 @@ impl SilexApp {
             && self.templates.picker.is_none()
             && self.icon_picker.is_none()
             && self.link_edit.is_none()
+            && self.relation_dialog.is_none()
         {
             self.take_pasted_image(&ctx);
             self.find_keys(&ctx);
@@ -1105,7 +1111,10 @@ impl SilexApp {
             self.apply_pending_focus(&ctx);
             self.handle_selection_keys(&ctx);
         }
+        let prepared = self.prepare_inline_tables();
+        self.report(prepared);
         self.layout(ui);
+        self.apply_inline_actions();
         self.paste_marks = None;
         self.link_edit_ui(&ctx);
         self.run_paste(&ctx);
@@ -1151,6 +1160,7 @@ impl SilexApp {
         self.duplicate_dialog(&ctx);
         self.free_space_dialog(&ctx);
         self.link_picker(&ctx);
+        self.relation_dialog_ui(&ctx);
         self.icon_picker(&ctx);
         self.link_restore_dialog(&ctx);
         self.template_picker(&ctx);

@@ -1739,7 +1739,10 @@ fn database_scale_smoke() -> anyhow::Result<()> {
         let base = db.create_database("Grande", None)?;
         let mut properties = Vec::new();
         for round in 0..2 {
-            for kind in PropertyKind::ALL {
+            for kind in PropertyKind::ALL
+                .into_iter()
+                .filter(|k| *k != PropertyKind::Relation)
+            {
                 let id = db.add_property(&base, &format!("{} {round}", kind.label()), kind)?;
                 let option = if kind.has_options() {
                     Some(db.add_select_option(&id, "Hecho", OptionColor::Green)?)
@@ -1764,7 +1767,9 @@ fn database_scale_smoke() -> anyhow::Result<()> {
                     }
                     PropertyKind::Url => Some(CellValue::Url(format!("https://a.es/{i}"))),
                     // Read from the row's page; never written.
-                    PropertyKind::Created | PropertyKind::Edited => continue,
+                    PropertyKind::Created | PropertyKind::Edited | PropertyKind::Relation => {
+                        continue;
+                    }
                 };
                 db.set_value(&row, property, value.as_ref())?;
             }
@@ -3453,13 +3458,17 @@ fn slash_base_de_datos_makes_one_inside_the_page_with_a_card() -> anyhow::Result
     assert_eq!(menu.matches, [SlashItem::Database]);
     app_frame(&mut app, &ctx, vec![key(Key::Enter, M::NONE)]);
     app_frame(&mut app, &ctx, vec![]);
-    // The database opens, inside «Diario», to be named.
-    let base = app.selected.clone().expect("something open");
-    assert_ne!(base, diario);
+    // The database stays editable inside «Diario».
+    assert_eq!(app.selected.as_deref(), Some(diario.as_str()));
+    let base = app
+        .blocks
+        .iter()
+        .find_map(|b| b.link.clone())
+        .expect("database linked");
     let page = app.db.get_page(&base)?.expect("made");
     assert_eq!(page.kind, PageKind::Database);
     assert_eq!(page.parent_id.as_deref(), Some(diario.as_str()));
-    assert!(app.database.is_some(), "its table is shown");
+    assert!(!app.inline_tables.is_empty(), "its inline table is shown");
     assert!(app.expanded.contains(&diario), "seen in the sidebar");
     // «Diario» has a card to it in the empty block's place, saved.
     let blocks = app.db.list_blocks(&diario)?;
@@ -3478,7 +3487,10 @@ fn slash_base_de_datos_makes_one_inside_the_page_with_a_card() -> anyhow::Result
     app.open_page(diario.clone())?;
     app.reload_pages()?;
     let painted = app_frame(&mut app, &ctx, vec![]);
-    assert!(painted.iter().any(|t| t == "Lecturas"), "{painted:?}");
+    assert!(
+        painted.iter().any(|t| t.contains("Lecturas")),
+        "{painted:?}"
+    );
     Ok(())
 }
 

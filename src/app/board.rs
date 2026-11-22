@@ -801,7 +801,7 @@ pub(super) fn paint_value(
                 paint_tag_on(ui, painter, at, option, width);
             }
         }
-        CellValue::MultiSelect(ids) => {
+        CellValue::MultiSelect(ids) | CellValue::Relation(ids) => {
             let options: Vec<&SelectOption> = property
                 .options
                 .iter()

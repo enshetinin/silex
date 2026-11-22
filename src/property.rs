@@ -22,11 +22,13 @@ pub enum PropertyKind {
     Created,
     /// When the row was last edited: read only, from its page (H13.3).
     Edited,
+    /// References to rows in another database.
+    Relation,
 }
 
 impl PropertyKind {
     /// Menu order.
-    pub const ALL: [PropertyKind; 9] = [
+    pub const ALL: [PropertyKind; 10] = [
         PropertyKind::Text,
         PropertyKind::Number,
         PropertyKind::Checkbox,
@@ -36,6 +38,7 @@ impl PropertyKind {
         PropertyKind::Url,
         PropertyKind::Created,
         PropertyKind::Edited,
+        PropertyKind::Relation,
     ];
 
     /// Name stored in SQLite (must match the CHECK in migrations 0005 and
@@ -51,6 +54,7 @@ impl PropertyKind {
             PropertyKind::Url => "url",
             PropertyKind::Created => "created",
             PropertyKind::Edited => "edited",
+            PropertyKind::Relation => "relation",
         }
     }
 
@@ -81,6 +85,7 @@ impl PropertyKind {
             PropertyKind::Url => "URL",
             PropertyKind::Created => "Creado",
             PropertyKind::Edited => "Editado",
+            PropertyKind::Relation => "Relación",
         }
     }
 }
@@ -503,6 +508,7 @@ pub enum CellValue {
     /// Ids of the property's options, in the property's order (ADR 0018).
     /// No ids is an empty cell.
     MultiSelect(Vec<String>),
+    Relation(Vec<String>),
     /// What was typed: a web address if [`CellValue::web_url`] says so.
     Url(String),
     /// Read from the row's page, never stored (H13.3).
@@ -519,6 +525,7 @@ impl CellValue {
             CellValue::Date(_) => PropertyKind::Date,
             CellValue::Select(_) => PropertyKind::Select,
             CellValue::MultiSelect(_) => PropertyKind::MultiSelect,
+            CellValue::Relation(_) => PropertyKind::Relation,
             CellValue::Url(_) => PropertyKind::Url,
             CellValue::Created(_) => PropertyKind::Created,
             CellValue::Edited(_) => PropertyKind::Edited,
@@ -531,7 +538,7 @@ impl CellValue {
         match self {
             CellValue::Text(text) | CellValue::Url(text) => text.is_empty(),
             CellValue::Checkbox(on) => !on,
-            CellValue::MultiSelect(ids) => ids.is_empty(),
+            CellValue::MultiSelect(ids) | CellValue::Relation(ids) => ids.is_empty(),
             _ => false,
         }
     }
@@ -557,7 +564,7 @@ impl CellValue {
     /// The options of a multi-select (none for any other value or none).
     pub fn option_ids(value: Option<&CellValue>) -> &[String] {
         match value {
-            Some(CellValue::MultiSelect(ids)) => ids,
+            Some(CellValue::MultiSelect(ids) | CellValue::Relation(ids)) => ids,
             _ => &[],
         }
     }
@@ -594,7 +601,11 @@ impl CellValue {
             .filter(|o| ids.contains(&o.id))
             .map(|o| o.id.clone())
             .collect();
-        (!ids.is_empty()).then_some(CellValue::MultiSelect(ids))
+        (!ids.is_empty()).then_some(if property.kind == PropertyKind::Relation {
+            CellValue::Relation(ids)
+        } else {
+            CellValue::MultiSelect(ids)
+        })
     }
 
     /// The value read from the `db_values` columns for a property of
@@ -617,7 +628,7 @@ impl CellValue {
             PropertyKind::Select => CellValue::Select(option?),
             PropertyKind::Url => CellValue::Url(text?),
             // Not in `db_values` (ADR 0018): read from `db_multi_values`.
-            PropertyKind::MultiSelect => return None,
+            PropertyKind::MultiSelect | PropertyKind::Relation => return None,
             // Not stored: read from the row's page.
             PropertyKind::Created | PropertyKind::Edited => return None,
         };
@@ -638,7 +649,7 @@ impl CellValue {
                 .map(|o| o.name.clone())
                 .unwrap_or_default(),
             // «Novela, Cuento», in the property's order.
-            CellValue::MultiSelect(ids) => property
+            CellValue::MultiSelect(ids) | CellValue::Relation(ids) => property
                 .options
                 .iter()
                 .filter(|o| ids.contains(&o.id))
@@ -679,7 +690,10 @@ pub fn parse_input(kind: PropertyKind, input: &str) -> Result<Option<CellValue>,
             let url = normalize_url(typed).unwrap_or_else(|| typed.to_owned());
             Ok(Some(CellValue::Url(url)))
         }
-        PropertyKind::Checkbox | PropertyKind::Select | PropertyKind::MultiSelect => Err(format!(
+        PropertyKind::Checkbox
+        | PropertyKind::Select
+        | PropertyKind::MultiSelect
+        | PropertyKind::Relation => Err(format!(
             "Una {} no se escribe.",
             kind.label().to_lowercase()
         )),
@@ -768,7 +782,7 @@ pub fn convert(value: &CellValue, from: &Property, to: PropertyKind) -> Option<C
             CellValue::Text(_) | CellValue::Url(_) => named(text.split(',')),
             _ => named([text.as_str()]),
         },
-        PropertyKind::Created | PropertyKind::Edited => None,
+        PropertyKind::Created | PropertyKind::Edited | PropertyKind::Relation => None,
     }
 }
 

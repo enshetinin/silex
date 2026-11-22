@@ -195,7 +195,7 @@ pub(super) fn database_card(
                     let center = egui::pos2(cell.left() + CELL_PAD + 8.0, cell.center().y);
                     paint_check_box(ui, center, on, &response);
                 }
-                (_, Some(CellValue::MultiSelect(ids))) => {
+                (_, Some(CellValue::MultiSelect(ids) | CellValue::Relation(ids))) => {
                     let options: Vec<_> = property
                         .options
                         .iter()

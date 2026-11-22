@@ -585,10 +585,11 @@ fn a_duplicated_file_block_shares_its_attachment() {
 fn the_slash_menu_offers_attaching_files() {
     use silex_desktop::editor::{SlashItem, slash_items};
     let all = slash_items("");
-    assert_eq!(all.len(), BlockKind::ALL.len() + 4);
+    assert_eq!(all.len(), BlockKind::ALL.len() + 5);
     assert_eq!(
         all[BlockKind::ALL.len()..],
         [
+            SlashItem::LinkedDatabase,
             SlashItem::Divider,
             SlashItem::Database,
             SlashItem::LinkPage,

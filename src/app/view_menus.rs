@@ -543,7 +543,7 @@ fn filter_value(
 ) -> bool {
     let p = theme::current(ui.ctx());
     let mut changed = false;
-    if kind.is_some_and(PropertyKind::has_options) {
+    if kind.is_some_and(|k| k.has_options() || k == PropertyKind::Relation) {
         let options = properties
             .iter()
             .find(|p| p.id == filter.property)
