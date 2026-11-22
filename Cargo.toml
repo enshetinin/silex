@@ -31,7 +31,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # Adds only rfd and pollster to Cargo.lock. On Linux it talks to the desktop
 # portal through libdbus opened at run time (dlopen), and Wayland is already
 # dlopen'ed by eframe: the packages need no new system library.
-rfd = "0.17.2"
+rfd = "0.18.0"
 
 
 [target.'cfg(windows)'.build-dependencies]
